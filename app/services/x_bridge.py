@@ -11,6 +11,7 @@ import time
 import atexit
 import signal
 import subprocess
+import threading
 import requests
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -28,7 +29,23 @@ _HEADERS = {
 }
 
 _process: Optional[subprocess.Popen] = None
-API_TIMEOUT = 600  # 10 دقائق — الـ Playwright يحتاج وقت
+_log_fh = None  # مقبض ملف سجل السيرفر الابن (نمنع تجمّده على أنبوب غير مقروء)
+XSUITE_LOG = XSUITE_DIR / "xsuite_server.log"
+API_TIMEOUT = 180  # مهلة معقولة لعمليات playwright؛ تضمن عدم حجب الـworker للأبد
+
+# ─── قفل المتصفح العام ───────────────────────────────────────
+# playwright (sync API) غير آمن للاستخدام المتزامن عبر عدة خيوط، وسيرفر app/x
+# ينفّذ عملية متصفح واحدة في كل مرة. نُسلسل كل عمليات المتصفح (نشر/تفاعل عبر
+# السيرفر + قراءة التايملاين داخل الـbackend) بقفل واحد مشترك حتى لا تتزامن
+# جلستان وتتجمّد. القراءات الخفيفة (stats/cookies) لا تأخذ القفل.
+browser_lock = threading.RLock()
+
+# المسارات التي تشغّل متصفح playwright في السيرفر (تحتاج تسلسلاً)
+_BROWSER_ENDPOINTS = (
+    "/api/post", "/api/post-thread", "/api/quote", "/api/reply", "/api/repost",
+    "/api/like", "/api/follow", "/api/unfollow", "/api/bookmark",
+    "/api/delete-tweet", "/api/profile/update",
+)
 
 
 # ─── إدارة السيرفر ─────────────────────────────────────────
@@ -123,6 +140,12 @@ def start_xsuite_server() -> bool:
             _process.kill()
         _process = None
 
+    # حرّر البورت من أي عملية عالقة/أجنبية لا تستجيب: خادم متجمّد (لا يرد على
+    # /api/stats) يظهر كـ"غير شغّال" فلا يُقتل تلقائياً، ثم يفشل الخادم الجديد في
+    # الارتباط بالبورت المشغول. لذا نقتل أي مستمع على البورت قبل التشغيل.
+    _kill_process_on_port(XSUITE_PORT)
+    time.sleep(1)
+
     print(f"[X-Bridge] تشغيل سيرفر app/x على بورت {XSUITE_PORT} ...")
 
     python_exe = sys.executable
@@ -130,13 +153,29 @@ def start_xsuite_server() -> bool:
 
     env = os.environ.copy()
     env["PORT"] = str(XSUITE_PORT)
+    # امنع تعطّل السيرفر عند طباعة رموز (مثل ✅) على ويندوز حين يكون stdout
+    # موجّهاً لأنبوب (PIPE) بترميز cp1252 — أجبر UTF-8 في العملية الابنة.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
 
     try:
+        # مهم جداً: لا نوجّه stdout إلى PIPE غير مقروء. أنبوب النظام محدود
+        # (~64KB) وحين يمتلئ تتجمّد العملية الابنة عند أول print أثناء معالجة
+        # طلب (النشر يطبع سطور DEBUG كثيرة) فلا يعود الطلب أبداً ويفشل العميل
+        # بمهلة 180s. نوجّه المخرجات إلى ملف سجل لا يُحجب أبداً.
+        global _log_fh
+        try:
+            if _log_fh and not _log_fh.closed:
+                _log_fh.close()
+        except Exception:
+            pass
+        _log_fh = open(XSUITE_LOG, "w", encoding="utf-8", errors="ignore")
+
         _process = subprocess.Popen(
             [python_exe, app_py],
             cwd=str(XSUITE_DIR),
             env=env,
-            stdout=subprocess.PIPE,
+            stdout=_log_fh,
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
@@ -149,7 +188,12 @@ def start_xsuite_server() -> bool:
                 print(f"[X-Bridge] ✅ سيرفر app/x جاهز على بورت {XSUITE_PORT}")
                 return True
             if _process.poll() is not None:
-                out = _process.stdout.read().decode(errors="ignore")[:500]
+                out = ""
+                try:
+                    _log_fh.flush()
+                    out = XSUITE_LOG.read_text(encoding="utf-8", errors="ignore")[-500:]
+                except Exception:
+                    pass
                 print(f"[X-Bridge] ❌ سيرفر app/x توقف مبكراً:\n{out}")
                 return False
 
@@ -163,7 +207,7 @@ def start_xsuite_server() -> bool:
 
 def stop_xsuite_server():
     """إيقاف سيرفر app/x"""
-    global _process
+    global _process, _log_fh
     if _process and _process.poll() is None:
         print("[X-Bridge] إيقاف سيرفر app/x ...")
         try:
@@ -175,12 +219,21 @@ def stop_xsuite_server():
         except Exception:
             _process.kill()
         _process = None
+    # أغلق مقبض ملف السجل لتفادي تسريب الملفات
+    try:
+        if _log_fh and not _log_fh.closed:
+            _log_fh.close()
+    except Exception:
+        pass
+    _log_fh = None
 
 
 # ─── LoginX سيرفر ──────────────────────────────────────────
 LOGINX_PORT = int(os.getenv("LOGINX_PORT", "5000"))
 LOGINX_DIR = XSUITE_DIR / "loginx"   # app/x/loginx
 _loginx_process: Optional[subprocess.Popen] = None
+_loginx_log_fh = None
+LOGINX_LOG = XSUITE_DIR / "loginx_server.log"
 
 
 def _is_loginx_running() -> bool:
@@ -217,21 +270,39 @@ def start_loginx_server() -> bool:
 
     python_exe = sys.executable
     env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
 
     try:
         print(f"[X-Bridge] loginx path: {loginx_app}")
         print(f"[X-Bridge] loginx dir: {LOGINX_DIR}")
         print(f"[X-Bridge] python exe: {python_exe}")
 
+        # نفس علاج تجمّد الأنبوب: وجّه المخرجات إلى ملف سجل بدل PIPE غير مقروء.
+        global _loginx_log_fh
+        try:
+            if _loginx_log_fh and not _loginx_log_fh.closed:
+                _loginx_log_fh.close()
+        except Exception:
+            pass
+        _loginx_log_fh = open(LOGINX_LOG, "w", encoding="utf-8", errors="ignore")
+
         _loginx_process = subprocess.Popen(
             [python_exe, str(loginx_app)],
             cwd=str(LOGINX_DIR),
             env=env,
-            stdout=subprocess.PIPE,
+            stdout=_loginx_log_fh,
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         atexit.register(stop_loginx_server)
+
+        def _loginx_log_tail() -> str:
+            try:
+                _loginx_log_fh.flush()
+                return LOGINX_LOG.read_text(encoding="utf-8", errors="ignore")[-1000:]
+            except Exception:
+                return ""
 
         for i in range(15):
             time.sleep(1)
@@ -239,16 +310,14 @@ def start_loginx_server() -> bool:
                 print(f"[X-Bridge] ✅ سيرفر loginx جاهز على بورت {LOGINX_PORT}")
                 return True
             if _loginx_process.poll() is not None:
-                out = _loginx_process.stdout.read().decode(errors="ignore")[:1000]
-                print(f"[X-Bridge] ❌ سيرفر loginx توقف مبكراً (exit code: {_loginx_process.returncode}):\n{out}")
+                print(f"[X-Bridge] ❌ سيرفر loginx توقف مبكراً (exit code: {_loginx_process.returncode}):\n{_loginx_log_tail()}")
                 return False
             if i == 5:
                 print(f"[X-Bridge] loginx لا يزال يبدأ... (انتظار)")
 
         # آخر محاولة قراءة الخطأ
         if _loginx_process.poll() is not None:
-            out = _loginx_process.stdout.read().decode(errors="ignore")[:1000]
-            print(f"[X-Bridge] ❌ loginx output:\n{out}")
+            print(f"[X-Bridge] ❌ loginx output:\n{_loginx_log_tail()}")
         print("[X-Bridge] ❌ تجاوز وقت انتظار تشغيل سيرفر loginx")
         return False
 
@@ -261,7 +330,7 @@ def start_loginx_server() -> bool:
 
 def stop_loginx_server():
     """إيقاف سيرفر loginx"""
-    global _loginx_process
+    global _loginx_process, _loginx_log_fh
     if _loginx_process and _loginx_process.poll() is None:
         print("[X-Bridge] إيقاف سيرفر loginx ...")
         try:
@@ -273,15 +342,33 @@ def stop_loginx_server():
         except Exception:
             _loginx_process.kill()
         _loginx_process = None
+    try:
+        if _loginx_log_fh and not _loginx_log_fh.closed:
+            _loginx_log_fh.close()
+    except Exception:
+        pass
+    _loginx_log_fh = None
 
 
 # ─── دوال API ──────────────────────────────────────────────
 def _api_call(method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-    """استدعاء API عام مع معالجة الأخطاء"""
+    """استدعاء API عام مع معالجة الأخطاء.
+
+    عمليات المتصفح تُسلسَل عبر ``browser_lock`` حتى لا تتزامن جلستا playwright
+    وتتسبّبا في تجمّد السيرفر.
+    """
     url = f"{XSUITE_BASE_URL}{endpoint}"
     kwargs.setdefault("timeout", API_TIMEOUT)
     kwargs.setdefault("headers", _HEADERS)
 
+    needs_lock = any(endpoint.startswith(e) for e in _BROWSER_ENDPOINTS)
+    if needs_lock:
+        with browser_lock:
+            return _do_request(method, url, **kwargs)
+    return _do_request(method, url, **kwargs)
+
+
+def _do_request(method: str, url: str, **kwargs) -> Dict[str, Any]:
     try:
         resp = requests.request(method, url, **kwargs)
         try:
@@ -328,6 +415,34 @@ def post_tweet(cookie_label: str, text: str, media_url: str = "", headless: bool
     if media_url:
         payload["media_url"] = media_url
     return _api_call("POST", "/api/post", json=payload)
+
+
+# ── نشر ثريد (سلسلة تغريدات في جلسة واحدة) ──
+def post_thread(cookie_label: str, texts: list, media_url: str = "",
+                headless: bool = True) -> Dict[str, Any]:
+    """نشر ثريد كامل بضغطة واحدة؛ الميديا تُرفق برأس الثريد."""
+    payload = {
+        "cookie_label": cookie_label,
+        "texts": list(texts or []),
+        "headless": headless,
+    }
+    if media_url:
+        payload["media_url"] = media_url
+    return _api_call("POST", "/api/post-thread", json=payload)
+
+
+# ── اقتباس تغريدة (إعادة نشر مع تعليق) ──
+def quote(cookie_label: str, tweet_url: str, text: str, media_url: str = "",
+          headless: bool = True) -> Dict[str, Any]:
+    payload = {
+        "cookie_label": cookie_label,
+        "tweet_url": tweet_url,
+        "text": text,
+        "headless": headless,
+    }
+    if media_url:
+        payload["media_url"] = media_url
+    return _api_call("POST", "/api/quote", json=payload)
 
 
 # ── حذف تغريدة ──

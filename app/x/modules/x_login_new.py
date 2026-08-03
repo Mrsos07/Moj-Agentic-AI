@@ -22,6 +22,7 @@ LOGINX2026_BASE = f"http://127.0.0.1:{LOGINX2026_PORT}"
 
 # متغير عام لحفظ عملية السيرفر
 _server_process = None
+_server_log_fh = None
 
 
 def _is_server_running():
@@ -35,17 +36,25 @@ def _is_server_running():
 
 def _start_server():
     """تشغيل api_server.py بالخلفية"""
-    global _server_process
+    global _server_process, _server_log_fh
     if _is_server_running():
         print(f"[x_login] سيرفر loginx2026 شغال على {LOGINX2026_BASE}")
         return
 
     print(f"[x_login] جاري تشغيل سيرفر loginx2026 على بورت {LOGINX2026_PORT}...")
+    # وجّه المخرجات إلى ملف سجل بدل PIPE غير مقروء يتجمّد عند امتلائه فيعلّق السيرفر.
+    try:
+        if _server_log_fh and not _server_log_fh.closed:
+            _server_log_fh.close()
+    except Exception:
+        pass
+    _server_log_fh = open(LOGINX2026_DIR / "loginx2026_server.log",
+                          "w", encoding="utf-8", errors="ignore")
     _server_process = subprocess.Popen(
         [sys.executable, str(API_SERVER_SCRIPT), "--port", str(LOGINX2026_PORT)],
         cwd=str(LOGINX2026_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=_server_log_fh,
+        stderr=subprocess.STDOUT,
     )
 
     # انتظر حتى يبدأ السيرفر

@@ -29,7 +29,7 @@ from modules.db import (
 )
 from modules.utils import download_to_temp, is_url, safe_label, normalize_cookies
 from modules.x_login import TwitterLoginAdvanced
-from modules.x_post import post_to_x
+from modules.x_post import post_to_x, post_thread_to_x
 from modules.x_profile import update_profile_on_x
 from modules.x_actions import like_tweet, repost_tweet, reply_to_tweet, quote_tweet, share_copy_link, undo_repost_tweet, undo_like_tweet
 from modules.x_bookmark import bookmark_tweet, undo_bookmark_tweet
@@ -827,10 +827,10 @@ def api_post():
                     return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400
             try:
                 tweet_url = post_to_x(storage_state_path, text, media_path, headless=headless)
-                log_operation('post', cookie_label, 'success', 'تمت محاولة النشر ✅', meta_json=json.dumps({'tweet_url': tweet_url}, ensure_ascii=False))
+                log_operation('post', cookie_label, 'success', 'تم النشر ✅', meta_json=json.dumps({'tweet_url': tweet_url}, ensure_ascii=False))
                 if tweet_url:
                     save_tweet(cookie_label, tweet_url, text)
-                return jsonify({'success': True, 'task_id': op_id, 'message': 'تمت محاولة النشر ✅', 'tweet_url': tweet_url}), 200
+                return jsonify({'success': True, 'task_id': op_id, 'message': 'تم النشر ✅', 'tweet_url': tweet_url}), 200
             except Exception as e:
                 log_operation('post', cookie_label, 'error', f'فشل النشر: {e}')
                 return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
@@ -865,12 +865,60 @@ def api_post():
 
         try:
             tweet_url = post_to_x(storage_state_path, text, media_path, headless=headless)
-            log_operation('post', cookie_label, 'success', 'تمت محاولة النشر ✅', meta_json=json.dumps({'tweet_url': tweet_url}))
+            log_operation('post', cookie_label, 'success', 'تم النشر ✅', meta_json=json.dumps({'tweet_url': tweet_url}))
             if tweet_url:
                 save_tweet(cookie_label, tweet_url, text)
-            return jsonify({'success': True, 'task_id': op_id, 'message': 'تمت محاولة النشر ✅', 'tweet_url': tweet_url}), 200
+            return jsonify({'success': True, 'task_id': op_id, 'message': 'تم النشر ✅', 'tweet_url': tweet_url}), 200
         except Exception as e:
             log_operation('post', cookie_label, 'error', f'فشل النشر: {e}')
+            return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
+
+
+@app.route('/api/post-thread', methods=['POST'])
+@require_api_token
+def api_post_thread():
+    """نشر ثريد (سلسلة تغريدات) في جلسة متصفح واحدة.
+
+    الجسم: ``{cookie_label, texts: [..], media_url?, headless?}``
+    الميديا — إن وُجدت — تُرفق برأس الثريد. يعيد رابط التغريدة الأولى.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    cookie_label = (data.get('cookie_label') or '').strip()
+    texts = [str(t or '').strip() for t in (data.get('texts') or [])]
+    texts = [t for t in texts if t]
+    headless = bool(data.get('headless', True))
+    media_url = (data.get('media_url') or '').strip()
+
+    if not cookie_label or not texts:
+        return jsonify({'success': False, 'error': 'cookie_label and texts required'}), 400
+    c = get_cookie_by_label(cookie_label)
+    if not c:
+        return jsonify({'success': False, 'error': 'cookie not found'}), 404
+    storage_state_path = str(COOKIES_DIR / c['filename'])
+
+    op_id = log_operation('post', cookie_label, 'pending',
+                          f'بدأ نشر ثريد ({len(texts)} تغريدة)',
+                          meta_json=json.dumps({'parts': len(texts)}, ensure_ascii=False))
+    with tempfile.TemporaryDirectory() as tmp:
+        media_path = None
+        if media_url and is_url(media_url):
+            try:
+                media_path = download_to_temp(media_url, tmp)
+            except Exception as e:
+                log_operation('post', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
+                media_path = None
+        try:
+            tweet_url = post_thread_to_x(storage_state_path, texts, media_path,
+                                         headless=headless)
+            log_operation('post', cookie_label, 'success',
+                          f'تم نشر ثريد ({len(texts)} تغريدة) ✅',
+                          meta_json=json.dumps({'tweet_url': tweet_url}, ensure_ascii=False))
+            if tweet_url:
+                save_tweet(cookie_label, tweet_url, texts[0])
+            return jsonify({'success': True, 'task_id': op_id, 'message': 'تم نشر الثريد ✅',
+                            'tweet_url': tweet_url, 'parts': len(texts)}), 200
+        except Exception as e:
+            log_operation('post', cookie_label, 'error', f'فشل نشر الثريد: {e}')
             return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
 
 
@@ -1106,8 +1154,8 @@ def api_reply():
                     return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400
             try:
                 reply_to_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, reply_text=reply_text, headless=headless, media_path=media_path, wait_after_ms=wait_after_ms)
-                log_operation('reply', cookie_label, 'success', 'تمت محاولة الرد ✅')
-                return jsonify({'success': True, 'task_id': op_id, 'message': 'تمت محاولة الرد ✅'}), 200
+                log_operation('reply', cookie_label, 'success', 'تم الرد ✅')
+                return jsonify({'success': True, 'task_id': op_id, 'message': 'تم الرد ✅'}), 200
             except Exception as e:
                 log_operation('reply', cookie_label, 'error', f'فشل الرد: {e}')
                 return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
@@ -1144,8 +1192,8 @@ def api_reply():
 
         try:
             reply_to_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, reply_text=reply_text, headless=headless, media_path=media_path, wait_after_ms=wait_after_ms)
-            log_operation('reply', cookie_label, 'success', 'تمت محاولة الرد ✅')
-            return jsonify({'success': True, 'task_id': op_id, 'message': 'تمت محاولة الرد ✅'}), 200
+            log_operation('reply', cookie_label, 'success', 'تم الرد ✅')
+            return jsonify({'success': True, 'task_id': op_id, 'message': 'تم الرد ✅'}), 200
         except Exception as e:
             log_operation('reply', cookie_label, 'error', f'فشل الرد: {e}')
             return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
@@ -1706,4 +1754,4 @@ if __name__ == '__main__':
         print('[X-Server] ✅ Scheduled publisher worker started')
     except Exception as e:
         print(f'[X-Server] ⚠️ Failed to start scheduler worker: {e}')
-    app.run(host='0.0.0.0', port=port, debug=debug, use_reloader=False)
+    app.run(host='0.0.0.0', port=port, debug=debug, use_reloader=False, threaded=True)

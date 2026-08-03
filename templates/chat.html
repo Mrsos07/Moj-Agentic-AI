@@ -117,6 +117,16 @@
                     <span class="material-symbols-outlined text-gray-500 group-hover:text-gray-700 dark:text-gray-400 dark:group-hover:text-gray-200 text-[20px]">summarize</span>
                     <span class="text-sm font-medium text-gray-700 dark:text-gray-300 group-hover:text-gray-900 dark:group-hover:text-white">ملخص</span>
                 </button>
+                <button id="open-agents-btn" class="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-[#e7f0f4] dark:hover:bg-gray-800 transition-colors text-left group">
+                    <span class="material-symbols-outlined text-primary group-hover:scale-110 transition-transform text-[20px]">smart_toy</span>
+                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300 group-hover:text-gray-900 dark:group-hover:text-white flex-1">الموظفين الذكيين</span>
+                    <span id="agents-running-badge" class="hidden text-[11px] font-bold bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 px-2 py-0.5 rounded-full">0</span>
+                </button>
+                <button id="open-accounts-btn" class="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-[#e7f0f4] dark:hover:bg-gray-800 transition-colors text-left group">
+                    <span class="material-symbols-outlined text-primary group-hover:scale-110 transition-transform text-[20px]">manage_accounts</span>
+                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300 group-hover:text-gray-900 dark:group-hover:text-white flex-1">حساباتي</span>
+                    <span id="pinned-sidebar-badge" class="hidden text-[11px] font-bold bg-primary/15 text-primary px-2 py-0.5 rounded-full max-w-[90px] truncate"></span>
+                </button>
             </div>
             <div class="mt-auto border-t border-[#e7f0f4] dark:border-gray-800 pt-4 flex flex-col gap-1">
                 <button class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-[#e7f0f4] dark:hover:bg-gray-800 transition-colors text-left group">
@@ -151,6 +161,11 @@
                 </h2>
             </div>
             <div class="flex items-center gap-2">
+                <button id="pinned-chip" onclick="openAccountsPanel()" class="hidden items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors" title="الحساب المثبّت — كل الإجراءات تُنفّذ عليه">
+                    <span class="material-symbols-outlined text-[18px]">push_pin</span>
+                    <span class="text-xs font-bold" id="pinned-chip-name"></span>
+                    <span class="material-symbols-outlined text-[16px] hover:text-red-500" onclick="event.stopPropagation(); clearPinnedAccount()" title="إلغاء التثبيت">close</span>
+                </button>
                 <button class="flex items-center justify-center rounded-lg size-9 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300 transition-colors" title="مشاركة المحادثة" id="share-btn">
                     <span class="material-symbols-outlined text-[20px]">ios_share</span>
                 </button>
@@ -204,6 +219,333 @@
             <div class="absolute top-[-40px] left-0 w-full h-10 bg-gradient-to-t from-white dark:from-background-dark to-transparent pointer-events-none"></div>
         </div>
     </main>
+
+    <!-- ═══════════ AI Employees drawer ═══════════ -->
+    <div id="agents-overlay" class="fixed inset-0 bg-black/40 backdrop-blur-sm z-40 hidden" onclick="closeAgentsPanel()"></div>
+    <aside id="agents-drawer" class="fixed top-0 right-0 h-full w-full sm:w-[440px] bg-white dark:bg-[#0d181c] border-l border-[#e7f0f4] dark:border-gray-800 shadow-2xl z-50 translate-x-full transition-transform duration-300 flex flex-col">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-[#e7f0f4] dark:border-gray-800 shrink-0">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-primary">smart_toy</span>
+                <h3 class="text-base font-bold text-gray-900 dark:text-white">الموظفين الذكيين</h3>
+            </div>
+            <div class="flex items-center gap-2">
+                <button onclick="loadAgentsPanel()" class="size-8 flex items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500" title="تحديث">
+                    <span class="material-symbols-outlined text-[20px]">refresh</span>
+                </button>
+                <button onclick="closeAgentsPanel()" class="size-8 flex items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500" title="إغلاق">
+                    <span class="material-symbols-outlined text-[20px]">close</span>
+                </button>
+            </div>
+        </div>
+        <div class="px-5 py-3 border-b border-[#e7f0f4] dark:border-gray-800 bg-gray-50 dark:bg-gray-900/40 shrink-0">
+            <p class="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                فعّل الحساب ليعمل الموظف الذكي <b>تلقائياً بالجدولة</b> — يفكّر، يخطّط، وينفّذ التعليمات بنفسه.
+                يمكن تشغيل عدة موظفين في نفس الوقت، ويتوقفون خارج ساعات العمل المحددة.
+            </p>
+            <div id="agents-summary" class="mt-2 text-xs font-medium text-gray-600 dark:text-gray-300"></div>
+        </div>
+        <div id="agents-list" class="flex-1 overflow-y-auto p-4 space-y-3">
+            <div class="text-center text-sm text-gray-400 py-10">جارِ التحميل...</div>
+        </div>
+    </aside>
+
+    <script>
+        // ═══════════ AI Employees (AEOS) panel ═══════════
+        const AGENT_STATE = {};   // label -> agent view
+
+        function openAgentsPanel() {
+            document.getElementById('agents-overlay').classList.remove('hidden');
+            document.getElementById('agents-drawer').classList.remove('translate-x-full');
+            loadAgentsPanel();
+        }
+        function closeAgentsPanel() {
+            document.getElementById('agents-overlay').classList.add('hidden');
+            document.getElementById('agents-drawer').classList.add('translate-x-full');
+        }
+
+        async function loadAgentsPanel() {
+            const listEl = document.getElementById('agents-list');
+            listEl.innerHTML = '<div class="text-center text-sm text-gray-400 py-10">جارِ التحميل...</div>';
+            try {
+                const [accRes, agentsRes] = await Promise.all([
+                    fetch('/api/x/accounts').then(r => r.json()).catch(() => ({accounts: []})),
+                    fetch('/api/aeos/agents').then(r => r.json()).catch(() => ({agents: []})),
+                ]);
+                const accounts = accRes.accounts || [];
+                const agents = (agentsRes.agents || []);
+                agents.forEach(a => { AGENT_STATE[a.account_username] = a; });
+
+                // merge: show every X account; overlay agent state if present
+                const labels = new Set(accounts.map(a => a.label));
+                agents.forEach(a => labels.add(a.account_username));
+
+                updateRunningBadge(agentsRes.running || 0, agentsRes.total || labels.size);
+
+                if (labels.size === 0) {
+                    listEl.innerHTML = '<div class="text-center text-sm text-gray-400 py-10">لا توجد حسابات. ارفع ملف كوكيز أولاً.</div>';
+                    return;
+                }
+                listEl.innerHTML = '';
+                labels.forEach(label => listEl.appendChild(renderAgentCard(label, AGENT_STATE[label])));
+            } catch (e) {
+                listEl.innerHTML = `<div class="text-center text-sm text-red-500 py-10">خطأ في التحميل: ${e}</div>`;
+            }
+        }
+
+        function updateRunningBadge(running, total) {
+            const badge = document.getElementById('agents-running-badge');
+            const summary = document.getElementById('agents-summary');
+            if (running > 0) {
+                badge.classList.remove('hidden');
+                badge.textContent = running;
+            } else {
+                badge.classList.add('hidden');
+            }
+            summary.textContent = `يعمل الآن: ${running} / ${total} موظف`;
+        }
+
+        function renderAgentCard(label, agent) {
+            const enabled = agent ? agent.enabled : false;
+            const interval = agent ? agent.interval_minutes : 60;
+            const hStart = agent ? agent.active_hours_start : 8;
+            const hEnd = agent ? agent.active_hours_end : 23;
+            const within = agent ? agent.within_active_hours : true;
+            const cycles = agent ? agent.cycles_completed : 0;
+            const nextWake = agent && agent.next_wake_at ? new Date(agent.next_wake_at).toLocaleString('ar-SA', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) : '—';
+
+            const card = document.createElement('div');
+            card.className = 'rounded-xl border border-[#e7f0f4] dark:border-gray-800 bg-white dark:bg-[#12222a] p-4';
+            card.innerHTML = `
+                <div class="flex items-center justify-between gap-3">
+                    <div class="flex items-center gap-3 min-w-0">
+                        <div class="size-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                            <span class="material-symbols-outlined text-primary text-[20px]">person</span>
+                        </div>
+                        <div class="min-w-0">
+                            <p class="text-sm font-bold text-gray-900 dark:text-white truncate">@${escapeHtml(label)}</p>
+                            <p class="text-xs ${enabled ? (within ? 'text-green-600' : 'text-amber-500') : 'text-gray-400'}">
+                                ${enabled ? (within ? 'نشط ويعمل' : 'نشط (خارج ساعات العمل)') : 'متوقف'}
+                            </p>
+                        </div>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input type="checkbox" class="sr-only peer" ${enabled ? 'checked' : ''}
+                            onchange="onToggleAgent('${escapeHtml(label)}', this)">
+                        <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:ring-2 peer-focus:ring-primary/30 rounded-full peer peer-checked:bg-primary after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5 rtl:peer-checked:after:-translate-x-5"></div>
+                    </label>
+                </div>
+                <div class="grid grid-cols-3 gap-2 mt-3">
+                    <div>
+                        <label class="block text-[11px] text-gray-500 mb-1">كل (دقيقة)</label>
+                        <input type="number" min="1" value="${interval}" id="int-${label}" class="w-full text-sm px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-transparent">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-gray-500 mb-1">يبدأ الساعة</label>
+                        <input type="number" min="0" max="23" value="${hStart}" id="hs-${label}" class="w-full text-sm px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-transparent">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-gray-500 mb-1">يتوقف الساعة</label>
+                        <input type="number" min="0" max="23" value="${hEnd}" id="he-${label}" class="w-full text-sm px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-transparent">
+                    </div>
+                </div>
+                <div class="flex items-center justify-between mt-3 text-[11px] text-gray-500">
+                    <span>الدورات: <b class="text-gray-700 dark:text-gray-300">${cycles}</b></span>
+                    <span>الإيقاظ التالي: <b class="text-gray-700 dark:text-gray-300">${nextWake}</b></span>
+                    <button onclick="runAgentNow('${escapeHtml(label)}')" class="text-primary hover:underline font-medium">تشغيل الآن</button>
+                </div>
+            `;
+            return card;
+        }
+
+        async function onToggleAgent(label, checkbox) {
+            const enabled = checkbox.checked;
+            const interval = parseInt(document.getElementById(`int-${label}`).value) || 60;
+            const hs = parseInt(document.getElementById(`hs-${label}`).value);
+            const he = parseInt(document.getElementById(`he-${label}`).value);
+            checkbox.disabled = true;
+            try {
+                const res = await fetch('/api/aeos/agent/toggle', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        platform: 'x',
+                        account_username: label,
+                        cookie_label: label,
+                        enabled: enabled,
+                        interval_minutes: interval,
+                        active_hours_start: isNaN(hs) ? null : hs,
+                        active_hours_end: isNaN(he) ? null : he,
+                    }),
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    AGENT_STATE[label] = data.agent;
+                    addMessage('assistant',
+                        enabled
+                            ? `✅ تم تفعيل الموظف الذكي للحساب @${label}. سيعمل تلقائياً كل ${interval} دقيقة بين الساعة ${hs}:00 و ${he}:00.`
+                            : `⏸️ تم إيقاف الموظف الذكي للحساب @${label}.`,
+                        new Date().toISOString());
+                    loadAgentsPanel();
+                } else {
+                    checkbox.checked = !enabled;
+                }
+            } catch (e) {
+                checkbox.checked = !enabled;
+                alert('فشل تحديث الحالة: ' + e);
+            } finally {
+                checkbox.disabled = false;
+            }
+        }
+
+        async function runAgentNow(label) {
+            const agent = AGENT_STATE[label];
+            if (!agent) { alert('فعّل الموظف أولاً.'); return; }
+            try {
+                const res = await fetch(`/api/aeos/employees/${agent.employee_id}/trigger`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({event_type: 'manual', payload: {}, sync: false}),
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    addMessage('assistant', `🚀 تم إيقاظ الموظف @${label} لتنفيذ دورة الآن.`, new Date().toISOString());
+                }
+            } catch (e) { alert('تعذّر التشغيل: ' + e); }
+        }
+
+        document.getElementById('open-agents-btn').addEventListener('click', openAgentsPanel);
+        // refresh running badge on load
+        fetch('/api/aeos/agents').then(r => r.json()).then(d => updateRunningBadge(d.running || 0, d.total || 0)).catch(() => {});
+    </script>
+
+    <!-- ═══════════ My Accounts drawer (pin an account) ═══════════ -->
+    <div id="accounts-overlay" class="fixed inset-0 bg-black/40 backdrop-blur-sm z-40 hidden" onclick="closeAccountsPanel()"></div>
+    <aside id="accounts-drawer" class="fixed top-0 right-0 h-full w-full sm:w-[400px] bg-white dark:bg-[#0d181c] border-l border-[#e7f0f4] dark:border-gray-800 shadow-2xl z-50 translate-x-full transition-transform duration-300 flex flex-col">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-[#e7f0f4] dark:border-gray-800 shrink-0">
+            <div class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-primary">manage_accounts</span>
+                <h3 class="text-base font-bold text-gray-900 dark:text-white">حساباتي</h3>
+            </div>
+            <div class="flex items-center gap-2">
+                <button onclick="loadAccountsPanel()" class="size-8 flex items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500" title="تحديث">
+                    <span class="material-symbols-outlined text-[20px]">refresh</span>
+                </button>
+                <button onclick="closeAccountsPanel()" class="size-8 flex items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500" title="إغلاق">
+                    <span class="material-symbols-outlined text-[20px]">close</span>
+                </button>
+            </div>
+        </div>
+        <div class="px-5 py-3 border-b border-[#e7f0f4] dark:border-gray-800 bg-gray-50 dark:bg-gray-900/40 shrink-0">
+            <p class="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                اضغط على حساب <b>لتثبيته</b> — بعدها أي إجراء تطلبه (نشر، رد، لايك، متابعة...) يُنفّذ تلقائياً على الحساب المثبّت دون الحاجة لذكر اسمه.
+            </p>
+            <div id="pinned-status" class="mt-2 text-xs font-medium"></div>
+        </div>
+        <div id="accounts-list" class="flex-1 overflow-y-auto p-4 space-y-2">
+            <div class="text-center text-sm text-gray-400 py-10">جارِ التحميل...</div>
+        </div>
+    </aside>
+
+    <script>
+        // ═══════════ My Accounts / pinned account ═══════════
+        let PINNED_ACCOUNT = null;
+        try { PINNED_ACCOUNT = localStorage.getItem('pinned_account') || null; } catch (e) {}
+
+        function openAccountsPanel() {
+            document.getElementById('accounts-overlay').classList.remove('hidden');
+            document.getElementById('accounts-drawer').classList.remove('translate-x-full');
+            loadAccountsPanel();
+        }
+        function closeAccountsPanel() {
+            document.getElementById('accounts-overlay').classList.add('hidden');
+            document.getElementById('accounts-drawer').classList.add('translate-x-full');
+        }
+
+        function setPinnedAccount(label) {
+            PINNED_ACCOUNT = label;
+            try { localStorage.setItem('pinned_account', label); } catch (e) {}
+            updatePinnedUI();
+            renderAccountsListDom();
+            if (typeof addMessage === 'function') {
+                addMessage('assistant', `📌 تم تثبيت الحساب @${label}. كل الإجراءات القادمة ستُنفّذ على هذا الحساب.`, new Date().toISOString());
+            }
+        }
+
+        function clearPinnedAccount() {
+            const prev = PINNED_ACCOUNT;
+            PINNED_ACCOUNT = null;
+            try { localStorage.removeItem('pinned_account'); } catch (e) {}
+            updatePinnedUI();
+            renderAccountsListDom();
+            if (prev && typeof addMessage === 'function') {
+                addMessage('assistant', `📍 تم إلغاء تثبيت الحساب @${prev}.`, new Date().toISOString());
+            }
+        }
+
+        function updatePinnedUI() {
+            const chip = document.getElementById('pinned-chip');
+            const chipName = document.getElementById('pinned-chip-name');
+            const sideBadge = document.getElementById('pinned-sidebar-badge');
+            const status = document.getElementById('pinned-status');
+            if (PINNED_ACCOUNT) {
+                chip.classList.remove('hidden'); chip.classList.add('flex');
+                chipName.textContent = '@' + PINNED_ACCOUNT;
+                sideBadge.classList.remove('hidden');
+                sideBadge.textContent = '@' + PINNED_ACCOUNT;
+                if (status) status.innerHTML = `الحساب المثبّت حالياً: <span class="text-primary">@${PINNED_ACCOUNT}</span>`;
+            } else {
+                chip.classList.add('hidden'); chip.classList.remove('flex');
+                sideBadge.classList.add('hidden');
+                if (status) status.innerHTML = '<span class="text-gray-400">لا يوجد حساب مثبّت — سيُستخدم الحساب الافتراضي.</span>';
+            }
+        }
+
+        let _ACCOUNTS_CACHE = [];
+        async function loadAccountsPanel() {
+            const listEl = document.getElementById('accounts-list');
+            listEl.innerHTML = '<div class="text-center text-sm text-gray-400 py-10">جارِ التحميل...</div>';
+            try {
+                const res = await fetch('/api/x/accounts').then(r => r.json()).catch(() => ({accounts: []}));
+                _ACCOUNTS_CACHE = res.accounts || [];
+                renderAccountsListDom();
+            } catch (e) {
+                listEl.innerHTML = `<div class="text-center text-sm text-red-500 py-10">خطأ في التحميل: ${e}</div>`;
+            }
+        }
+
+        function renderAccountsListDom() {
+            const listEl = document.getElementById('accounts-list');
+            if (!listEl) return;
+            if (!_ACCOUNTS_CACHE.length) {
+                listEl.innerHTML = '<div class="text-center text-sm text-gray-400 py-10">لا توجد حسابات. ارفع ملف كوكيز أولاً.</div>';
+                return;
+            }
+            listEl.innerHTML = '';
+            _ACCOUNTS_CACHE.forEach(acc => {
+                const label = acc.label;
+                const isPinned = (label === PINNED_ACCOUNT);
+                const row = document.createElement('button');
+                row.className = `w-full flex items-center justify-between gap-3 rounded-xl border p-3 text-right transition-colors ${isPinned ? 'border-primary bg-primary/5' : 'border-[#e7f0f4] dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50'}`;
+                row.onclick = () => isPinned ? clearPinnedAccount() : setPinnedAccount(label);
+                row.innerHTML = `
+                    <div class="flex items-center gap-3 min-w-0">
+                        <div class="size-9 rounded-full ${isPinned ? 'bg-primary/20' : 'bg-gray-100 dark:bg-gray-800'} flex items-center justify-center shrink-0">
+                            <span class="material-symbols-outlined ${isPinned ? 'text-primary' : 'text-gray-400'} text-[20px]">person</span>
+                        </div>
+                        <div class="min-w-0 text-right">
+                            <p class="text-sm font-bold text-gray-900 dark:text-white truncate">@${escapeHtml(label)}</p>
+                            <p class="text-xs ${isPinned ? 'text-primary' : 'text-gray-400'}">${isPinned ? 'مثبّت — الإجراءات تُنفّذ عليه' : 'اضغط للتثبيت'}</p>
+                        </div>
+                    </div>
+                    <span class="material-symbols-outlined shrink-0 ${isPinned ? 'text-primary' : 'text-gray-300 dark:text-gray-600'}">${isPinned ? 'push_pin' : 'radio_button_unchecked'}</span>
+                `;
+                listEl.appendChild(row);
+            });
+        }
+
+        document.getElementById('open-accounts-btn').addEventListener('click', openAccountsPanel);
+        updatePinnedUI();
+    </script>
 
     <script>
         let ws = null;
@@ -361,6 +703,7 @@
                 if (isConnected) {
                     ws.send(JSON.stringify({
                         message: message,
+                        pinned_account: (typeof PINNED_ACCOUNT !== 'undefined' ? PINNED_ACCOUNT : null),
                         file_upload: {
                             name: fileName,
                             content: content,
@@ -385,7 +728,8 @@
             addMessage('user', message, new Date().toISOString());
             
             ws.send(JSON.stringify({
-                message: message
+                message: message,
+                pinned_account: (typeof PINNED_ACCOUNT !== 'undefined' ? PINNED_ACCOUNT : null)
             }));
             
             input.value = '';

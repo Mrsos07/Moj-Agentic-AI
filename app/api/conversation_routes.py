@@ -58,6 +58,57 @@ class UserPreferencesResponse(BaseModel):
     last_interaction: Optional[str]
 
 
+class EnsureConversationRequest(BaseModel):
+    """طلب إنشاء/جلب محادثة بجلسة محددة (مثل محادثة الموظف الذكي)."""
+    session_id: str = Field(..., min_length=1)
+    title: Optional[str] = None
+
+
+@router.post("/ensure", response_model=ConversationDetailResponse)
+async def ensure_conversation(
+    body: EnsureConversationRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """إنشاء أو جلب محادثة مرتبطة بجلسة محددة (session_id) مع عنوان اختياري،
+    وإرجاعها مع كامل رسائلها — تُستخدم لفتح «محادثة الموظف الذكي» وتحميل سياقها."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="غير مصرح")
+    try:
+        conversation = memory_service.get_or_create_conversation(
+            db=db, user_id=current_user.id,
+            session_id=body.session_id, title=body.title,
+        )
+        # حصر الملكية: لا نُرجع محادثة مستخدم آخر
+        if conversation.user_id and conversation.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="غير مصرح لك بالوصول لهذه المحادثة")
+        messages = memory_service.get_conversation_history(db, conversation.id)
+        return ConversationDetailResponse(
+            conversation=ConversationResponse(
+                id=conversation.id,
+                user_id=conversation.user_id,
+                session_id=conversation.session_id,
+                title=conversation.title or "محادثة",
+                created_at=conversation.created_at.isoformat(),
+                updated_at=conversation.updated_at.isoformat(),
+                message_count=len(messages),
+            ),
+            messages=[
+                MessageResponse(
+                    id=msg.id, role=msg.role, content=msg.content,
+                    intent=msg.intent, confidence=msg.confidence, agent=msg.agent,
+                    attachment=(json.loads(msg.extra_data).get("attachment") if msg.extra_data else None),
+                    created_at=msg.created_at.isoformat(),
+                )
+                for msg in messages
+            ],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"خطأ في تجهيز المحادثة: {str(e)}")
+
+
 @router.get("/", response_model=List[ConversationResponse])
 async def get_user_conversations(
     user_id: Optional[int] = None,

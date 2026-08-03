@@ -68,10 +68,94 @@ class IntentType(str, Enum):
     LIST_ACCOUNTS_BY_CATEGORY = "list_accounts_by_category"
     POST_TO_CATEGORY = "post_to_category"
 
+    # ── الموظف الذكي (AEOS AI Employee) ──
+    EMPLOYEE_ACTIVATE = "employee_activate"        # تفعيل/تشغيل موظف ذكي لحساب
+    EMPLOYEE_PAUSE = "employee_pause"              # إيقاف/تعطيل الموظف
+    EMPLOYEE_RUN_CYCLE = "employee_run_cycle"      # تشغيل دورة عمل الآن
+    EMPLOYEE_STATUS = "employee_status"            # حالة/تقرير الموظف
+    EMPLOYEE_LIST = "employee_list"                # قائمة الموظفين الأذكياء
+    EMPLOYEE_DELETE = "employee_delete"            # حذف الموظف الذكي
+    EMPLOYEE_SET_SCHEDULE = "employee_set_schedule"  # ضبط الجدولة/ساعات العمل
+    EMPLOYEE_UPDATE_PERSONA = "employee_update_persona"  # تعديل الاهتمامات/اللهجة/الأسلوب
+    EMPLOYEE_TEACH = "employee_teach"              # تعليم الموظف معلومة/توجيه دائم
+    # عرض بيانات الموظف الحيّة (يجلبها فوراً من مصادره ويناقشها)
+    EMPLOYEE_SHOW_NEWS = "employee_show_news"          # أخبار قوقل حسب تخصصه
+    EMPLOYEE_SHOW_TRENDS = "employee_show_trends"      # ترندات حسابه
+    EMPLOYEE_SHOW_TIMELINE = "employee_show_timeline"  # التايم لاين
+    EMPLOYEE_SHOW_TOP_POSTS = "employee_show_top_posts"  # أهم البوستات (منشئ المحتوى)
+    EMPLOYEE_ANALYZE = "employee_analyze"              # بحث وتحليل عبر كل المصادر واستنتاج المواضيع
+
     # عام
     HELP = "help"
     GREETING = "greeting"
     UNKNOWN = "unknown"
+
+
+#: مجموعة نوايا التحكم بالموظف الذكي (تُوجّه إلى خدمة employee_commands)
+EMPLOYEE_INTENTS = frozenset({
+    IntentType.EMPLOYEE_ACTIVATE,
+    IntentType.EMPLOYEE_PAUSE,
+    IntentType.EMPLOYEE_RUN_CYCLE,
+    IntentType.EMPLOYEE_STATUS,
+    IntentType.EMPLOYEE_LIST,
+    IntentType.EMPLOYEE_DELETE,
+    IntentType.EMPLOYEE_SET_SCHEDULE,
+    IntentType.EMPLOYEE_UPDATE_PERSONA,
+    IntentType.EMPLOYEE_TEACH,
+    IntentType.EMPLOYEE_SHOW_NEWS,
+    IntentType.EMPLOYEE_SHOW_TRENDS,
+    IntentType.EMPLOYEE_SHOW_TIMELINE,
+    IntentType.EMPLOYEE_SHOW_TOP_POSTS,
+    IntentType.EMPLOYEE_ANALYZE,
+})
+
+
+#: كتالوج موجز (id: المعنى) تستعين به الطبقة الاحتياطية بالـLLM للتصنيف الذكي.
+_INTENT_DESCRIPTIONS: Dict[str, str] = {
+    "add_account": "add/connect/login a social account",
+    "remove_account": "remove/delete/unlink a connected account",
+    "list_accounts": "list the user's connected accounts",
+    "switch_account": "switch the active account",
+    "create_post": "publish/write a tweet or post now",
+    "schedule_post": "schedule a post/tweet for a later time",
+    "delete_post": "delete an existing post/tweet",
+    "edit_post": "edit an existing post",
+    "update_profile": "edit profile name/bio/avatar/banner/location/website",
+    "generate_identity": "generate a fake/random persona identity (with images)",
+    "get_analytics": "show account analytics/statistics/performance",
+    "get_engagement": "show engagement (likes/comments/interactions)",
+    "get_followers": "show followers count/info",
+    "reply_to_comment": "reply to a specific tweet/comment (needs tweet_url)",
+    "like_post": "like a specific tweet (needs tweet_url)",
+    "share_post": "share a tweet",
+    "repost": "retweet/repost a tweet (needs tweet_url)",
+    "follow_user": "follow a user (needs profile_url/@handle)",
+    "unfollow_user": "unfollow a user",
+    "bookmark_post": "bookmark/save a tweet",
+    "create_automation": "create an automation/auto-posting rule",
+    "get_trends": "show current trends overview",
+    "get_hot_trends": "show hottest/most active trends",
+    "search_trends": "search trends by keyword",
+    "run_trends": "manually run/collect trends now",
+    "trend_detail": "explain/expand a specific trend or news item",
+    "employee_activate": "activate/enable an autonomous AI employee for an account",
+    "employee_pause": "pause/disable/stop the AI employee",
+    "employee_run_cycle": "make the AI employee run one work cycle right now",
+    "employee_status": "show the AI employee status/report/what it did",
+    "employee_list": "list the user's AI employees",
+    "employee_delete": "permanently delete the AI employee",
+    "employee_set_schedule": "change AI employee schedule interval or working hours",
+    "employee_update_persona": "change AI employee interests/dialect/tone/persona",
+    "employee_teach": "teach the AI employee a fact or a permanent instruction",
+    "employee_show_news": "employee fetches & shows Google News for its specialty",
+    "employee_show_trends": "employee fetches & shows the X trends its account sees",
+    "employee_show_timeline": "employee fetches & shows its home timeline tweets",
+    "employee_show_top_posts": "employee shows creator studio 'Top Posts' inspiration",
+    "employee_analyze": "employee researches ALL its sources (news+trends+timeline+top posts) and infers topics tied to its interests for discussion",
+    "help": "show help / list of capabilities",
+    "greeting": "greeting or asking who the assistant is",
+    "unknown": "none of the above",
+}
 
 
 class Platform(str, Enum):
@@ -657,6 +741,151 @@ class IntentService:
                 r"tweet\s+on\s+(?:my\s+)?(?:social|political|sports|tech|religious|entertainment|news|literary|business|general)\s+accounts",
             ],
 
+            # ── الموظف الذكي (AEOS) ──
+            IntentType.EMPLOYEE_ACTIVATE: [
+                r"فعّ?ل.*موظف",
+                r"فعّ?ل.*الموظف",
+                r"شغّ?ل.*موظف\s*ذكي",
+                r"حوّ?ل.*موظف\s*ذكي",
+                r"حوّ?ل.*الحساب.*موظف",
+                r"خلّ?ي.*موظف\s*ذكي",
+                r"ابدأ.*الموظف",
+                r"ابدا.*الموظف",
+                r"نشّ?ط.*الموظف",
+                r"activate.*(?:agent|employee)",
+                r"start.*(?:agent|employee)",
+                r"enable.*(?:agent|employee)",
+                r"turn\s*on.*(?:agent|employee)",
+            ],
+            IntentType.EMPLOYEE_PAUSE: [
+                r"أوقف.*الموظف",
+                r"اوقف.*الموظف",
+                r"وقّ?ف.*الموظف",
+                r"عطّ?ل.*الموظف",
+                r"إيقاف.*الموظف",
+                r"ايقاف.*الموظف",
+                r"خلّ?ي.*الموظف.*يرتاح",
+                r"pause.*(?:agent|employee)",
+                r"stop.*(?:agent|employee)",
+                r"disable.*(?:agent|employee)",
+                r"turn\s*off.*(?:agent|employee)",
+            ],
+            IntentType.EMPLOYEE_RUN_CYCLE: [
+                r"شغّ?ل.*دورة",
+                r"نفّ?ذ.*دورة",
+                r"دورة\s*الآن",
+                r"دورة\s*الحين",
+                r"شغّ?ل.*الموظف.*الآن",
+                r"شغّ?ل.*الموظف.*الحين",
+                r"خلّ?ي.*الموظف.*يشتغل.*الآن",
+                r"خلّ?ي.*الموظف.*يشتغل.*الحين",
+                r"اشتغل\s*الحين",
+                r"دوّ?ر.*الموظف",
+                r"run.*cycle",
+                r"run.*(?:agent|employee).*now",
+            ],
+            IntentType.EMPLOYEE_STATUS: [
+                r"حالة.*الموظف",
+                r"وضع.*الموظف",
+                r"تقرير.*الموظف",
+                r"وش.*سوّى.*الموظف",
+                r"وش.*سوا.*الموظف",
+                r"ماذا.*فعل.*الموظف",
+                r"كيف.*الموظف",
+                r"employee.*status",
+                r"agent.*status",
+                r"status.*(?:agent|employee)",
+            ],
+            IntentType.EMPLOYEE_LIST: [
+                r"الموظفين\s*الأذكياء",
+                r"الموظفون\s*الأذكياء",
+                r"كم\s*موظف\s*ذكي",
+                r"قائمة\s*الموظفين",
+                r"عرض\s*الموظفين",
+                r"الموظفون\s*النشطون",
+                r"list.*employees",
+                r"my\s*employees",
+                r"show.*employees",
+            ],
+            IntentType.EMPLOYEE_DELETE: [
+                r"احذف.*الموظف",
+                r"امسح.*الموظف",
+                r"الغِ?.*الموظف\s*الذكي",
+                r"ألغِ?.*الموظف",
+                r"احذف.*موظف\s*ذكي",
+                r"شيل.*الموظف",
+                r"delete.*(?:agent|employee)",
+                r"remove.*(?:agent|employee)",
+            ],
+            IntentType.EMPLOYEE_SET_SCHEDULE: [
+                r"الموظف.*كل\s*\d+\s*(?:دقيقة|دقايق|دقائق|ساعة|ساعات|ساعتين)",
+                r"خلّ?ي.*الموظف.*كل\s*\d",
+                r"ساعات\s*عمل.*الموظف",
+                r"وقت\s*عمل.*الموظف",
+                r"جدولة.*الموظف",
+                r"جدول.*الموظف",
+                r"غيّ?ر.*جدول.*الموظف",
+                r"الموظف.*يشتغل.*كل",
+                r"employee.*every\s*\d",
+                r"schedule.*(?:agent|employee)",
+                r"employee.*working\s*hours",
+                # جدولة المحتوى اليومي (عدد التغريدات/المنشورات في اليوم)
+                r"محتوى\s*يومي",
+                r"جدول\s*يومي",
+                r"\d+\s*(?:تغريد|منشور|بوست)\S*\s*يومي",
+                r"(?:تغريدات|منشورات)\s*يومي",
+                r"عدد.*(?:التغريدات|المنشورات).*يومي",
+                r"daily\s*content",
+                r"posts?\s*per\s*day",
+            ],
+            IntentType.EMPLOYEE_UPDATE_PERSONA: [
+                r"غيّ?ر.*اهتمام.*الموظف",
+                r"اهتمامات.*الموظف",
+                r"مجال.*الموظف",
+                r"تخصص.*الموظف",
+                r"خلّ?ي.*الموظف.*يهتم",
+                r"غيّ?ر.*شخصية.*الموظف",
+                r"عدّ?ل.*شخصية.*الموظف",
+                r"لهجة.*الموظف",
+                r"أسلوب.*الموظف",
+                r"اسلوب.*الموظف",
+                r"خلّ?ي.*لهجة.*الموظف",
+                r"خلّ?ي.*الموظف.*يتكلم",
+                r"employee.*interests",
+                r"employee.*persona",
+                r"employee.*tone",
+                r"employee.*dialect",
+            ],
+            IntentType.EMPLOYEE_TEACH: [
+                r"علّ?م.*الموظف",
+                r"تعلّ?م.*الموظف",
+                r"احفظ.*للموظف",
+                r"لقّ?ن.*الموظف",
+                r"وجّ?ه.*الموظف.*دائم",
+                r"قاعدة\s*للموظف",
+                r"معلومة\s*للموظف",
+                r"خلّ?ي.*الموظف.*يعرف",
+                r"teach.*(?:agent|employee)",
+                r"remember.*for.*(?:agent|employee)",
+            ],
+            # ملاحظة: نوايا «عرض بيانات الموظف» (أخبار/ترند/تايم لاين/أهم البوستات)
+            # تُكتشف عبر _apply_employee_overrides (تشترط فعل عرض + سياق الموظف)
+            # لتفادي خطف أسئلة النقاش مثل «ناقشني في أخبار الموظف».
+
+            # بحث وتحليل عبر كل المصادر واستنتاج المواضيع المرتبطة بالاهتمام
+            IntentType.EMPLOYEE_ANALYZE: [
+                r"حلّ?ل.*(?:المواضيع|مصادر|الأخبار|الاخبار|الترند)",
+                r"استنتج.*(?:المواضيع|المواضع)",
+                r"المواضيع\s*المرتبطة.*(?:اهتمام|تخصص)",
+                r"المواضيع\s*المتعلقة.*(?:اهتمام|تخصص)",
+                r"ما\s*(?:هي\s*)?المواضيع.*(?:اهتمام|تخصص)",
+                r"وش\s*المواضيع.*(?:اهتمام|تخصص)",
+                r"بناء[ًا]?\s*على.*(?:الأخبار|الاخبار|الترند|التايم|البوستات).*(?:مواضيع|موضوع|اهتمام)",
+                r"ابحث\s*وحلّ?ل",
+                r"ابحث.*استنتج",
+                r"analyze.*(?:topics|sources)",
+            ],
+
             # عام
             IntentType.HELP: [
                 r"مساعدة",
@@ -710,13 +939,18 @@ class IntentService:
             Platform.TIKTOK: ["tiktok", "تيك توك", "تيكتوك"]
         }
     
-    def detect_intent(self, text: str) -> IntentResult:
+    def detect_intent(self, text: str, use_llm_fallback: bool = True) -> IntentResult:
         """
-        التعرف على نية المستخدم من النص
-        
+        التعرف على نية المستخدم من النص — نظام هجين ذكي:
+        1) مطابقة أنماط سريعة (regex) للحالات الشائعة والأوامر الصريحة.
+        2) تجاوزات دلالية (جدولة/ترند نشط/الموظف الذكي) لحسم الالتباس.
+        3) طبقة احتياطية بالـLLM عند انخفاض الثقة: تفهم أي صياغة/لهجة/أمر
+           غير متوقّع وتحوّله للنية الصحيحة مع استخراج الكيانات.
+
         Args:
             text: النص المدخل من المستخدم
-            
+            use_llm_fallback: تفعيل الطبقة الاحتياطية بالـLLM (افتراضياً نعم)
+
         Returns:
             IntentResult: نتيجة التعرف على النية
         """
@@ -799,15 +1033,39 @@ class IntentService:
                     detected_intent = IntentType.GET_HOT_TRENDS
                     max_confidence = 0.95
                     break
-        
+
+        # Override: حسم نوايا "الموظف الذكي" ورفع ثقتها فوق عتبة التوجيه، مع
+        # تمييز "تشغيل دورة الآن" عن "تفعيل الموظف".
+        detected_intent, max_confidence = self._apply_employee_overrides(
+            text_lower, detected_intent, max_confidence
+        )
+
+        # الطبقة الاحتياطية الذكية: عند غياب النية أو ضعف الثقة، نستعين بالـLLM
+        # لفهم أي صياغة/لهجة/أمر غير متوقّع وتحويله للنية الصحيحة.
+        llm_entities: Dict[str, Any] = {}
+        if use_llm_fallback and (detected_intent == IntentType.UNKNOWN or max_confidence < 0.6):
+            llm_res = self._llm_classify(text)
+            if llm_res:
+                li, lc, le = llm_res
+                if li != IntentType.UNKNOWN and lc >= 0.5 and (
+                    detected_intent == IntentType.UNKNOWN or lc > max_confidence
+                ):
+                    detected_intent = li
+                    max_confidence = lc
+                    llm_entities = le or {}
+
         # استخراج المنصة
         platform = self._detect_platform(text_lower)
-        
-        # استخراج الكيانات
+
+        # استخراج الكيانات وفق النية النهائية، ثم دمج ما استخرجه الـLLM (بلا طمس
+        # للكيانات الدقيقة التي التقطها الـregex كالروابط والأوقات).
         entities = self._extract_entities(text, detected_intent)
-        
+        for k, v in llm_entities.items():
+            if v not in (None, "", [], {}):
+                entities.setdefault(k, v)
+
         logger.info(f"Intent detected: {detected_intent.value} (confidence: {max_confidence:.2f})")
-        
+
         return IntentResult(
             intent=detected_intent,
             confidence=max_confidence,
@@ -815,6 +1073,92 @@ class IntentService:
             platform=platform,
             raw_text=text
         )
+
+    def _apply_employee_overrides(self, text_lower: str, detected: IntentType,
+                                  conf: float) -> tuple:
+        """يحسم التباس نوايا الموظف الذكي ويضمن ثقة كافية لتوجيهها."""
+        if detected in EMPLOYEE_INTENTS:
+            conf = max(conf, 0.9)
+            # "شغّل/فعّل الموظف الآن" أو ذكر "دورة" ⇒ تشغيل دورة الآن
+            if detected in (IntentType.EMPLOYEE_ACTIVATE,) and re.search(
+                r"\bالآن\b|الحين|\bدورة\b|\bnow\b|اشتغل", text_lower
+            ):
+                detected = IntentType.EMPLOYEE_RUN_CYCLE
+            return detected, conf
+
+        # طلب «عرض بيانات» في سياق الموظف قد يُصنَّف خطأً كـ get_trends/create_post
+        # (لتطابق «ترندات»/«بوست»). إن ذُكر الموظف/حسابه صراحةً مع فعل عرض وكلمة
+        # بيانات، نحوّله للنية الصحيحة. نشترط فعل العرض حتى لا نخطف أسئلة النقاش.
+        _emp = re.search(r"الموظف|للموظف|بالموظف|employee|\bagent\b|حساب(?:ه|ك)", text_lower)
+        _show = re.search(
+            r"اعرض|أعرض|اظهر|أظهر|عرض|جيب|هات|ورني|ورّني|وريني|اعطني|أعطني|show|"
+            r"ابغى\s*(?:اشوف|أشوف)|ابي\s*(?:اشوف|أشوف)",
+            text_lower,
+        )
+        if _emp and _show:
+            show_map = [
+                (r"أخبار|اخبار|\bnews\b", IntentType.EMPLOYEE_SHOW_NEWS),
+                (r"ترند|\btrends?\b", IntentType.EMPLOYEE_SHOW_TRENDS),
+                (r"تايم\s*لاين|الخط\s*الزمني|\btimeline\b", IntentType.EMPLOYEE_SHOW_TIMELINE),
+                (r"أهم\s*البوستات|اهم\s*البوستات|أهم\s*المنشورات|اهم\s*المنشورات"
+                 r"|منش(?:ئ|يء)\s*المحتوى|top\s*posts", IntentType.EMPLOYEE_SHOW_TOP_POSTS),
+            ]
+            for pat, show_intent in show_map:
+                if re.search(pat, text_lower):
+                    return show_intent, max(conf, 0.9)
+        return detected, conf
+
+    def _llm_classify(self, text: str):
+        """تصنيف احتياطي بالـLLM: يعيد (IntentType, confidence, entities) أو None.
+
+        يستخدم مزوّد الـLLM الخاص بمنصة الموظفين (إن كان مُهيّأً). آمن تماماً:
+        أي فشل/عدم توفّر يعيد None فيبقى الاعتماد على الـregex.
+        """
+        try:
+            from app.aeos.bootstrap import get_platform
+
+            llm = get_platform().llm
+        except Exception:  # noqa: BLE001
+            return None
+        if not (llm and getattr(llm, "available", False)):
+            return None
+
+        catalog = "\n".join(f"- {iid}: {desc}"
+                            for iid, desc in _INTENT_DESCRIPTIONS.items())
+        system = (
+            "You are a precise intent classifier for an Arabic social-media "
+            "management assistant that also controls autonomous AI employees. "
+            "Pick exactly ONE intent id from the list that best matches the user "
+            "message (any dialect/phrasing/command style). Extract useful entities. "
+            "Respond ONLY with minified JSON."
+        )
+        prompt = (
+            "Intents (id: meaning):\n" + catalog +
+            f"\n\nUser message: «{text}»\n\n"
+            'Return JSON exactly like: {"intent":"<id>","confidence":<0..1>,'
+            '"entities":{...}}. Useful entity keys when relevant: account_name, '
+            "content, media_url, tweet_url, profile_url, reply_text, interval_minutes, "
+            "active_hours_start, active_hours_end, interests (array of strings), dialect, "
+            'tone, knowledge, nationality, gender. Use "unknown" if nothing fits.'
+        )
+        try:
+            data = llm.complete_json(system=system, prompt=prompt, temperature=0.1)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(data, dict):
+            return None
+        raw_intent = str(data.get("intent", "")).strip().lower()
+        try:
+            intent = IntentType(raw_intent)
+        except ValueError:
+            return None
+        try:
+            confidence = float(data.get("confidence", 0.6))
+        except (TypeError, ValueError):
+            confidence = 0.6
+        confidence = max(0.0, min(1.0, confidence))
+        entities = data.get("entities") if isinstance(data.get("entities"), dict) else {}
+        return intent, confidence, entities
     
     def _calculate_confidence(self, text: str, pattern: str) -> float:
         """حساب مستوى الثقة في التعرف على النية"""
@@ -875,7 +1219,8 @@ class IntentService:
                               "اسم", "إسم", "الاسم", "اسمي", "بايو", "البايو",
                               "هوية", "هويه", "الهوية", "الهويه",
                               "بروفايل", "البروفايل", "ملف", "الملف",
-                              "صورة", "الصورة", "غلاف", "الغلاف", "بانر", "البانر"}
+                              "صورة", "الصورة", "غلاف", "الغلاف", "بانر", "البانر",
+                              "موظف", "الموظف", "لموظف", "للموظف", "بموظف", "ذكي", "employee", "agent"}
         for pattern in account_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -1255,6 +1600,86 @@ class IntentService:
                 entities["headless"] = True
             elif re.search(r'ظاهر|مرئي|visible|show|اظهر|أظهر|بدون إخفاء|بدون اخفاء', text, re.IGNORECASE):
                 entities["headless"] = False
+
+        # ── كيانات التحكم بالموظف الذكي ──
+        if intent in (IntentType.EMPLOYEE_SET_SCHEDULE, IntentType.EMPLOYEE_ACTIVATE):
+            # فترة التشغيل: «كل 30 دقيقة» / «كل ساعتين» / «every 2 hours»
+            iv = re.search(r"كل\s*(\d+)\s*(دقيقة|دقايق|دقائق|ساعة|ساعات)", text)
+            if iv:
+                n = int(iv.group(1))
+                entities["interval_minutes"] = n * 60 if "ساع" in iv.group(2) else n
+            elif re.search(r"كل\s*ساعتين", text):
+                entities["interval_minutes"] = 120
+            elif re.search(r"كل\s*ساعة", text):
+                entities["interval_minutes"] = 60
+            else:
+                iv_en = re.search(r"every\s*(\d+)\s*(min(?:ute)?s?|hours?|hrs?)", text, re.IGNORECASE)
+                if iv_en:
+                    n = int(iv_en.group(1))
+                    entities["interval_minutes"] = n * 60 if iv_en.group(2).lower().startswith(("h",)) else n
+
+            # ساعات العمل: «من 9 إلى 23» / «ساعات العمل 8 - 22» / «from 9 to 23»
+            hours = re.search(r"(?:من|from|العمل)\D{0,6}(\d{1,2})\s*(?:إلى|الى|الي|to|-|حتى|لـ|ل)\s*(\d{1,2})", text, re.IGNORECASE)
+            if hours:
+                s, e = int(hours.group(1)), int(hours.group(2))
+                if 0 <= s <= 23 and 0 <= e <= 24:
+                    entities["active_hours_start"] = s
+                    entities["active_hours_end"] = e
+
+            # عدد المحتوى اليومي: «محتوى يومي 3» / «3 تغريدات يومياً» / «3 posts per day»
+            daily = re.search(
+                r"(?:محتوى\s*يومي|يومي\S*|عدد.*(?:التغريدات|المنشورات))\D{0,8}(\d+)"
+                r"|(\d+)\s*(?:تغريد|منشور|بوست|posts?)\S*\s*(?:يومي|في\s*اليوم|per\s*day|/?\s*day)",
+                text, re.IGNORECASE
+            )
+            if daily:
+                val = daily.group(1) or daily.group(2)
+                if val and 0 <= int(val) <= 20:
+                    entities["daily_post_target"] = int(val)
+
+        if intent == IntentType.EMPLOYEE_UPDATE_PERSONA:
+            # الاهتمامات/المجال: النص بعد «اهتمامات/مجال/تخصص/يهتم بـ/يتكلم عن»
+            interests_match = re.search(
+                r"(?:اهتمامات|مجال|تخصص|يهتم\s*ب|يتكلم\s*عن|interests?)\s*(?:الموظف)?\s*(?:هي|:|=|إلى|الى|الي|to)?\s*(.+)$",
+                text, re.IGNORECASE
+            )
+            if interests_match:
+                raw = interests_match.group(1).strip().strip("«»\"'.")
+                parts = re.split(r"[،,]|\s+و|\s+and\s+|\s{2,}", raw)
+                interests = [p.strip() for p in parts if p and len(p.strip()) > 1]
+                if interests:
+                    entities["interests"] = interests[:8]
+
+            # اللهجة: «لهجة سعودية» أو «لهجة الموظف سعودية» (نتخطّى كلمة الموظف)
+            dialect_match = re.search(
+                r"لهجة(?:\s+الموظف)?\s+([\u0600-\u06FF]+)", text
+            )
+            if dialect_match:
+                dval = dialect_match.group(1).strip()
+                if dval not in ("الموظف", "موظف"):
+                    entities["dialect"] = dval
+
+            # الأسلوب/النبرة
+            tone_map = {
+                "ساخر": "witty", "مرح": "casual", "ودود": "friendly",
+                "رسمي": "professional", "جاد": "serious", "تحليلي": "analytical",
+                "حماسي": "energetic", "هادئ": "calm",
+            }
+            for kw, val in tone_map.items():
+                if re.search(rf"{kw}[ةه]?\b", text):
+                    entities["tone"] = val
+                    break
+
+        if intent == IntentType.EMPLOYEE_TEACH:
+            # المعرفة/التوجيه: النص بعد أفعال التعليم
+            know = re.search(
+                r"(?:علّ?م|تعلّ?م|احفظ|لقّ?ن|وجّ?ه|teach|remember)\s*(?:الموظف|للموظف|the\s*employee|the\s*agent)?\s*(?:أن|ان|بأن|بان|أنه|انه|that|:)?\s*(.+)$",
+                text, re.IGNORECASE
+            )
+            if know:
+                knowledge = know.group(1).strip().strip("«»\"'")
+                if knowledge:
+                    entities["knowledge"] = knowledge
 
         # استخراج الأرقام
         numbers = re.findall(r'\d+', text)

@@ -42,6 +42,8 @@ from app.services import x_bridge
 from app.services.memory_service import memory_service
 from app.trend_detector.scheduler.scheduler import trend_scheduler
 from app.scheduler.tick import scheduler_tick
+from app.aeos.api.routes import router as aeos_router
+from app.aeos.bootstrap import get_platform
 
 app = FastAPI(title="كنق الاتمته - Chatbot API", version="1.0.0")
 
@@ -98,6 +100,31 @@ async def startup_event():
     except Exception as e:
         print(f"Warning: Scheduler tick failed: {str(e)}")
 
+    # Capture the running loop + register the realtime sink so background
+    # AEOS workers can push live cycle updates to connected chat clients.
+    try:
+        from app.services import realtime_bus
+        manager.loop = asyncio.get_running_loop()
+        realtime_bus.register_sink(manager.push_from_thread)
+        print("Realtime chat bridge registered (AEOS -> WebSocket)")
+    except Exception as e:
+        print(f"Warning: realtime chat bridge failed to register: {str(e)}")
+
+    try:
+        get_platform().start()
+        print("AEOS (AI Employee OS) started — scheduler + worker pool running")
+    except Exception as e:
+        print(f"Warning: AEOS platform failed to start: {str(e)}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        get_platform().stop()
+        print("AEOS platform stopped")
+    except Exception as e:
+        print(f"Warning: AEOS shutdown error: {str(e)}")
+
 # Include auth routes
 app.include_router(auth_router)
 
@@ -128,6 +155,9 @@ app.include_router(schedule_router)
 
 # Include telegram integration routes
 app.include_router(telegram_router)
+
+# Include AEOS (AI Employee Operating System) routes
+app.include_router(aeos_router)
 
 # CORS Configuration - تقييد النطاقات المسموحة
 import os
@@ -172,11 +202,379 @@ if FRONTEND_DIST.exists() and (FRONTEND_DIST / "assets").exists():
 ai_service = AIService()
 webhook_service = WebhookService()
 
+def _norm_uid(value) -> Optional[int]:
+    """Best-effort normalize a user id to int (frontend may send str/int)."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# Keyword groups to detect an employee-focused question in the chat.
+_EMP_STATS_KW = ("احصائ", "إحصائ", "تفاعل", "أداء", "اداء", "تقرير", "انجاز", "إنجاز")
+_EMP_CONTENT_KW = ("ماذا نشر", "وش نشر", "شنو نشر", "المحتوى", "المحتويات", "منشورات",
+                   "التغريدات", "نشرت", "آخر ما نشر", "اخر ما نشر", "المنشورات")
+_EMP_SUGGEST_KW = ("اقترح", "اقتراح", "اقتراحات", "توصية", "توصيات", "نصيح", "رأيك", "رايك")
+_EMP_TOPICS_KW = ("المواضيع", "مواضيع", "الموضوعات", "راجع المواضيع", "وش المواضيع",
+                  "ايش المواضيع", "المواضيع المتاحة")
+# action verbs that must go to the normal agents, not the employee Q&A
+_ACTION_PREFIXES = ("انشر", "اكتب", "غرد", "غرّد", "رد ", "ردّ", "تابع", "اعجب",
+                    "أعجب", "لايك", "ريتويت", "احذف", "امسح")
+
+
+# توجيه الموظف للتفاعل مع محتوى محدّد من الشات: «تفاعل مع هذا المحتوى …»
+def _maybe_engage_employee(message: str, pinned_account: Optional[str]) -> Optional[str]:
+    """إن وجّه المستخدم الموظف المثبّت للتفاعل مع محتوى محدّد ألصقه (رد/إعجاب/
+    إعادة نشر)، نشغّل دورة تفاعل موجّهة في الخلفية ونعيد ردّاً تأكيدياً. الموظف
+    يبحث عن التغريدة على X من نصّها/حسابها ثم يتفاعل معها. يعيد None ليمر الطلب
+    للمعالجات الأخرى."""
+    import re as _re
+    import threading as _threading
+
+    msg = (message or "").strip()
+    if not msg or not pinned_account:
+        return None
+    if msg.endswith("؟") or msg.endswith("?"):
+        return None
+
+    trigger = _re.search(
+        r"تفاعل\s*مع|تفاعل|رد\s*على|ردّ\s*على|علّق\s*على|علق\s*على|"
+        r"اعمل\s*(?:لايك|ريتويت|رتويت)|اعد\s*نشر|أعد\s*نشر|إعادة\s*نشر|"
+        r"اعادة\s*نشر|ريتويت|رتويت",
+        msg)
+    if not trigger:
+        return None
+
+    # بوابة صارمة لتقليل الالتقاط الخاطئ: لا نفعّلها إلا مع مؤشّر محتوى واضح
+    # (كلمة «المحتوى/التالي…»، أو رابط، أو رسالة متعددة الأسطر، أو أمر في البداية).
+    lines = [ln for ln in msg.splitlines() if ln.strip()]
+    markers = _re.search(
+        r"هذا\s*المحتوى|المحتوى|التالي|التغريدة|البوست|المنشور|الخبر|النص", msg)
+    has_url = bool(_re.search(r"https?://", msg))
+    multiline = len(lines) >= 2
+    starts = trigger.start() <= 3
+    if not (markers or has_url or multiline or starts):
+        return None
+
+    low = msg.lower()
+    actions = set()
+    if _re.search(r"رد\s*على|ردّ\s*على|علّق|علق|تعليق", low):
+        actions.add("reply")
+    if _re.search(r"لايك|اعجب|أعجب|إعجاب|اعجاب|قلب", low):
+        actions.add("like")
+    if _re.search(r"ريتويت|رتويت|اعد\s*نشر|أعد\s*نشر|إعادة\s*نشر|اعادة\s*نشر", low):
+        actions.add("retweet")
+    if ("تفاعل" in low) or not actions:
+        actions |= {"reply", "like"}
+
+    # استخرج المحتوى المُلصق: من الأسطر التالية، أو بعد كلمة مؤشّر، أو بعد الفعل
+    content = ""
+    if multiline and trigger.start() < 60:
+        content = "\n".join(lines[1:]).strip()
+    if not content and markers:
+        mm = _re.search(
+            r"(?:المحتوى|التالي|التغريدة|البوست|المنشور|الخبر|النص)\s*[:：]?\s*(.+)$",
+            msg, _re.DOTALL)
+        if mm:
+            content = mm.group(1).strip()
+    if not content:
+        content = msg[trigger.end():].lstrip(" :：-–—مع").strip()
+    content = content.strip("*«»\"'“” \n").strip()
+    if not content or len(content) < 4:
+        return None
+
+    url_m = _re.search(r"https?://\S+", content)
+    url = url_m.group(0) if url_m else ""
+    handle_m = _re.search(r"@(\w{2,30})", content)
+    handle = handle_m.group(0) if handle_m else ""
+
+    try:
+        from app.aeos.bootstrap import get_platform
+
+        platform = get_platform()
+        cfg = platform.repository.get_by_account("x", pinned_account)
+        if not cfg:
+            return None
+        _threading.Thread(
+            target=platform.run_cycle_now,
+            args=(cfg.id, "manual", {"directed_engagement": {
+                "text": content, "handle": handle, "url": url,
+                "actions": sorted(actions),
+            }}),
+            daemon=True,
+        ).start()
+        acts_ar = "، ".join({
+            "reply": "الرد", "like": "الإعجاب", "retweet": "إعادة النشر",
+        }.get(a, a) for a in sorted(actions))
+        snippet = _re.sub(r"\s+", " ", content).strip()[:90]
+        return (f"🫡 تمام! وجّهت الموظف @{pinned_account} للتفاعل ({acts_ar}) مع المحتوى: "
+                f"«{snippet}». يبحث عنه على X الآن ويتفاعل بأسلوب شخصيته، "
+                "وسيوافيك بالنتيجة هنا في الشات. ⏳")
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee engage routing failed: {e}")
+        return None
+
+
+# توجيه مباشر للموظف الذكي من الشات: «انشر عن 2» أو «تكلم عن الذكاء الاصطناعي»
+def _maybe_direct_employee(message: str, pinned_account: Optional[str]) -> Optional[str]:
+    """إن وجّه المستخدم الموظف المثبّت للكتابة عن موضوع (بالاسم أو برقمه من
+    قائمة مواضيع آخر دورة)، شغّل دورة موجّهة فوراً في الخلفية وأعد ردّاً
+    تأكيديّاً. يعيد None ليمر الطلب للمعالجات الأخرى."""
+    import re as _re
+    import threading as _threading
+
+    msg = (message or "").strip()
+    if not msg or not pinned_account:
+        return None
+
+    topic = None
+    # (أ) صيغة صريحة مبدوءة بأمر: «انشر/اكتب/تكلم/غرّد عن …»
+    m = _re.match(
+        r"^(?:انشر|أنشر|اكتب|أكتب|تكلم|تكلّم|غرد|غرّد)(?:\s+تغريدة)?\s+(?:عن|حول)\s+(.+)$",
+        msg,
+        _re.DOTALL,
+    )
+    if m:
+        topic = m.group(1).strip().strip("«»\"'“”")
+    else:
+        # (ب) صيغة طبيعية: طلب صريح بالنشر + رغبة/أمر، مع لصق خبر/موضوع داخل
+        # الرسالة (مثل: «الخبر هذا ابيك تجيب له محتوى قوي وتنشره»). نتجنّب
+        # خطف الأسئلة (؟) حتى لا نلتقط «متى ينشر الموظف؟».
+        if not (msg.endswith("؟") or msg.endswith("?")):
+            publish = _re.search(
+                r"انشر|أنشر|تنشر|تنشره|وتنشر|وتنشره|ننشر|ينشر|ينشره|نشره|نشرها|"
+                r"انشره|انشرها|غرّد|غرد", msg)
+            desire = _re.search(
+                r"اب(?:ي|غى)|أب(?:ي|غى)|ابيك|أبيك|بغيت|جهّ?ز|حضّ?ر|اكتب|أكتب|"
+                r"سوّ?ي|من\s*فضلك|تكفى|ودّ?ي|ابغاك|أبغاك", msg)
+            if publish and desire:
+                mm = _re.search(r"(?:عن|حول)\s+(.+)$", msg, _re.DOTALL)
+                if mm:
+                    topic = mm.group(1).strip().strip("«»\"'“”")
+                else:
+                    # لا يوجد «عن …» صريح — مرّر الطلب كاملاً كموضوع موجّه؛
+                    # منشئ المحتوى سيستخرج الخبر/الموضوع الجوهري منه.
+                    topic = msg
+    if not topic:
+        return None
+
+    try:
+        from app.aeos.bootstrap import get_platform
+
+        platform = get_platform()
+        cfg = platform.repository.get_by_account("x", pinned_account)
+        if not cfg:
+            return None
+
+        # رقم موضوع؟ استبدله بنصّه من قائمة مواضيع آخر دورة (topic_suggestions)
+        num = _re.fullmatch(r"(?:رقم\s*|الموضوع\s*)?(\d{1,2})", topic)
+        if num:
+            idx = int(num.group(1)) - 1
+            sugg = (cfg.runtime_state.flags or {}).get("topic_suggestions") or []
+            if 0 <= idx < len(sugg):
+                topic = str(sugg[idx])
+            else:
+                shown = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(sugg)) or "(لا توجد)"
+                return (f"❗ ما عندي موضوع رقم {idx + 1} من آخر دورة. "
+                        f"المواضيع المتاحة:\n{shown}")
+
+        # دورة موجّهة فورية في الخلفية (لا نحجب الـWebSocket — التنفيذ يأخذ دقائق)
+        _threading.Thread(
+            target=platform.run_cycle_now,
+            args=(cfg.id, "manual", {"directed_topic": topic}),
+            daemon=True,
+        ).start()
+        # اعرض مقتطفاً نظيفاً من الطلب (سطر واحد، مضغوط المسافات)
+        snippet = _re.sub(r"\s+", " ", topic).strip()[:90]
+        return (f"🫡 تمام! استلم الموظف @{pinned_account} الطلب: «{snippet}». "
+                "يبحث فيه الآن ويجهّز منشوراً قوياً بأسلوب شخصيته ثم ينشره، "
+                "وسيوافيك بالنتيجة والرابط هنا في الشات. ⏳")
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee directive routing failed: {e}")
+        return None
+
+
+def _format_topic_suggestions(cfg) -> str:
+    """اعرض المواضيع/الوسوم التي اطّلع عليها الموظف في آخر دورة (topic_suggestions)
+    ليراجعها المستخدم ويوجّهه للكتابة عن أحدها بـ«انشر عن رقم»."""
+    account = getattr(cfg, "account_username", "") or "الموظف"
+    sugg = (getattr(cfg, "runtime_state", None) and cfg.runtime_state.flags.get("topic_suggestions")) or []
+    if not sugg:
+        return (f"🗒️ لا توجد مواضيع محفوظة من آخر دورة للموظف @{account} بعد. "
+                "شغّل دورة الآن ثم راجع المواضيع.")
+    listing = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(sugg))
+    return (f"🗒️ **مواضيع آخر دورة للموظف @{account}:**\n{listing}\n\n"
+            "👉 وجّهه للكتابة عن أحدها: اكتب «انشر عن 2» مثلاً، وسينفّذ بأسلوب شخصيته.")
+
+
+def _maybe_show_employee_data(message: str, pinned_account: Optional[str],
+                              user_id: Optional[int]) -> Optional[str]:
+    """عند وجود حساب مثبّت لموظف ذكي، إن طلب المستخدم «عرض» بيانات حيّة
+    (أخبار/ترند/تايم لاين/أهم البوستات) نجلبها في الخلفية ونرسل النتيجة للشات.
+    يتطلب فعل «عرض» صريحاً حتى لا نخطف أسئلة النقاش («ناقشني في الخبر»)."""
+    import re as _re
+
+    msg = (message or "").strip()
+    if not msg or not pinned_account:
+        return None
+    low = msg.lower()
+    show = _re.search(
+        r"اعرض|أعرض|اظهر|أظهر|عرض|جيب|هات|ورني|ورّني|وريني|اعطني|أعطني|show|"
+        r"ابغى\s*(?:اشوف|أشوف)|ابي\s*(?:اشوف|أشوف)|ابغى\s*ترى",
+        low,
+    )
+    if not show:
+        return None
+    if _re.search(r"خبر|أخبار|اخبار|news", low):
+        kind = "news"
+    elif _re.search(r"ترند|الرائج|المتداول|trend", low):
+        kind = "trends"
+    elif _re.search(r"تايم\s*لاين|التايم|الخط\s*الزمني|timeline", low):
+        kind = "timeline"
+    elif _re.search(r"أهم\s*البوستات|اهم\s*البوستات|أهم\s*المنشورات|اهم\s*المنشورات|"
+                    r"منش(?:ئ|يء)\s*المحتوى|توب\s*بوست|top\s*posts", low):
+        kind = "top_posts"
+    else:
+        return None
+    try:
+        from app.aeos.bootstrap import get_platform
+        from app.aeos.services import employee_data
+
+        platform = get_platform()
+        cfg = platform.repository.get_by_account("x", pinned_account)
+        if not cfg:
+            return None
+        return employee_data.request_data(kind, cfg, user_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee data show failed: {e}")
+        return None
+
+
+def _maybe_analyze_employee(message: str, pinned_account: Optional[str],
+                            user_id: Optional[int]) -> Optional[str]:
+    """إن طلب المستخدم من الموظف المثبّت أن يبحث/يحلّل عبر مصادره ويستنتج
+    المواضيع المرتبطة باهتماماته، نُشغّل التحليل عبر كل المصادر في الخلفية."""
+    import re as _re
+
+    msg = (message or "").strip()
+    if not msg or not pinned_account:
+        return None
+    low = msg.lower()
+    analyze = bool(_re.search(
+        r"حلّ?ل|استنتج|ابحث\s*وحلّ?ل|المواضيع\s*المرتبط[ةه]|المواضيع\s*المتعلق[ةه]", low))
+    if not analyze:
+        if _re.search(r"(?:ما\s*(?:هي\s*)?|وش\s*|أي\s*|ايش\s*)?المواضيع", low) and \
+           _re.search(r"اهتمام|تخصص", low):
+            analyze = True
+        elif _re.search(r"بناء[ًا]?\s*على", low) and _re.search(r"مواضيع|موضوع|اهتمام", low):
+            analyze = True
+    if not analyze:
+        return None
+    try:
+        from app.aeos.bootstrap import get_platform
+        from app.aeos.services import employee_data
+
+        platform = get_platform()
+        cfg = platform.repository.get_by_account("x", pinned_account)
+        if not cfg:
+            return None
+        return employee_data.request_analysis(cfg, user_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee analyze failed: {e}")
+        return None
+
+
+def _maybe_answer_employee_query(message: str, pinned_account: Optional[str]) -> Optional[str]:
+    """If a pinned account maps to an AI employee and the user is asking about it
+    (stats/contents/suggestions/discussion), answer using the insights service.
+    Returns the answer text, or None to fall through to the normal agents."""
+    msg = (message or "").strip()
+    if not msg or not pinned_account:
+        return None
+    low = msg.lower()
+    if any(low.startswith(p) for p in _ACTION_PREFIXES):
+        return None
+    try:
+        from app.aeos.bootstrap import get_platform
+        from app.aeos.services import insights as I
+
+        platform = get_platform()
+        cfg = platform.repository.get_by_account("x", pinned_account)
+        if not cfg:
+            return None
+        llm = platform.llm
+        eid = cfg.id
+
+        if any(k in low for k in _EMP_STATS_KW):
+            return I.format_stats(cfg, I.aggregate_stats(eid))
+        if any(k in low for k in _EMP_CONTENT_KW):
+            return I.format_contents(cfg, I.recent_contents(eid, 8))
+        if any(k in low for k in _EMP_SUGGEST_KW):
+            return I.build_suggestions(cfg, I.aggregate_stats(eid), llm)
+        if any(k in low for k in _EMP_TOPICS_KW):
+            return _format_topic_suggestions(cfg)
+        # نقاش حرّ مؤصَّل بآخر بيانات/تحليل جلبه الموظف. نفتح النقاش إذا: ذُكر
+        # «موظف»، أو كان سؤالاً (؟)، أو كان متابعةً لتحليل/بيانات سابقة (فصّل/ليش/
+        # اشرح/رأيك أو إشارة لموضوع/خبر/ترند/تغريدة/بوست/رقم) مع وجود سياق محفوظ.
+        import re as _re
+        try:
+            from app.aeos.services import employee_data
+            extra = employee_data.recent_data_text(eid)
+        except Exception:  # noqa: BLE001
+            extra = ""
+        followup = bool(_re.search(
+            r"موضوع|المواضيع|الخبر|الأخبار|الاخبار|الترند|التغريد|البوست|المنشور|"
+            r"رقم|فصّ?ل|اشرح|وضّ?ح|ليش|لماذا|علّق|علق|رأيك|رايك|حلّ?ل", low))
+        if ("موظف" in low) or msg.endswith("؟") or msg.endswith("?") or (extra and followup):
+            return I.answer_question(cfg, msg, llm, eid, extra_context=extra)
+        return None
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee query routing failed: {e}")
+        return None
+
+
+def _maybe_handle_employee_command(message: str, pinned_account: Optional[str],
+                                   user_id: Optional[int]) -> Optional[str]:
+    """Detect and execute an AI-employee control command (activate/pause/run/
+    status/list/delete/schedule/persona/teach) from natural language, in any
+    dialect. Runs BEFORE the employee Q&A helper so control commands are
+    executed rather than answered as discussion. Returns a reply or None."""
+    import re as _re
+
+    msg = (message or "").strip()
+    if not msg:
+        return None
+    low = msg.lower()
+    # مرشّح رخيص: لا نُشغّل المصنّف إلا إذا كان النص يشير للموظف/دورة عمل.
+    if not _re.search(r"موظف|employee|agent|\bدورة\b", low):
+        return None
+    try:
+        from app.services.intent_service import intent_service
+        from app.aeos.services.employee_commands import (
+            EMPLOYEE_INTENT_VALUES, handle as _handle_employee,
+        )
+
+        res = intent_service.detect_intent(msg)
+        if res.intent.value in EMPLOYEE_INTENT_VALUES:
+            return _handle_employee(
+                res.intent.value, res.entities, msg, pinned_account, user_id
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee command routing failed: {e}")
+    return None
+
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
         # mapping من user_id إلى قائمة WebSockets للإشعارات (تسجيل دخول، إلخ)
         self.user_websockets: Dict[int, List[WebSocket]] = {}
+        # websocket -> user_id (set once the client sends a message with user_id)
+        self.user_ids: Dict[WebSocket, Optional[int]] = {}
+        # main asyncio loop, captured at startup so background threads can push
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -191,6 +589,7 @@ class ConnectionManager:
                 self.user_websockets[uid].remove(websocket)
                 if not self.user_websockets[uid]:
                     del self.user_websockets[uid]
+        self.user_ids.pop(websocket, None)
 
     def register_user(self, user_id, websocket: WebSocket):
         """ربط user_id بـ WebSocket لإرسال إشعارات لاحقة."""
@@ -203,6 +602,9 @@ class ConnectionManager:
         self.user_websockets.setdefault(uid, [])
         if websocket not in self.user_websockets[uid]:
             self.user_websockets[uid].append(websocket)
+
+    def set_user(self, websocket: WebSocket, user_id) -> None:
+        self.user_ids[websocket] = _norm_uid(user_id)
 
     async def send_message(self, message: dict, websocket: WebSocket):
         await websocket.send_json(message)
@@ -227,6 +629,41 @@ class ConnectionManager:
                 except Exception:
                     pass
         return sent
+
+    async def broadcast_to_user(self, user_id: Optional[int], message: dict):
+        """Send a message to every live connection owned by ``user_id``.
+
+        If ``user_id`` is None we broadcast to all connections (best-effort).
+        """
+        uid = _norm_uid(user_id)
+        conns = list(self.active_connections)
+        targets = [
+            ws for ws in conns
+            if uid is None or self.user_ids.get(ws) == uid
+        ]
+        # Fallback: if no socket has identified as this user yet (e.g. the chat
+        # was opened but the user hasn't sent a message), still deliver to all
+        # open connections so autonomous cycle updates are never silently lost.
+        if not targets and uid is not None:
+            targets = conns
+        for ws in targets:
+            try:
+                await ws.send_json(message)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def push_from_thread(self, user_id: Optional[int], payload: dict) -> None:
+        """Thread-safe entry point used by background workers (AEOS)."""
+        loop = self.loop
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast_to_user(user_id, payload), loop
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
 
 manager = ConnectionManager()
 
@@ -261,7 +698,15 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            message_data = json.loads(data)
+            try:
+                message_data = json.loads(data)
+            except Exception:
+                await manager.send_message({
+                    "type": "error",
+                    "message": "Invalid JSON payload",
+                    "timestamp": datetime.now().isoformat()
+                }, websocket)
+                continue
             
             user_message = message_data.get("message", "")
             session_id = message_data.get("session_id", None)
@@ -269,6 +714,12 @@ async def websocket_endpoint(websocket: WebSocket):
             user_email = message_data.get("user_email", None)
             attachment = message_data.get("attachment", None)
             file_upload = message_data.get("file_upload", None)
+            pinned_account = message_data.get("pinned_account", None)
+
+            # remember which user owns this socket so background AEOS cycle
+            # updates can be pushed to the right chat client in real time.
+            if user_id is not None:
+                manager.set_user(websocket, user_id)
 
             # ربط هذا الـ WebSocket بـ user_id لإرسال إشعارات تسجيل الدخول لاحقاً
             if user_id:
@@ -369,40 +820,41 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
                     
                     # ── ملف JSON كوكيز ──
-                    elif file_name.endswith('.json') and 'auth_token' in file_content:
-                        # معالجة ملف كوكيز X مباشرة
-                        try:
-                            from app.agents.tools import _x_save_cookies_sync
-                            cookies_data = json.loads(file_content)
-                            label = file_name.replace('.json', '').strip()
-                            
-                            result = _x_save_cookies_sync(cookies_data, label) or {}
-                            
-                            await manager.send_message({
-                                "type": "typing",
-                                "status": False
-                            }, websocket)
-                            
-                            if result and result.get("success"):
-                                await manager.send_message({
-                                    "type": "assistant_message",
-                                    "message": f"✅ {result.get('message', 'تم حفظ الكوكيز بنجاح')}",
-                                    "timestamp": datetime.now().isoformat()
-                                }, websocket)
-                            else:
-                                await manager.send_message({
-                                    "type": "assistant_message",
-                                    "message": f"❌ {result.get('message', 'فشل حفظ الكوكيز')}",
-                                    "timestamp": datetime.now().isoformat()
-                                }, websocket)
-                        except Exception as e:
-                            await manager.send_message({
-                                "type": "typing",
-                                "status": False
-                            }, websocket)
+                    elif file_name.endswith('.json'):
+                        # معالجة ملف كوكيز X — التحقق والحفظ مركزيان في _x_save_cookies_sync
+                        from app.agents.tools import _x_save_cookies_sync
+                        from pathlib import Path as _Path
+
+                        # اسم الحساب: من نص المستخدم إن وُجد، وإلا من اسم الملف
+                        label = (str(user_message).strip() if user_message else "") or _Path(file_name).stem.strip()
+
+                        # نمرّر المحتوى الخام (نصاً) — الدالة تتكفّل بالتحليل والتحقق من auth_token والحفظ
+                        result = _x_save_cookies_sync(file_content, label, user_id=user_id) or {}
+
+                        await manager.send_message({
+                            "type": "typing",
+                            "status": False
+                        }, websocket)
+
+                        if result.get("success"):
+                            saved_label = result.get("label", label)
                             await manager.send_message({
                                 "type": "assistant_message",
-                                "message": f"❌ خطأ في معالجة ملف الكوكيز: {str(e)}",
+                                "message": (
+                                    f"✅ تمّت إضافة الحساب **@{saved_label}** بنجاح عبر الكوكيز!\n\n"
+                                    f"يمكنك الآن:\n"
+                                    f"• تثبيته من زر **حساباتي** لتنفيذ الإجراءات عليه\n"
+                                    f"• تفعيله كـ **موظف ذكي** ليعمل تلقائياً"
+                                ),
+                                "timestamp": datetime.now().isoformat()
+                            }, websocket)
+                        else:
+                            await manager.send_message({
+                                "type": "assistant_message",
+                                "message": (
+                                    f"❌ تعذّر إضافة الحساب: {result.get('message', 'فشل حفظ الكوكيز')}\n\n"
+                                    f"تأكد أن الملف بصيغة JSON صالحة ويحتوي على كوكي `auth_token`."
+                                ),
                                 "timestamp": datetime.now().isoformat()
                             }, websocket)
                         continue
@@ -446,26 +898,168 @@ async def websocket_endpoint(websocket: WebSocket):
                 # الحصول على جلسة قاعدة البيانات
                 db = next(get_db())
                 
+                # بناء الـ metadata: المرفق + الحساب المثبّت من الشات
+                agent_metadata = {}
+                if attachment:
+                    agent_metadata["attachment"] = attachment
+                if pinned_account:
+                    agent_metadata["pinned_account"] = pinned_account
+
+                # ── توجيه الموظف للتفاعل مع محتوى محدّد («تفاعل مع هذا المحتوى …») ──
+                engage_reply = _maybe_engage_employee(user_message, pinned_account)
+                if engage_reply:
+                    try:
+                        conv = memory_service.get_or_create_conversation(
+                            db=db, user_id=user_id, session_id=session_id)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="user", content=user_message)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="assistant",
+                            content=engage_reply, intent="aeos_employee_engage", agent="AEOS")
+                    except Exception as _e:
+                        print(f"Warning: persist employee engage failed: {_e}")
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
+                    await manager.send_message({
+                        "type": "assistant_message",
+                        "message": engage_reply,
+                        "timestamp": datetime.now().isoformat(),
+                    }, websocket)
+                    continue
+
+                # ── توجيه مباشر للموظف الذكي («انشر عن 2» / «تكلم عن …») ──
+                directive_reply = _maybe_direct_employee(user_message, pinned_account)
+                if directive_reply:
+                    try:
+                        conv = memory_service.get_or_create_conversation(
+                            db=db, user_id=user_id, session_id=session_id)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="user", content=user_message)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="assistant",
+                            content=directive_reply, intent="aeos_employee_directive", agent="AEOS")
+                    except Exception as _e:
+                        print(f"Warning: persist employee directive failed: {_e}")
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
+                    await manager.send_message({
+                        "type": "assistant_message",
+                        "message": directive_reply,
+                        "timestamp": datetime.now().isoformat(),
+                    }, websocket)
+                    continue
+
+                # ── بحث وتحليل عبر كل المصادر واستنتاج المواضيع المرتبطة بالاهتمام ──
+                employee_analysis_reply = _maybe_analyze_employee(
+                    user_message, pinned_account, user_id)
+                if employee_analysis_reply:
+                    try:
+                        conv = memory_service.get_or_create_conversation(
+                            db=db, user_id=user_id, session_id=session_id)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="user", content=user_message)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="assistant",
+                            content=employee_analysis_reply,
+                            intent="aeos_employee_analyze", agent="AEOS")
+                    except Exception as _e:
+                        print(f"Warning: persist employee analyze ack failed: {_e}")
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
+                    await manager.send_message({
+                        "type": "assistant_message",
+                        "message": employee_analysis_reply,
+                        "timestamp": datetime.now().isoformat(),
+                    }, websocket)
+                    continue
+
+                # ── عرض بيانات الموظف الحيّة (أخبار/ترند/تايم لاين/أهم البوستات) ──
+                employee_data_reply = _maybe_show_employee_data(
+                    user_message, pinned_account, user_id)
+                if employee_data_reply:
+                    try:
+                        conv = memory_service.get_or_create_conversation(
+                            db=db, user_id=user_id, session_id=session_id)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="user", content=user_message)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="assistant",
+                            content=employee_data_reply,
+                            intent="aeos_employee_data", agent="AEOS")
+                    except Exception as _e:
+                        print(f"Warning: persist employee data ack failed: {_e}")
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
+                    await manager.send_message({
+                        "type": "assistant_message",
+                        "message": employee_data_reply,
+                        "timestamp": datetime.now().isoformat(),
+                    }, websocket)
+                    continue
+
+                # ── أوامر التحكم بالموظف الذكي (تنفيذ قبل النقاش/الاستعلام) ──
+                employee_command_reply = _maybe_handle_employee_command(
+                    user_message, pinned_account, user_id)
+                if employee_command_reply:
+                    try:
+                        conv = memory_service.get_or_create_conversation(
+                            db=db, user_id=user_id, session_id=session_id)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="user", content=user_message)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="assistant",
+                            content=employee_command_reply,
+                            intent="aeos_employee_command", agent="AEOS")
+                    except Exception as _e:
+                        print(f"Warning: persist employee command failed: {_e}")
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
+                    await manager.send_message({
+                        "type": "assistant_message",
+                        "message": employee_command_reply,
+                        "timestamp": datetime.now().isoformat(),
+                    }, websocket)
+                    continue
+
+                # ── نقاش/استعلام عن الموظف الذكي المثبّت (قبل الوكلاء العامة) ──
+                employee_answer = _maybe_answer_employee_query(user_message, pinned_account)
+                if employee_answer:
+                    try:
+                        conv = memory_service.get_or_create_conversation(
+                            db=db, user_id=user_id, session_id=session_id)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="user", content=user_message)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="assistant",
+                            content=employee_answer, intent="aeos_employee_query", agent="AEOS")
+                    except Exception as _e:
+                        print(f"Warning: persist employee query failed: {_e}")
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
+                    await manager.send_message({
+                        "type": "assistant_message",
+                        "message": employee_answer,
+                        "timestamp": datetime.now().isoformat(),
+                    }, websocket)
+                    continue
+
                 # استخدام نظام الوكلاء الذكية مع الذاكرة
-                agent_result = agent_manager.process_user_message(
-                    message=user_message,
-                    user_id=user_id,
-                    session_id=session_id,
-                    metadata={"attachment": attachment} if attachment else None,
-                    db=db
-                )
-                
+                try:
+                    agent_result = agent_manager.process_user_message(
+                        message=user_message,
+                        user_id=user_id,
+                        session_id=session_id,
+                        metadata=agent_metadata or None,
+                        db=db
+                    )
+                except Exception as e:
+                    agent_result = {"success": False, "message": f"حدث خطأ داخل المعالج: {str(e)}"}
+
                 await manager.send_message({
                     "type": "typing",
                     "status": False
                 }, websocket)
-                
+
                 # إرسال رد الوكيل
                 if not agent_result or not isinstance(agent_result, dict):
                     agent_result = {"success": False, "message": None}
-                
+
                 response_message = agent_result.get("message")
-                
+
                 if agent_result.get("success") and response_message:
                     # إضافة معلومات إضافية إذا كانت متاحة
                     metadata = {}
@@ -474,7 +1068,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         metadata["confidence"] = agent_result["intent_result"].get("confidence")
                     if agent_result.get("agent"):
                         metadata["agent"] = agent_result["agent"]
-                    
+
                     await manager.send_message({
                         "type": "assistant_message",
                         "message": response_message,
@@ -538,6 +1132,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 }, websocket)
     
     except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001 - أي انقطاع آخر (ECONNRESET/إعادة تحميل)
+        print(f"WebSocket closed unexpectedly: {exc}")
+    finally:
+        # تنظيف مضمون للاتصال في كل الحالات لمنع تسرّب الاتصالات في active_connections
         manager.disconnect(websocket)
 
 

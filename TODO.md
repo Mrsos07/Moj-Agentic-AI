@@ -1,0 +1,8 @@
+- [x] Enforce unified strict specialty gate for ALL engagements in `app/aeos/skills/builtin.py`
+- [x] Harden grounded topic ranking (relevance + media + source quality) in `app/aeos/skills/builtin.py`
+- [x] Improve creator briefs for authentic X content style in `app/aeos/skills/builtin.py`
+- [x] Tighten content/reply prompts in `app/aeos/capabilities/handlers.py`
+- [x] Add safe media handling + fallback publish (text-only on media failure) in `app/aeos/capabilities/handlers.py`
+- [ ] Tune defaults for cautious execution in `app/aeos/bootstrap.py`
+- [ ] Run consistency search for final scope/relevance enforcement
+- [ ] Run critical-path API validation (toggle/trigger/logs)

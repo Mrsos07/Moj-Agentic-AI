@@ -87,7 +87,13 @@ class XAgent:
                 if candidate.lower() not in _blacklist:
                     return candidate
         
-        # ثالثاً: استخدم قاعدة البيانات للحسابات النشطة (دائماً)
+        # ثالثاً: الحساب المثبّت من الشات (زر "حساباتي") — أولوية على الحساب الافتراضي
+        pinned = (context or {}).get("pinned_account")
+        if pinned:
+            print(f"[DEBUG] Using pinned account from chat: {pinned}")
+            return pinned
+        
+        # رابعاً: استخدم قاعدة البيانات للحسابات النشطة (دائماً)
         user_id = context.get("user_id") if context else None
         if user_id:
             try:

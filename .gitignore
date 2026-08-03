@@ -64,8 +64,31 @@ frontend/build/
 .cache/
 *.cache
 
+# ⚠️ بيانات دخول الحسابات — ملفات الكوكيز تحوي auth_token و ct0، أي جلسة
+# كاملة تتجاوز كلمة المرور والتحقق الثنائي. لا تُرفع أبداً.
+app/x/cookies/
+app/x/loginx/CookiesBackup/
+app/x/loginx2026/cookies/
+static/uploads/
+*cookies*.json
+ChromeCookies
+
 # Debug artifacts
+debug_*.png
+debug_*.html
 debug_post.png
 debug_post.html
 check_status.py
 Copy.env
+
+# سكربتات تشخيص مؤقتة
+_diag_*.py
+_test_*.py
+_live_*.py
+_verify_*.py
+
+# server subprocess logs
+app/x/xsuite_server.log
+app/x/loginx_server.log
+app/identity/identity_server.log
+app/x/loginx2026/loginx2026_server.log

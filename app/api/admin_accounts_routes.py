@@ -109,7 +109,7 @@ async def delete_account_admin(
 @router.patch("/{account_id}/status")
 async def update_account_status_admin(
     account_id: int,
-    status: str = Query(..., regex="^(active|inactive|expired|error)$"),
+    status: str = Query(..., pattern="^(active|inactive|expired|error)$"),
     error_message: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)

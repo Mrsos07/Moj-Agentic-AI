@@ -30,7 +30,11 @@ def get_db():
 
 def init_db():
     """Initialize database tables + apply lightweight in-place migrations."""
-    from app.db.models import User, XAccount, SocialAccount, Conversation, Message, ScheduleEvent, TelegramIntegration
+    from app.db.models import (
+        User, XAccount, SocialAccount, Conversation, Message, ScheduleEvent,
+        TelegramIntegration,
+        AIEmployee, EmployeeMemoryRecord, ExecutionJobRecord, ExecutionLogRecord,
+    )
     Base.metadata.create_all(bind=engine)
     print("Database tables created successfully")
 

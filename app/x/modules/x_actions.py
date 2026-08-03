@@ -205,6 +205,60 @@ def _wait_button_enabled(scope: Page, selectors: list[str], timeout_ms: int = 12
         scope.page.wait_for_timeout(250)
     return False
 
+def _testid_visible(page, testid: str, timeout_ms: int = 8_000) -> bool:
+    """انتظر ظهور عنصر بـ data-testid محدّد خلال المهلة (إشارة تأكيد للفعل)."""
+    deadline = time.time() + (timeout_ms / 1000.0)
+    loc = page.locator(f"[data-testid='{testid}']")
+    while time.time() < deadline:
+        try:
+            if loc.count() and loc.first.is_visible():
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(200)
+    return False
+
+
+def _success_toast_sent(page) -> bool:
+    """توست تأكيد إرسال (رد/منشور) بنصوص X المعتادة عربي/إنجليزي."""
+    try:
+        toast = page.get_by_test_id("toast")
+        if not (toast.count() and toast.first.is_visible()):
+            return False
+        txt = (toast.first.inner_text() or "").lower()
+        markers = ["your post was sent", "your reply was sent", "was sent", "sent",
+                   "تم إرسال", "تم الرد", "أُرسل", "ارسل", "ردّك", "ردك"]
+        return any(m in txt for m in markers)
+    except Exception:
+        return False
+
+
+def _reply_submitted(page, filled_text: str = "", timeout_ms: int = 20_000) -> bool:
+    """تأكيد فعلي أن الرد أُرسل.
+
+    إشارتان موثوقتان بعد الضغط على زر النشر:
+      1) ظهور توست نجاح ("Your reply was sent" / "تم إرسال ردك").
+      2) إفراغ/اختفاء محرّر الرد (tweetTextarea_0) بعد أن كان يحوي النص.
+    إن بقي المحرّر ممتلئاً بالنص ولم يظهر توست => الرد لم يُرسل.
+    """
+    deadline = time.time() + (timeout_ms / 1000.0)
+    tb = page.locator("div[data-testid='tweetTextarea_0']")
+    while time.time() < deadline:
+        if _success_toast_sent(page):
+            return True
+        try:
+            if tb.count() == 0 or not tb.first.is_visible():
+                return True
+            cur = (tb.first.inner_text() or "").strip()
+            # أُفرغ المحرّر بعد أن كان يحوي نصّنا => تم الإرسال
+            if filled_text and cur == "":
+                return True
+        except Exception:
+            return True
+        page.wait_for_timeout(300)
+    return False
+
+
 def like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
     """Like a tweet by URL."""
     with sync_playwright() as p:
@@ -226,6 +280,14 @@ def like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_aft
                 "[aria-label*='أعجب']",
             ]
             _click_first_visible(page, selectors, timeout_ms=60_000)
+
+            # تأكيد فعلي: تحوّل الزر إلى "unlike" يعني أن الإعجاب سُجّل بالفعل.
+            if not _testid_visible(page, "unlike", timeout_ms=8_000):
+                try:
+                    page.screenshot(path="debug_like.png", full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError("لم يتم تأكيد الإعجاب (لم يتحوّل الزر إلى unlike).")
 
             page.wait_for_timeout(wait_after_ms)
         finally:
@@ -271,6 +333,14 @@ def repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_a
             # Wait for menu to appear then click
             _wait_any(page, ["div[role='menu']", "div[role='menuitem']"], timeout_ms=15_000)
             _click_first_visible(page, menu_item_selectors, timeout_ms=30_000)
+
+            # تأكيد فعلي: تحوّل الزر إلى "unretweet" يعني أن إعادة النشر تمّت.
+            if not _testid_visible(page, "unretweet", timeout_ms=8_000):
+                try:
+                    page.screenshot(path="debug_repost.png", full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError("لم يتم تأكيد إعادة النشر (لم يتحوّل الزر إلى unretweet).")
 
             page.wait_for_timeout(wait_after_ms)
         finally:
@@ -406,8 +476,19 @@ def reply_to_tweet(
 
             # If it never becomes enabled, we'll still attempt the click (X UI can be flaky)
             _click_first_visible(page, publish_selectors, timeout_ms=30_000)
+            page.wait_for_timeout(1500)
 
-            # Wait 5s as requested then exit
+            # تأكيد فعلي أن الرد أُرسل قبل اعتبار العملية ناجحة (يمنع النجاح الكاذب).
+            if not _reply_submitted(page, filled_text=reply_text, timeout_ms=20_000):
+                try:
+                    page.screenshot(path="debug_reply.png", full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "لم يتم تأكيد إرسال الرد: بقي المحرّر ممتلئاً ولم يظهر تأكيد الإرسال."
+                )
+
+            # انتظار قصير بعد التأكيد
             page.wait_for_timeout(wait_after_ms)
         finally:
             context.close()
@@ -433,6 +514,17 @@ def bookmark_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait
                 "[aria-label*='الإشارات المرجعية']",
             ]
             _click_first_visible(page, selectors, timeout_ms=60_000)
+
+            # تأكيد فعلي: تحوّل الزر إلى "removeBookmark" يعني أن الحفظ تمّ.
+            # بدونه كان «ملف الإلهام» يملأ بمراجع لم تُحفظ فعلاً.
+            if not _testid_visible(page, "removeBookmark", timeout_ms=8_000):
+                try:
+                    page.screenshot(path="debug_bookmark.png", full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "لم يتم تأكيد الحفظ (لم يتحوّل الزر إلى removeBookmark)."
+                )
             page.wait_for_timeout(wait_after_ms)
         finally:
             context.close()
@@ -474,13 +566,17 @@ def quote_tweet(
             _click_first_visible(page, open_menu_selectors, timeout_ms=60_000)
             _wait_any(page, ["div[role='menu']", "div[role='menuitem']"], timeout_ms=15_000)
 
-            # Click Quote (EN/AR)
+            # Click Quote (EN/AR + تنويعات همزة القطع/الوصل في واجهة X العربية)
             quote_selectors = [
                 "div[role='menuitem']:has-text('Quote')",
                 "div[role='menuitem']:has-text('اقتباس')",
+                "div[role='menuitem']:has-text('إقتباس')",
                 "div[role='menuitem']:has-text('اقتبس')",
+                "div[role='menuitem']:has-text('مع تعليق')",
+                "a[href*='/compose/post']",
                 "span:has-text('Quote')",
                 "span:has-text('اقتباس')",
+                "span:has-text('إقتباس')",
                 "span:has-text('اقتبس')",
             ]
             _click_first_visible(page, quote_selectors, timeout_ms=30_000)
@@ -505,15 +601,40 @@ def quote_tweet(
                 file_input.set_input_files(media_path)
                 _wait_media_uploaded_in_composer(page, timeout_ms=media_timeout_ms)
 
-            # Publish
-            publish_selectors = [
-                "button[data-testid='tweetButtonInline']",
-                "button[data-testid='tweetButton']",
-                "button:has-text('Post')",
-                "button:has-text('نشر')",
-            ]
-            _wait_button_enabled(scope, ["button[data-testid='tweetButtonInline']", "button[data-testid='tweetButton']"], timeout_ms=120_000)
-            _click_first_visible(page, publish_selectors, timeout_ms=30_000)
+            # ── النشر مع تأكيد فعلي (كان هنا «نجاح كاذب») ──
+            # المشكلة السابقة: نضغط الزر ثم ننتظر وننهي بنجاح دون أي تحقّق. ومحرّر
+            # X الجديد (Lexical) لا يُرسل دائماً بالنقر البرمجي، فكان الاقتباس
+            # يُبلّغ بالنجاح ولا شيء يُنشر. نستخدم الآن نفس المسار المُجرَّب في
+            # النشر: انتظار تفعيل الزر → نقر داخل المودال → تأكيد → فولباك
+            # Ctrl+Enter → فشل صريح إن لم يتأكّد الإرسال.
+            from .x_post import (
+                _click_publish, _composer_dialog_open, _confirm_submitted,
+                _submit_via_keyboard, _wait_publish_button_enabled,
+            )
+
+            # يرفع TimeoutError إن لم يُفعّل الزر (كان يُتجاهل فيُنقر زر معطّل)
+            _wait_publish_button_enabled(page, timeout_ms=120_000)
+            composer_open_before = _composer_dialog_open(page)
+
+            _click_publish(page)
+            page.wait_for_timeout(1_500)
+            # ممنوع الاعتماد على وجود «/status/» في الرابط: صفحة الاقتباس تبدأ
+            # عليه أصلاً، فيصير التأكيد كاذباً دائماً.
+            sent = _confirm_submitted(page, timeout_ms=12_000,
+                                      saw_dialog_before=composer_open_before,
+                                      allow_status_url_fallback=False)
+            if not sent:
+                sent = _submit_via_keyboard(page, timeout_ms=15_000,
+                                            allow_status_url_fallback=False)
+            if not sent:
+                try:
+                    page.screenshot(path="debug_quote.png", full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "لم يتم تأكيد نشر الاقتباس: بقي المحرّر مفتوحاً ولم يظهر "
+                    "تأكيد الإرسال من X."
+                )
             page.wait_for_timeout(wait_after_ms)
         finally:
             context.close()
@@ -586,10 +707,45 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool = True
             btn.first.wait_for(state="visible", timeout=30_000)
             btn.first.scroll_into_view_if_needed()
 
+            # التقط معرّف الزر بعينه قبل النقر: صفحة الملف تحوي أزرار متابعة
+            # لحسابات مقترحة أيضاً، فالبحث في الصفحة كلها قد يؤكّد زراً آخر.
+            try:
+                clicked_testid = btn.first.get_attribute("data-testid") or ""
+            except Exception:
+                clicked_testid = ""
+
             try:
                 btn.first.click(timeout=8_000)
             except Exception:
                 btn.first.click(timeout=8_000, force=True)
+
+            # تأكيد فعلي: يتحوّل نفس الزر إلى "<id>-unfollow" بعد نجاح المتابعة
+            # (أو إلى إلغاء طلب المتابعة في الحسابات المحمية).
+            expected = []
+            if clicked_testid.endswith("-follow"):
+                base = clicked_testid[: -len("-follow")]
+                expected = [f'[data-testid="{base}-unfollow"]',
+                            f'[data-testid="{base}-cancelFollowRequest"]']
+            expected += ['[data-testid$="-unfollow"]',
+                         '[data-testid$="-cancelFollowRequest"]',
+                         'button:has-text("إلغاء المتابعة")',
+                         'button:has-text("Following")']
+            confirmed = False
+            for sel in expected:
+                try:
+                    loc = page.locator(sel)
+                    if loc.count():
+                        loc.first.wait_for(state="visible", timeout=6_000)
+                        confirmed = True
+                        break
+                except Exception:
+                    continue
+            if not confirmed:
+                try:
+                    page.screenshot(path="debug_follow.png", full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError("لم يتم تأكيد المتابعة (لم يتحوّل الزر إلى unfollow).")
 
             page.wait_for_timeout(wait_after_ms)
         finally:
