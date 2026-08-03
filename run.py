@@ -47,5 +47,9 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
+        # Only watch our own source. Watching the whole tree (incl. venv)
+        # caused constant reloads that dropped API connections (ECONNRESET).
+        reload_dirs=["app"],
+        reload_excludes=["venv/*", "*/site-packages/*"],
         log_level="info"
     )

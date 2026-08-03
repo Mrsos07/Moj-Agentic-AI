@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { FiSend, FiPlus, FiImage, FiFile } from 'react-icons/fi'
+import { FiUserPlus } from 'react-icons/fi'
 
-const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnected, onAttachImage, onAttachFile, onFocusRef }) => {
+const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnected, onAttachImage, onAttachFile, onAttachCookies, onFocusRef }) => {
   const [isAttachOpen, setIsAttachOpen] = useState(false)
   const imageInputRef = useRef(null)
   const fileInputRef = useRef(null)
+  const cookiesInputRef = useRef(null)
   const textareaRef = useRef(null)
 
   useEffect(() => {
@@ -31,6 +33,11 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
     fileInputRef.current?.click()
   }
 
+  const handleChooseCookies = () => {
+    setIsAttachOpen(false)
+    cookiesInputRef.current?.click()
+  }
+
   const handleImageSelected = async (e) => {
     const file = e.target.files?.[0]
     e.target.value = ''
@@ -43,6 +50,13 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
     e.target.value = ''
     if (!file) return
     await onAttachFile?.(file)
+  }
+
+  const handleCookiesSelected = async (e) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    await onAttachCookies?.(file)
   }
 
   return (
@@ -88,6 +102,14 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
                   <FiFile size={18} className="text-text-secondary-light dark:text-text-secondary-dark" />
                   <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">إرفاق ملف</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={handleChooseCookies}
+                  className="w-full flex items-center gap-2 px-4 py-3 text-right hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors border-t border-border-light dark:border-border-dark"
+                >
+                  <FiUserPlus size={18} className="text-primary" />
+                  <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">إضافة حساب (كوكيز/CSV)</span>
+                </button>
               </div>
             )}
 
@@ -104,6 +126,13 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
               accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.ms-excel,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx"
               className="hidden"
               onChange={handleFileSelected}
+            />
+            <input
+              ref={cookiesInputRef}
+              type="file"
+              accept=".json,application/json,.csv,text/csv"
+              className="hidden"
+              onChange={handleCookiesSelected}
             />
           </div>
           <textarea

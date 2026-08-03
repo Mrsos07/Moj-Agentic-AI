@@ -50,6 +50,8 @@ Mako==1.3.10
 MarkupSafe==3.0.3
 mmh3>=4.0.0
 openai==2.14.0
+# ذاكرة Zep/Graphiti المعرفية الزمنية (مشاعر/سلوك الموظف الذكي) + قاعدة Kuzu المضمّنة
+graphiti-core[kuzu]==0.29.2
 opentelemetry-api==1.39.1
 passlib==1.7.4
 pillow==12.1.0
@@ -89,3 +91,19 @@ websockets==15.0.1
 Werkzeug==3.1.5
 zipp==3.23.0
 tzdata==2025.3
+
+# ══════════════════════════════════════════════════════════════════════════
+# AEOS — AI Employee Operating System (app/aeos)
+# ملاحظة: لم تُضف مكتبات خارجية جديدة — النظام يعيد استخدام الحزم الموجودة أعلاه.
+# التبعيات التي يعتمد عليها AEOS (جميعها مثبّتة بالفعل في القائمة أعلاه):
+#   - cryptography     : خزنة الأسرار (Fernet) لتشفير الكوكيز/التوكنات
+#   - openai           : مزوّد الاستدلال (ILLMProvider)
+#   - requests         : استدعاءات MCP (Browser/News) وجسر app/x
+#   - beautifulsoup4   : تحليل صفحات الويب (BrowserMCP)
+#   - lxml             : تحليل خلاصات RSS/XML (NewsMCP عبر BeautifulSoup "xml")
+#   - SQLAlchemy       : تخزين الموظفين/الذاكرة/الوظائف/السجلات
+#   - redis            : (اختياري) طابور وظائف دائم للتوسّع متعدد العمليات
+#   - tzdata           : مطلوب لـ zoneinfo على Windows (منطق ساعات عمل الموظفين)
+# بقية مكوّنات AEOS تعتمد على المكتبة القياسية فقط (abc, dataclasses,
+# zoneinfo, heapq, threading, hashlib, ...).
+# ══════════════════════════════════════════════════════════════════════════

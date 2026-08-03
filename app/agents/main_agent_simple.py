@@ -61,7 +61,33 @@ class MainAgent:
             confidence = intent_result.get("confidence", 0)
             
             print(f"[DEBUG MainAgent] message='{message[:80]}' intent={intent} platform={platform} confidence={confidence} entities={entities}")
-            
+
+            # ── التحكم بالموظف الذكي (AEOS) عبر اللغة الطبيعية ──
+            # يُوجَّه قبل فحص الثقة لأن نوايا الموظف تُرفَع ثقتها في المصنّف.
+            from app.aeos.services.employee_commands import (
+                EMPLOYEE_INTENT_VALUES, handle as _handle_employee,
+            )
+            if intent in EMPLOYEE_INTENT_VALUES:
+                pinned = (metadata or {}).get("pinned_account")
+                emp_reply = _handle_employee(intent, entities, message, pinned, user_id)
+                if emp_reply:
+                    if db and conversation_id:
+                        try:
+                            memory_service.add_message(
+                                db=db, conversation_id=conversation_id,
+                                role="assistant", content=emp_reply,
+                                intent=intent, confidence=confidence, agent="AEOS",
+                            )
+                        except Exception:
+                            pass
+                    return {
+                        "success": True,
+                        "message": emp_reply,
+                        "intent_result": intent_result,
+                        "agent": "AEOS",
+                        "conversation_id": conversation_id,
+                    }
+
             if confidence < 0.5:
                 print(f"[DEBUG MainAgent] LOW confidence ({confidence}) — falling back to AI")
                 # main.py سيمرر الرسالة لـ OpenAI كـ fallback
@@ -125,6 +151,8 @@ class MainAgent:
                     "platform": platform,
                     "user_id": user_id,
                     "conversation_id": conversation_id,
+                    # الحساب المثبّت من الشات (زر "حساباتي") يُستخدم افتراضياً لأي إجراء
+                    "pinned_account": (metadata or {}).get("pinned_account"),
                 }
                 
                 x_response = self.x_agent.process_request(message, context)

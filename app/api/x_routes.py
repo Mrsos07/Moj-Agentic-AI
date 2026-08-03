@@ -155,6 +155,48 @@ async def x_login_disabled(
     )
 
 
+class XLoginCredentialsRequest(BaseModel):
+    """تسجيل دخول حساب X ببيانات الدخول عبر جسر loginx (غير متزامن)."""
+    username: str = Field(..., description="اسم المستخدم")
+    password: str = Field(..., description="كلمة المرور")
+    email: Optional[str] = Field("", description="البريد (اختياري — للتحقق)")
+
+
+@router.post("/login-credentials")
+async def x_login_credentials(
+    request: XLoginCredentialsRequest,
+    current_user: Optional[User] = Depends(get_current_user)
+):
+    """
+    تسجيل دخول حساب X باسم المستخدم/كلمة المرور عبر خادم loginx.
+
+    العملية غير متزامنة: يبدأ التسجيل في الخلفية وتُحفظ الكوكيز باسم الحساب
+    عند النجاح — استعلم عن الحسابات (`GET /api/x/accounts`) حتى يظهر الحساب.
+    """
+    from app.agents.tools import x_login_account
+
+    username = (request.username or "").strip().lstrip("@")
+    if not username or not (request.password or "").strip():
+        raise HTTPException(status_code=400, detail="اسم المستخدم وكلمة المرور مطلوبان")
+
+    result = x_login_account(
+        username=username,
+        password=request.password.strip(),
+        email=(request.email or "").strip(),
+    )
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("message") or "تعذّر بدء تسجيل الدخول — تأكد من تشغيل خادم loginx",
+        )
+    return {
+        "success": True,
+        "label": username,
+        "message": result.get("message") or "بدأ تسجيل الدخول — سيظهر الحساب في القائمة عند اكتماله.",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 @router.post("/upload-cookies", response_model=XUploadCookiesResponse)
 async def x_upload_cookies(
     cookie_file: UploadFile = File(..., description="ملف كوكيز الحساب (JSON)"),

@@ -185,3 +185,97 @@ class TelegramIntegration(Base):
 
     def __repr__(self):
         return f"<TelegramIntegration(user_id={self.user_id}, chat_id={self.chat_id}, enabled={self.is_enabled})>"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AEOS — AI Employee Operating System tables
+# One Connected Account = One AI Employee. Each row is a permanent employee
+# configuration; the runtime that operates it is temporary.
+# ══════════════════════════════════════════════════════════════════════════
+
+class AIEmployee(Base):
+    """Permanent, isolated configuration of one autonomous AI Employee."""
+    __tablename__ = "ai_employees"
+
+    id = Column(String(64), primary_key=True, index=True)  # employee_id (uuid)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    platform = Column(String(50), nullable=False, default="x", index=True)
+    account_username = Column(String(255), nullable=False, index=True)
+    cookie_label = Column(String(255), nullable=True)
+    status = Column(String(50), default="active", nullable=False, index=True)
+
+    # JSON-encoded domain sub-objects (kept as TEXT for SQLite portability)
+    persona_json = Column(Text, nullable=True)
+    goals_json = Column(Text, nullable=True)
+    knowledge_json = Column(Text, nullable=True)
+    skills_json = Column(Text, nullable=True)
+    mcp_servers_json = Column(Text, nullable=True)
+    business_rules_json = Column(Text, nullable=True)
+    scheduler_json = Column(Text, nullable=True)
+    runtime_state_json = Column(Text, nullable=True)
+
+    next_wake_at = Column(DateTime, nullable=True, index=True)
+    last_cycle_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<AIEmployee(id={self.id}, account=@{self.account_username}, status={self.status})>"
+
+
+class EmployeeMemoryRecord(Base):
+    """A single memory item across any memory layer for one employee."""
+    __tablename__ = "employee_memories"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    employee_id = Column(String(64), ForeignKey("ai_employees.id"), nullable=False, index=True)
+    layer = Column(String(50), nullable=False, index=True)  # working|conversation|long_term|semantic|reflection
+    key = Column(String(255), nullable=True, index=True)
+    content = Column(Text, nullable=False)
+    importance = Column(Integer, default=1)                  # 1..5
+    embedding = Column(Text, nullable=True)                  # JSON list[float] (optional)
+    extra_metadata = Column(Text, nullable=True)             # JSON
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def __repr__(self):
+        return f"<EmployeeMemory(employee={self.employee_id}, layer={self.layer})>"
+
+
+class ExecutionJobRecord(Base):
+    """A wake job produced by the scheduler and consumed by a shared worker."""
+    __tablename__ = "execution_jobs"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    job_id = Column(String(64), unique=True, index=True, nullable=False)
+    employee_id = Column(String(64), ForeignKey("ai_employees.id"), nullable=False, index=True)
+    event_type = Column(String(50), nullable=False)
+    event_payload = Column(Text, nullable=True)             # JSON
+    status = Column(String(50), default="QUEUED", index=True)  # QUEUED|RUNNING|DONE|FAILED
+    priority = Column(Integer, default=3)
+    attempts = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<ExecutionJob(job={self.job_id}, employee={self.employee_id}, status={self.status})>"
+
+
+class ExecutionLogRecord(Base):
+    """Per-cycle audit log: phases, decision, capability results, reflection."""
+    __tablename__ = "execution_logs"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    employee_id = Column(String(64), ForeignKey("ai_employees.id"), nullable=False, index=True)
+    cycle_id = Column(String(64), index=True, nullable=False)
+    event_type = Column(String(50), nullable=True)
+    phase = Column(String(50), nullable=True, index=True)
+    decision = Column(Text, nullable=True)                  # JSON
+    outcome = Column(Text, nullable=True)                   # JSON
+    success = Column(Boolean, default=True)
+    duration_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def __repr__(self):
+        return f"<ExecutionLog(employee={self.employee_id}, cycle={self.cycle_id}, phase={self.phase})>"

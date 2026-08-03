@@ -23,7 +23,8 @@ class MemoryService:
         self,
         db: Session,
         user_id: Optional[int] = None,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        title: Optional[str] = None
     ) -> Conversation:
         """
         الحصول على محادثة موجودة أو إنشاء جديدة
@@ -61,9 +62,14 @@ class MemoryService:
             conversation = Conversation(
                 user_id=user_id,
                 session_id=session_id,
-                title="محادثة جديدة"
+                title=title or "محادثة جديدة"
             )
             db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+        # عيّن العنوان المحدّد (مثل عنوان محادثة الموظف) إن كانت المحادثة بلا عنوان
+        elif title and (conversation.title in (None, "", "محادثة جديدة")):
+            conversation.title = title
             db.commit()
             db.refresh(conversation)
         

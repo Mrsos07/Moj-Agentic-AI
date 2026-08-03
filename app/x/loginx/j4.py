@@ -16,10 +16,32 @@ except ImportError:
     sync_playwright = None
 
 
+def _find_ldconsole() -> str:
+    """يحدّد مسار ldconsole.exe بلا ترميز صلب لحرف القرص.
+
+    كان المسار مكتوباً صراحةً في الكود، فيختلف بين أجهزة المساهمين (D: عند
+    أحدهم و C: عند آخر) ويُنتج تعارض دمج في كل مزامنة، ويكسر تسجيل الدخول عند
+    من لا يطابق مساره. الأولوية: متغيّر البيئة ثم أول مسار موجود فعلاً.
+    """
+    env = (os.getenv("LDPLAYER_CONSOLE") or "").strip('" ')
+    if env and os.path.exists(env):
+        return env
+    candidates = [
+        rf"{d}:\LDPlayer\LDPlayer9\ldconsole.exe" for d in ("C", "D", "E")
+    ] + [
+        r"C:\Program Files\LDPlayer\LDPlayer9\ldconsole.exe",
+        r"C:\ChangZhi\LDPlayer9\ldconsole.exe",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]  # للتبليغ عن خطأ واضح لاحقاً
+
+
 class LDPlayerChromeAutomation:
     def __init__(self, log_callback=None):
-        # مسار ldconsole حسب تثبيت LDPlayer عندك
-        self.ldconsole = r"D:\LDPlayer\LDPlayer9\ldconsole.exe"
+        # مسار ldconsole — يُكتشف تلقائياً (أو LDPLAYER_CONSOLE في البيئة)
+        self.ldconsole = _find_ldconsole()
         self.adb_path = None
         self.emulator_index = None
         self.playwright_cookies_path = None  # مسار ملف الكوكيز الخاص ببلاي رايت (بعد التحويل)

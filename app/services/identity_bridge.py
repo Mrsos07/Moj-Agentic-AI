@@ -20,6 +20,8 @@ IDENTITY_DIR = Path(__file__).resolve().parent.parent / "identity"
 API_TIMEOUT = 120  # توليد الصور قد يأخذ وقتاً
 
 _process: Optional[subprocess.Popen] = None
+_log_fh = None  # منع تجمّد العملية الابنة على أنبوب stdout غير مقروء
+IDENTITY_LOG = IDENTITY_DIR / "identity_server.log"
 
 
 def _is_running() -> bool:
@@ -102,12 +104,21 @@ def start_identity_server() -> bool:
         print("[Identity-Bridge] ⚠️ GEMINI_API_KEY غير موجود في .env — السيرفر لن يشتغل")
 
     try:
+        # وجّه المخرجات إلى ملف سجل بدل PIPE غير مقروء يتجمّد عند امتلائه.
+        global _log_fh
+        try:
+            if _log_fh and not _log_fh.closed:
+                _log_fh.close()
+        except Exception:
+            pass
+        _log_fh = open(IDENTITY_LOG, "w", encoding="utf-8", errors="ignore")
+
         _process = subprocess.Popen(
             [python_exe, "-m", "flask", "--app", "app", "run",
              "--host", "0.0.0.0", "--port", str(IDENTITY_PORT)],
             cwd=str(IDENTITY_DIR),
             env=env,
-            stdout=subprocess.PIPE,
+            stdout=_log_fh,
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
@@ -120,7 +131,12 @@ def start_identity_server() -> bool:
                 print(f"[Identity-Bridge] ✅ سيرفر identity جاهز على بورت {IDENTITY_PORT}")
                 return True
             if _process.poll() is not None:
-                out = _process.stdout.read().decode(errors="ignore")[:500]
+                out = ""
+                try:
+                    _log_fh.flush()
+                    out = IDENTITY_LOG.read_text(encoding="utf-8", errors="ignore")[-500:]
+                except Exception:
+                    pass
                 print(f"[Identity-Bridge] ❌ السيرفر توقّف مبكراً:\n{out}")
                 return False
 
@@ -133,7 +149,7 @@ def start_identity_server() -> bool:
 
 
 def stop_identity_server():
-    global _process
+    global _process, _log_fh
     if _process and _process.poll() is None:
         print("[Identity-Bridge] إيقاف سيرفر identity ...")
         try:
@@ -142,6 +158,12 @@ def stop_identity_server():
         except Exception:
             _process.kill()
         _process = None
+    try:
+        if _log_fh and not _log_fh.closed:
+            _log_fh.close()
+    except Exception:
+        pass
+    _log_fh = None
 
 
 def _api_call(method: str, endpoint: str, **kwargs) -> Dict[str, Any]:

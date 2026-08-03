@@ -12,14 +12,48 @@ def is_url(s: str) -> bool:
     return bool(re.match(r"^https?://", (s or "").strip(), re.I))
 
 
+# Extensions we can safely hand to the X composer (image/video).
+_SAFE_MEDIA_EXTS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif",
+    ".mp4", ".mov", ".webm", ".m4v",
+}
+
+
+def _sanitize_ext(ext: str) -> str:
+    """Return a clean, filesystem-safe media extension or "" if unusable.
+
+    Media URLs often carry trailing tokens that are NOT valid on Windows
+    filenames, e.g. Twitter's ``...ABC.jpg:large`` / ``.jpg:orig``. Keeping such
+    a suffix makes ``open(path, "wb")`` raise ``[Errno 22] Invalid argument``.
+    So we keep only a leading ``.<alnum>`` and require it to be a known media ext.
+    """
+    ext = (ext or "").strip().lower()
+    m = re.match(r"^(\.[a-z0-9]+)", ext)
+    if not m:
+        return ""
+    clean = m.group(1)
+    return clean if clean in _SAFE_MEDIA_EXTS else ""
+
+
 def guess_ext_from_url_or_ct(url: str, content_type: Optional[str]) -> str:
-    if content_type:
-        ext = mimetypes.guess_extension(content_type.split(";")[0].strip())
-        if ext:
-            return ext
-    path = Path(url.split("?")[0])
-    if path.suffix:
-        return path.suffix
+    ct = (content_type or "").split(";")[0].strip().lower()
+
+    # 1) prefer the server-declared content type
+    if ct:
+        clean = _sanitize_ext(mimetypes.guess_extension(ct) or "")
+        if clean:
+            return clean
+
+    # 2) fall back to the URL path suffix (sanitized against illegal chars)
+    clean = _sanitize_ext(Path(url.split("?")[0]).suffix)
+    if clean:
+        return clean
+
+    # 3) last resort: derive a safe default from the content-type family
+    if ct.startswith("image/"):
+        return ".jpg"
+    if ct.startswith("video/"):
+        return ".mp4"
     return ".bin"
 
 
@@ -27,6 +61,13 @@ def download_to_temp(url: str, folder: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, stream=True, timeout=120, headers=headers, allow_redirects=True)
     r.raise_for_status()
+
+    # Guard against non-media responses (e.g. an og:image that redirects to an
+    # HTML page): attaching those to the X composer breaks the publish flow.
+    content_type = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if content_type and not (content_type.startswith("image/") or content_type.startswith("video/")):
+        raise ValueError(f"الرابط ليس ملف ميديا صالحاً (content-type={content_type or 'unknown'})")
+
     ext = guess_ext_from_url_or_ct(url, r.headers.get("Content-Type"))
     out_path = os.path.join(folder, f"dl_{uuid.uuid4().hex}{ext}")
     with open(out_path, "wb") as f:

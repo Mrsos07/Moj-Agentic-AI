@@ -1,0 +1,1640 @@
+"""
+Concrete capabilities.
+
+Each capability translates a business intent into one or more MCP calls, resolves
+the employee's credentials just-in-time from context, and records the outcome.
+The employee logic never names an MCP server directly — it names a capability.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from typing import TYPE_CHECKING, List
+from urllib.parse import urlparse
+
+from ..mcp.base import MCPRequest
+from ..memory.base import MemoryLayerType
+from .base import CapabilityRequest, CapabilityResult, ICapability
+
+if TYPE_CHECKING:
+    from ..cognition.context import ExecutionContext
+
+logger = logging.getLogger("aeos.capabilities.handlers")
+
+
+def _x_context(context: "ExecutionContext") -> dict:
+    """Resolve the X account identity (cookie_label) for MCP calls."""
+    return {"cookie_label": context.config.cookie_label, "server": "x"}
+
+
+def _mark_engaged(context: "ExecutionContext", url: str) -> None:
+    """Persistently record a tweet/profile URL the employee engaged with,
+    so it never likes/replies/retweets/follows the same target twice."""
+    url = (url or "").strip()
+    if not url:
+        return
+    flags = context.config.runtime_state.flags
+    engaged = flags.setdefault("engaged_urls", [])
+    if url not in engaged:
+        engaged.append(url)
+        if len(engaged) > 300:
+            del engaged[: len(engaged) - 300]
+
+
+def _mark_topic_engaged(context: "ExecutionContext", text: str) -> None:
+    """Persistently record the *topic* (not just the URL) the employee engaged
+    with, so it avoids repeating the same subject via a different link.
+
+    Stores a compact word signature in ``runtime_state.flags['engaged_topics']``
+    (capped), plus a human-readable note in long-term memory for transparency.
+    """
+    from ..employee.persona_templates import normalize_topic_words
+
+    words = normalize_topic_words(text)
+    if len(words) < 3:
+        return
+    flags = context.config.runtime_state.flags
+    topics = flags.setdefault("engaged_topics", [])
+    topics.append(sorted(words)[:12])
+    if len(topics) > 80:
+        del topics[: len(topics) - 80]
+
+
+#: عناوين عربية واضحة لكل نوع تفاعل — تُبقي سجلّ الذاكرة منظّماً ومقروءاً
+_INTERACTION_LABELS = {
+    "reply": "رد",
+    "like": "إعجاب",
+    "retweet": "إعادة نشر",
+    "follow": "متابعة",
+    "post": "منشور",
+}
+
+
+def _record_interaction(
+    context: "ExecutionContext",
+    *,
+    action: str,
+    text: str = "",
+    url: str = "",
+    handle: str = "",
+) -> None:
+    """Record ONE past interaction in a single, organized place.
+
+    This is the single source of truth for "what the employee already did", so
+    it (a) never repeats the same target (URL de-dup), (b) never re-opens the
+    same discussion/topic (topic signature de-dup), and (c) keeps a clean,
+    structured entry in CONVERSATION memory that the Observe phase surfaces back
+    to the employee each cycle. Every entry carries machine-readable metadata
+    (action/url/handle/topic) so recall stays tidy and filterable.
+    """
+    from ..employee.persona_templates import normalize_topic_words
+
+    if url:
+        _mark_engaged(context, url)
+    topic_src = (text or handle or "").strip()
+    if topic_src:
+        _mark_topic_engaged(context, topic_src)
+
+    label = _INTERACTION_LABELS.get(action, action)
+    snippet = (text or "").strip().replace("\n", " ")[:160]
+    handle_s = (handle or "").strip()
+    parts = [label]
+    if handle_s:
+        parts.append(f"({handle_s})")
+    if snippet:
+        parts.append(f"— {snippet}")
+    content = " ".join(parts)
+
+    topic_words = sorted(normalize_topic_words(topic_src))[:12] if topic_src else []
+    context.memory.remember(
+        context.config.id,
+        MemoryLayerType.CONVERSATION,
+        content,
+        importance=2,
+        metadata={
+            "action": action,
+            "url": url.strip(),
+            "handle": handle_s,
+            "topic": topic_words,
+        },
+    )
+
+
+#: بادئات تسمية/عنونة يضيفها النموذج أحياناً ويجب إزالتها (تجعل التغريدة تبدو
+#: كبيان رسمي: «مُطلعة:»، «تغريدة:»، «منشور:» ...). نزيلها لتبدأ بالمحتوى مباشرة.
+_LABEL_PREFIX_RE = re.compile(
+    r"^\s*(?:مُطلعة|مطلعة|تمهيد|مقدمة|تغريدة|التغريدة|منشور|المنشور|بوست|"
+    r"البوست|عنوان|العنوان|ملخّص|ملخص|تعليق)\s*[:：\-–—]\s*"
+)
+
+
+def _normalize_post_text(text: str) -> str:
+    """Make generated text concise, complete and publish-safe for X.
+
+    Besides length, it strips meta label prefixes the model sometimes prepends
+    (e.g. "مُطلعة:") and — when trimming is unavoidable — cuts at a sentence or
+    word boundary instead of mid-word, so the tweet never looks truncated.
+    """
+    t = (text or "").replace("\r", "\n").strip()
+    # أزل علامات الاقتباس المحيطة بالنص كاملاً
+    t = t.strip("\"'“”«»").strip()
+    # أزل بادئة العنونة/التسمية إن وُجدت (قد تتكرر مرّة)
+    t = _LABEL_PREFIX_RE.sub("", t, count=1).strip()
+    # collapse excessive blank lines
+    while "\n\n\n" in t:
+        t = t.replace("\n\n\n", "\n\n")
+    if len(t) <= 280:
+        return t
+    # قصّ ذكي: فضّل نهاية جملة تامة، وإلا آخر مسافة — دون قطع كلمة في منتصفها
+    cut = t[:279]
+    ends = list(re.finditer(r"[\.!\?؟…]", cut))
+    if ends and ends[-1].end() >= 140:
+        return cut[: ends[-1].end()].strip()
+    sp = cut.rfind(" ")
+    if sp >= 140:
+        return cut[:sp].rstrip() + "…"
+    return cut.rstrip() + "…"
+
+
+#: عبارات القوالب الميتة التي تجعل المنشور يبدو آلياً بلا مضمون. وجود أيّ منها
+#: سبب كافٍ لإعادة التوليد — هذه أكثر ما يقتل جاذبية المحتوى العربي على X.
+_CLICHES = (
+    "في عالم متسارع", "في ظل التطورات المتسارعة", "لا يخفى على أحد",
+    "تحليل موضوعي", "دعوة للنقاش", "ما رأيكم", "جدير بالذكر", "يجدر بالذكر",
+    "لا شك أن", "من الجدير", "في هذا السياق", "تجدر الإشارة",
+    "يبقى السؤال مطروحاً", "الأمر يستحق التفكير", "شاركوني آراءكم",
+    "في نهاية المطاف", "على الصعيد ذاته", "ومن هذا المنطلق",
+)
+
+#: عبارات ميتا تكشف أن النموذج يصف عمله بدل أن ينتجه
+_META_PHRASES = (
+    "كما طلبت", "سأكتب", "إليك التغريدة", "هذه تغريدة", "بناءً على طلبك",
+    "المنشور التالي", "هذا منشور", "as requested",
+)
+
+#: استضافات صور عامة (شعار مصدر/أيقونة) لا تصلح صورةً لمنشور
+_WEAK_MEDIA_MARKERS = (
+    "googleusercontent.com", "gstatic.com", "news.google.com", "/logo",
+    "logo.", "favicon", "placeholder", "sprite", "default-", "avatar",
+    "profile_images",
+)
+
+
+def _is_weak_media(url: str) -> bool:
+    """هل الرابط صورة عامة/شعار مصدر بدل صورة تخصّ الموضوع؟
+
+    كان شعار Google News يُرفق كصورة للمنشور فيبدو المحتوى رديئاً؛ رفضُه هنا
+    يفتح الطريق لصورة مولّدة تخدم الموضوع فعلاً.
+    """
+    u = (url or "").strip().lower()
+    if not u:
+        return False
+    if any(marker in u for marker in _WEAK_MEDIA_MARKERS):
+        return True
+    # روابط صفحات لا وسائط
+    return u.endswith((".html", ".htm", ".php")) or "/status/" in u
+
+
+def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> List[str]:
+    """عيوب تمنع نشر المحتوى كما هو (بوابة جودة قبل النشر).
+
+    أنواعها: قوالب ميتة، ميتا-كلام، قِصر مخلّ، تكرار مطلع منشور سابق، وإعادة
+    صياغة البريف نفسه (فشل شائع: ينشر التعليمات بدل المحتوى).
+    """
+    from ..employee.persona_templates import normalize_topic_words, topic_overlap_ratio
+
+    issues: List[str] = []
+    t = (text or "").strip()
+    low = t.lower()
+    if not t:
+        return ["empty"]
+    if any(c in t for c in _CLICHES):
+        issues.append("cliche")
+    if any(m in low for m in _META_PHRASES):
+        issues.append("meta")
+    rules = context.config.business_rules or {}
+    min_chars = int(rules.get("min_post_chars", 70))
+    if len(t) < min_chars:
+        issues.append("too_short")
+    # إعادة صياغة البريف: تشابه عالٍ مع نصّ التوجيه نفسه
+    if brief:
+        overlap = topic_overlap_ratio(normalize_topic_words(t),
+                                      normalize_topic_words(brief))
+        if overlap >= 0.72:
+            issues.append("echo_brief")
+    # تكرار المطلع: أول ثلاث كلمات تطابق منشوراً سابقاً — بأربع كلمات كان
+    # الفحص شكلياً لا يمسك شيئاً، فالمطالع المكرّرة تتشابه في أولها لا في رابعها.
+    opening = " ".join(t.split()[:3]).lower()
+    if len(opening.split()) == 3:
+        for prev in (context.scratch.get("recent_posts") or [])[:8]:
+            if " ".join(str(prev).split()[:3]).lower() == opening:
+                issues.append("repeated_opening")
+                break
+    return issues
+
+
+#: عيوب تستحق إعادة توليد
+_HARD_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief",
+                        "repeated_opening"}
+
+#: عيوب تمنع النشر نهائياً لو بقيت بعد إعادة التوليد. تكرار المطلع ليس منها:
+#: شخصية تبدأ منشوراتها دائماً بنمط واحد (مثل «عاجل:») كانت ستُمنع من النشر
+#: كلياً — نطلب التنويع مرةً، ثم ننشر ويُسجّله حارس التقييم للدورة القادمة.
+_BLOCKING_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief"}
+
+#: توجيه تصحيحي لكل عيب — يُمرَّر للنموذج في محاولة إعادة التوليد
+_QUALITY_FIX_HINTS = {
+    "cliche": "احذف كل العبارات القالبية الفارغة (مثل «في عالم متسارع» أو "
+              "«تحليل موضوعي» أو «ما رأيكم»)، واستبدلها بمعلومة أو رقم أو موقف محدّد.",
+    "meta": "لا تصف ما ستكتبه ولا تقل «إليك التغريدة»؛ اكتب المحتوى مباشرةً.",
+    "too_short": "أضف مضموناً حقيقياً: سبب أو رقم أو نتيجة ملموسة.",
+    "echo_brief": "لا تُعِد صياغة التعليمات؛ اكتب محتوى فعلياً عن الموضوع نفسه "
+                  "بزاوية محدّدة.",
+    "repeated_opening": "ابدأ بمطلع مختلف تماماً عن منشوراتك السابقة.",
+}
+
+
+def _autofix_post_text(text: str) -> str:
+    """إصلاحات ميكانيكية آمنة: هاشتاق واحد فقط، وبلا نهاية مقطوعة."""
+    t = (text or "").strip()
+    tags = re.findall(r"#\S+", t)
+    for extra in tags[1:]:
+        t = t.replace(extra, "").strip()
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"(\.{3}|…)\s*$", ".", t).strip()
+    return t
+
+
+def _is_http_url(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return False
+    try:
+        p = urlparse(v)
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+#: أنماط مطالع تتناوب عبر الدورات — بلا تناوب تبدأ كل المنشورات بالنمط نفسه
+#: فيصير الحساب أحادي النغمة حتى لو تنوّعت مواضيعه.
+_HOOK_STYLES = (
+    "ابدأ بحقيقة أو رقم صادم في جملة قصيرة جداً، ثم فسّره.",
+    "ابدأ بمفارقة أو تناقض واضح («يقولون … والواقع …»).",
+    "ابدأ بجملة موقف حاسمة من ثلاث إلى خمس كلمات، ثم برهانها.",
+    "ابدأ بسؤال محدّد جداً (لا سؤال عام)، ثم أجب عنه بنفسك بإيجاز.",
+    "ابدأ بمشهد/تفصيلة ملموسة (مكان، لحظة، رقم)، ثم اربطها بالفكرة.",
+    "ابدأ بتصحيح اعتقاد شائع («ليس السبب … بل …»).",
+)
+
+
+def _hook_style(context: "ExecutionContext") -> str:
+    cycles = int(getattr(context.config.runtime_state, "cycles_completed", 0) or 0)
+    return _HOOK_STYLES[cycles % len(_HOOK_STYLES)]
+
+
+def _content_prompt(brief: str, context: "ExecutionContext") -> str:
+    """Wrap a brief into a strict prompt that yields a *ready-to-publish* post.
+
+    The raw brief alone caused the model to echo the instruction as a vague,
+    meta tweet (e.g. "objective analysis of today's political events, join the
+    discussion"). This wrapper forces concrete, publishable content and forbids
+    restating the instructions.
+    """
+    persona = context.config.persona
+    lang = getattr(persona, "language", "ar") or "ar"
+    interests = getattr(persona, "interests", None) or []
+    focus = "، ".join(interests) if interests else ""
+    dialect = getattr(persona, "dialect", "") or ""
+    lines = [
+        brief.strip(),
+        "",
+        "قواعد صارمة للمخرجات:",
+        f"- اكتب التغريدة النهائية الجاهزة للنشر مباشرةً باللغة ({lang}) فقط.",
+        "- ابدأ بالمحتوى مباشرةً. ممنوع منعاً باتاً وضع أي عنوان/تسمية في البداية "
+        "مثل «مُطلعة:» أو «تغريدة:» أو «منشور:» أو «خبر:» أو «تعليق:».",
+        "- اكتب تغريدة واحدة قصيرة مكتملة المعنى تنتهي بجملة تامة، وممنوع أن "
+        "تتركها ناقصة أو تنهيها بـ«...»؛ اضبط طولها لتكتمل ضمن الحد.",
+        "- اكتب بأسلوب إنساني طبيعي وعفوي كأنك شخص حقيقي يغرّد من جواله، لا كبيان رسمي ولا كذكاء اصطناعي.",
+        "- نوّع إيقاع الجمل (جملة قصيرة قوية ثم تفصيل)، ويجوز سؤال واحد يفتح نقاشاً.",
+        "- لا تصف ما ستكتبه، ولا تعِد صياغة التعليمات أو الهدف كتغريدة.",
+        "- تناول موضوعاً محدّداً وملموساً برأي أو زاوية واضحة، وليس عبارات عامة.",
+        "- تجنّب العبارات الفارغة والقوالب المكررة مثل «تحليل موضوعي» أو «دعوة للنقاش» أو «في عالم متسارع» دون مضمون فعلي.",
+        "- اجعلها أقل من 260 حرفاً لتبقى مكتملة، بدون علامات اقتباس حول النص، وهاشتاق واحد كحد أقصى (أو بدون)، وإيموجي واحد كحد أقصى.",
+        "- التزم حصراً بمجال الاهتمامات المحدد، وتجاهل أي مواضيع خارج التخصص.",
+        "- لا تنشئ ولا تعيد صياغة محتوى إعلاني أو ترويجي، وتجنب عروض البيع/الخصومات/السبام.",
+        "- ابدأ بجملة خطّافة طبيعية (hook) ثم قدّم فكرة واحدة واضحة وموقف/Insight عملي.",
+        "- اجعل الأسلوب إنسانياً وحوارياً وقابلاً للمشاركة، وتجنب النبرة الآلية أو العمومية.",
+        "- التزم حرفياً بتعليمات الشخصية ومحظوراتها (Do/Don't) وقيمها الواردة في تعليمات النظام.",
+        "- اكتب كصانع محتوى مؤثّر: زاوية جديدة تماماً، فكرة تستحق المشاركة، لا تكرار لما نشرته سابقاً.",
+        # جاذبية المحتوى: مرساة ملموسة + مطلع متنوّع + ممنوع القوالب الفارغة
+        "- ضع «مرساة ملموسة» واحدة على الأقل: رقم، أو اسم، أو تاريخ، أو مكان، "
+        "أو مقارنة محدّدة — الجملة التي لا تحمل شيئاً ملموساً تُحذف.",
+        "- ممنوع منعاً باتاً هذه القوالب الفارغة: "
+        + "، ".join(f"«{c}»" for c in _CLICHES[:8]) + " وما يشبهها.",
+        f"- نمط المطلع المطلوب لهذه الدورة: {_hook_style(context)}",
+    ]
+    if focus:
+        lines.insert(1, f"مجال التخصص الذي يجب أن يدور حوله المحتوى: {focus}.")
+    if dialect:
+        lines.insert(2, f"اللهجة المطلوبة إلزامياً: {dialect}. التزم بهذه اللهجة في الصياغة كاملة.")
+    # ذاكرة النشاط الأخير — ليطّلع الموظف على ما نشره سابقاً ولا يكرّره
+    recent = context.scratch.get("recent_activity_summary", "")
+    if recent:
+        lines.append("")
+        lines.append("سياق ذاكرتك (اطّلع عليه جيداً ولا تكرّر أي موضوع أو صياغة وردت فيه):")
+        lines.append(recent)
+    return "\n".join(lines)
+
+
+def _generate_post_text(brief: str, context: "ExecutionContext",
+                        extra_rules: str = "") -> str:
+    prompt = _content_prompt(brief, context)
+    if extra_rules:
+        prompt += "\n\nتصحيحات إلزامية لهذه المحاولة:\n" + extra_rules
+    gen = context.mcp.call(MCPRequest(
+        employee_id=context.config.id, tool="generate",
+        params={"prompt": prompt, "system": context.persona_prompt(),
+                "temperature": 0.85, "max_tokens": 220},
+        context={"server": "content"},
+    ))
+    return _normalize_post_text((gen.data.get("text", "") or "").strip())
+
+
+def _generate_quality_post(brief: str, context: "ExecutionContext") -> tuple:
+    """ولّد منشوراً يمرّ بوابة الجودة، بمحاولة تصحيح واحدة.
+
+    الفشل الشائع سابقاً: ينشر قوالب فارغة («تحليل موضوعي… دعوة للنقاش») أو
+    يعيد صياغة التعليمات نفسها. الآن نفحص المخرَج، ونعيد التوليد مرة واحدة
+    بتوجيه تصحيحي صريح، ونصلح ميكانيكياً ما يمكن إصلاحه (هاشتاقات زائدة).
+    """
+    text = _generate_post_text(brief, context)
+    if not text:
+        return "", ["empty"]
+    text = _autofix_post_text(text)
+    issues = _quality_issues(text, context, brief)
+    hard = [i for i in issues if i in _HARD_QUALITY_ISSUES]
+    if not hard:
+        return text, issues
+
+    hints = "\n".join(f"- {_QUALITY_FIX_HINTS[i]}" for i in hard
+                      if i in _QUALITY_FIX_HINTS)
+    logger.info("post quality retry (issues=%s)", hard)
+    retry = _autofix_post_text(_generate_post_text(brief, context, hints))
+    if not retry:
+        return text, issues
+    retry_issues = _quality_issues(retry, context, brief)
+    retry_hard = [i for i in retry_issues if i in _HARD_QUALITY_ISSUES]
+    # اختر الأفضل: الأقل عيوباً صلبة
+    if len(retry_hard) < len(hard):
+        return retry, retry_issues
+    return text, issues
+
+
+class PublishContentCapability(ICapability):
+    name = "publish_content"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        text = request.params.get("text", "").strip()
+        issues: List[str] = []
+        if not text:
+            # ask the content MCP to generate it from a brief/goal
+            brief = request.params.get("brief") or "Write one engaging original post."
+            text, issues = _generate_quality_post(brief, context)
+        if not text:
+            return CapabilityResult.fail("no content to publish", self.name)
+
+        text = _normalize_post_text(text)
+        # بوابة الجودة: لا ننشر قالباً فارغاً أو إعادة صياغة للتعليمات — يفشل
+        # الإجراء بوضوح فيرصده حارس التقييم ويصحّح الدورة القادمة.
+        blocking = [i for i in issues if i in _BLOCKING_QUALITY_ISSUES]
+        if blocking and bool((context.config.business_rules or {}).get("quality_gate", True)):
+            return CapabilityResult.fail(
+                f"رُفض المحتوى في بوابة الجودة ({', '.join(blocking)})", self.name)
+
+        # Accept any http(s) media URL. The app/x downloader now validates the
+        # real content-type (rejecting HTML/non-media) and sanitizes the file
+        # extension, so we no longer need a strict extension check here — many
+        # valid image URLs (e.g. CDN links) have no extension in the path.
+        media_url = (request.params.get("media_url", "") or "").strip()
+
+        if media_url and not _is_http_url(media_url):
+            logger.warning("Invalid/unsupported media_url ignored for publish_content: %s", media_url)
+            media_url = ""
+        # صورة عامة (شعار مصدر/أيقونة) تُضعف المنشور — نرفضها ونولّد بديلاً
+        if media_url and _is_weak_media(media_url):
+            logger.info("weak media dropped (generic/logo): %s", media_url[:120])
+            media_url = ""
+
+        # صورة أصلية مولّدة عند غياب ميديا حقيقية (هوية بصرية لصانع المحتوى)
+        media_url = media_url or _maybe_generate_image(context, text, media_url)
+
+        # Important:
+        # app/x will download media_url ONLY if it is a valid URL.
+        # If download_to_temp produced a bad file, playwright can throw "Invalid argument".
+        # So we always attempt a text-only publish after ANY media failure.
+        post_params = {"text": text, "media_url": media_url}
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="post_tweet",
+            params=post_params,
+            context=_x_context(context),
+        ))
+
+        # fallback: if media publish fails (incl. Errno 22 invalid argument), retry text-only.
+        # BUT never retry on a client-side timeout: the server is likely STILL running the
+        # media post, so a retry would launch a second concurrent browser and compound the
+        # hang. A timeout is transient/infra, not a media-format problem.
+        err_txt = (res.error or "")
+        is_timeout = ("مهلة" in err_txt) or ("timeout" in err_txt.lower())
+        if not res.success and (request.params.get("media_url") or "") and media_url and not is_timeout:
+            logger.warning(
+                "post_tweet with media failed, retrying text-only. error=%s media_url=%s",
+                res.error, (request.params.get("media_url") or "")[:120],
+            )
+            res = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="post_tweet",
+                params={"text": text, "media_url": ""},
+                context=_x_context(context),
+            ))
+
+        # extra safety: if it still fails, do NOT return the media error only.
+
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+
+        context.memory.remember(
+            context.config.id, MemoryLayerType.LONG_TERM,
+            f"Published post: {text[:200]}", importance=3,
+            metadata={"tweet_url": res.data.get("tweet_url")},
+        )
+        _mark_topic_engaged(context, text)
+        _record_strategy(context, request,
+                         url=(res.data.get("tweet_url") or ""), text=text,
+                         parts=1, has_media=bool(media_url))
+        output = dict(res.data)
+        output.setdefault("text", text)
+        return CapabilityResult.ok(self.name, **output)
+
+
+class ReplyToUserCapability(ICapability):
+    name = "reply_to_user"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        tweet_url = request.params.get("tweet_url")
+        if not tweet_url:
+            return CapabilityResult.fail("tweet_url is required", self.name)
+        reply_text = request.params.get("reply_text", "").strip()
+        brief = bool(request.params.get("brief"))
+        if not reply_text:
+            persona = context.config.persona
+            lang = getattr(persona, "language", "ar") or "ar"
+            original = (request.params.get("original_text", "") or "").strip()[:400]
+            dialect = getattr(persona, "dialect", "") or ""
+            dialect_line = f"- التزم باللهجة التالية إلزامياً في الأسلوب: {dialect}.\n" if dialect else ""
+            recent_replies = context.scratch.get("recent_replies") or []
+            recent_line = ""
+            if recent_replies:
+                joined = " | ".join((r or "")[:80] for r in recent_replies[:4])
+                recent_line = f"- لا تكرّر أسلوب أو مضمون ردودك السابقة: {joined}\n"
+            # نبرة الطول: في وضع الاختصار الشديد (ردود التنبيهات) نطلب جملة واحدة
+            # قصيرة جداً؛ وإلا حتى ثلاث جمل.
+            length_line = (
+                "- جملة واحدة قصيرة جداً فقط (أقل من 120 حرفاً)، بلا هاشتاقات، وبدون إيموجي أو إيموجي واحد كحد أقصى.\n"
+                if brief else
+                "- جملة إلى ثلاث جمل كحد أقصى، بلا هاشتاقات، وإيموجي واحد كحد أقصى.\n"
+            )
+            prompt = (
+                f"هذه تغريدة رأيتها الآن:\n«{original}»\n\n"
+                f"اكتب رداً قصيراً طبيعياً باللغة ({lang}) كأنك شخص حقيقي يتفاعل بصدق:\n"
+                f"{dialect_line}"
+                f"{recent_line}"
+                "- أضف قيمة فعلية: معلومة، رأي محدد، أو سؤال ذكي — لا مجاملات عامة.\n"
+                f"{length_line}"
+                "- لا تذكر أنك ترد أو تعلّق، اكتب الرد مباشرة وبدون علامات اقتباس.\n"
+                "- إن كان النص الأصلي خارج مجال تخصصك أو يبدو إعلانياً/ترويجياً فلا تنجرف وراءه، وحافظ على رد مهني ضمن اختصاصك فقط.\n"
+                "- التزم حرفياً بتعليمات الشخصية ومحظوراتها (Do/Don't) وقيمها الواردة في تعليمات النظام.\n"
+                "- اجعل الرد إنسانياً ومباشراً ويضيف قيمة فعلية قصيرة (Insight/سؤال ذكي) لا مجاملة عامة."
+            )
+            gen = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="generate",
+                params={"prompt": prompt, "system": context.persona_prompt(),
+                        "temperature": 0.9, "max_tokens": 60 if brief else 150},
+                context={"server": "content"},
+            ))
+            reply_text = gen.data.get("text", "").strip()
+        if not reply_text:
+            return CapabilityResult.fail("no reply text generated", self.name)
+        # حدّ صارم للطول في وضع الاختصار الشديد
+        if brief and len(reply_text) > 160:
+            reply_text = reply_text[:157].rstrip() + "..."
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="reply",
+            params={"tweet_url": tweet_url, "reply_text": reply_text},
+            context=_x_context(context),
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        _record_interaction(
+            context, action="reply", url=tweet_url,
+            handle=request.params.get("handle", ""),
+            text=(request.params.get("original_text") or reply_text),
+        )
+        output = dict(res.data)
+        output.setdefault("reply_text", reply_text)
+        return CapabilityResult.ok(self.name, **output)
+
+
+class RetweetCapability(ICapability):
+    name = "retweet_post"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        tweet_url = request.params.get("tweet_url")
+        if not tweet_url:
+            return CapabilityResult.fail("tweet_url is required", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="retweet",
+            params={"tweet_url": tweet_url}, context=_x_context(context),
+        ))
+        if res.success:
+            _record_interaction(
+                context, action="retweet", url=tweet_url,
+                handle=request.params.get("handle", ""),
+                text=request.params.get("original_text", ""),
+            )
+            return CapabilityResult.ok(self.name, **res.data)
+        return CapabilityResult.fail(res.error, self.name)
+
+
+class LikePostCapability(ICapability):
+    name = "like_post"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        tweet_url = request.params.get("tweet_url")
+        if not tweet_url:
+            return CapabilityResult.fail("tweet_url is required", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="like",
+            params={"tweet_url": tweet_url}, context=_x_context(context),
+        ))
+        if res.success:
+            _record_interaction(
+                context, action="like", url=tweet_url,
+                handle=request.params.get("handle", ""),
+                text=request.params.get("original_text", ""),
+            )
+            return CapabilityResult.ok(self.name, **res.data)
+        return CapabilityResult.fail(res.error, self.name)
+
+
+class FollowUserCapability(ICapability):
+    name = "follow_user"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        profile_url = request.params.get("profile_url")
+        if not profile_url:
+            return CapabilityResult.fail("profile_url is required", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="follow",
+            params={"profile_url": profile_url}, context=_x_context(context),
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        _record_interaction(
+            context, action="follow", url=profile_url,
+            handle=request.params.get("handle", ""),
+            text=request.params.get("original_text", ""),
+        )
+        return CapabilityResult.ok(self.name, **res.data)
+
+
+class BrowseTimelineCapability(ICapability):
+    """Read the authenticated X home timeline via the Playwright X MCP server."""
+
+    name = "browse_timeline"
+    required_mcp = ["playwright_x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="read_timeline",
+            params={
+                "cookie_label": context.config.cookie_label,
+                "limit": int(request.params.get("limit", 10)),
+                "list_type": request.params.get("list_type", "home"),
+                "headless": request.params.get("headless", True),
+            },
+            context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        tweets = res.data.get("tweets", [])
+        # اجعل التايم لاين متاحاً للمهارات في هذه الدورة
+        context.scratch["timeline"] = tweets
+        if tweets:
+            preview = "; ".join(t.get("text", "")[:80] for t in tweets[:3])
+            context.memory.remember(
+                context.config.id, MemoryLayerType.WORKING,
+                f"Timeline seen ({len(tweets)} tweets): {preview}", importance=1,
+            )
+        return CapabilityResult.ok(self.name, count=len(tweets), tweets=tweets)
+
+
+class BrowseXTrendsCapability(ICapability):
+    """Browse the account's OWN X trending tab, pick the trend most relevant to
+    the persona's interests, and pull live tweets for it.
+
+    Populates ``scratch['x_trends']`` (list of {name, category, posts}) and
+    ``scratch['trend_tweets']`` (tweets under the top relevant trend) so skills
+    can create grounded content AND engage (like/retweet/reply/follow) with
+    what is actually trending for this account right now.
+    """
+
+    name = "browse_x_trends"
+    required_mcp = ["playwright_x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        from ..employee.persona_templates import relevance_score
+
+        limit = int(request.params.get("limit", 10))
+        tweets_limit = int(request.params.get("tweets_limit", 8))
+        interests = getattr(context.config.persona, "interests", []) or []
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="read_trends",
+            params={"cookie_label": context.config.cookie_label, "limit": limit},
+            context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+
+        trends = res.data.get("trends", [])
+        # قدّم الترندات الأقرب لتخصص الموظف (مع الإبقاء على البقية كخيار احتياطي)
+        def _rel(t):
+            return relevance_score(f"{t.get('name','')} {t.get('category','')}", interests)
+        if interests and trends:
+            trends.sort(key=_rel, reverse=True)
+        context.scratch["x_trends"] = trends
+
+        def _search(query: str) -> list:
+            sr = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="search_tweets",
+                params={"cookie_label": context.config.cookie_label,
+                        "query": query, "limit": tweets_limit},
+                context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+            ))
+            return sr.data.get("tweets", []) if sr.success else []
+
+        trend_tweets = []
+        top = trends[0] if trends else None
+        if top and top.get("name"):
+            trend_tweets = _search(top["name"])
+            if trend_tweets:
+                context.scratch["trend_tweets"] = trend_tweets
+
+        # ── الهاشتاقات الترند الحالية: استخرجها واختر الأنسب لتخصص الحساب ──
+        # الهاشتاق المطابق تُجلب تغريداته الحيّة ليشارك فيه الموظف (منشور يتضمّن
+        # الهاشتاق + تفاعل مع تغريداته)، فيظهر الحساب داخل نقاش الترند نفسه.
+        hashtags = [t for t in trends if (t.get("name") or "").startswith("#")]
+        context.scratch["trend_hashtags"] = hashtags
+
+        rules = context.config.business_rules or {}
+        min_rel = int(rules.get("min_relevance_score", 1))
+        matched_hashtag: dict = {}
+        hashtag_tweets: list = []
+        if hashtags and top and hashtags[0].get("name") != top.get("name"):
+            # الهاشتاقات مرتّبة بالصلة أعلاه؛ خذ الأعلى وتحقّق فعلياً من تغريداته
+            cand = hashtags[0]
+            tweets = _search(cand["name"])
+            if _rel(cand) >= 1:
+                matched_hashtag, hashtag_tweets = cand, tweets
+            elif interests and tweets:
+                # اسم الهاشتاق وحده لا يكفي — احكم عبر محتوى تغريداته الفعلي
+                in_scope = sum(
+                    1 for t in tweets
+                    if relevance_score(t.get("text", ""), interests) >= min_rel
+                )
+                if in_scope >= 1:
+                    matched_hashtag, hashtag_tweets = cand, tweets
+            elif not interests:
+                matched_hashtag, hashtag_tweets = cand, tweets
+        elif hashtags and top and hashtags[0].get("name") == top.get("name"):
+            # أعلى ترند هو نفسه هاشتاق — أعد استخدام تغريداته دون بحث إضافي
+            matched_hashtag, hashtag_tweets = hashtags[0], trend_tweets
+
+        if matched_hashtag:
+            context.scratch["matched_hashtag"] = matched_hashtag
+            context.scratch["hashtag_tweets"] = hashtag_tweets
+
+        if trends:
+            preview = "; ".join(t.get("name", "") for t in trends[:5])
+            note = f"X trends seen ({len(trends)}): {preview}"
+            if matched_hashtag:
+                note += f" | matched hashtag: {matched_hashtag.get('name', '')}"
+            context.memory.remember(
+                context.config.id, MemoryLayerType.WORKING, note, importance=1,
+            )
+        return CapabilityResult.ok(
+            self.name, trends=trends, count=len(trends),
+            top_trend=(top or {}).get("name", ""), trend_tweets=trend_tweets,
+            hashtags=[h.get("name", "") for h in hashtags],
+            matched_hashtag=matched_hashtag.get("name", ""),
+            hashtag_tweets_count=len(hashtag_tweets),
+        )
+
+
+class BrowseTopPostsCapability(ICapability):
+    """Read the Creator "Inspiration → Top Posts" page and rank posts by the
+    persona's interests.
+
+    Surfaces the top-performing posts X recommends for this account, filters to
+    the employee's specialty, drops posts already engaged with, and populates
+    ``scratch['top_posts']`` so skills can build a related post / retweet /
+    reply / like / follow the most relevant, freshest top content.
+    """
+
+    name = "browse_top_posts"
+    required_mcp = ["playwright_x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        from ..employee.persona_templates import relevance_score
+
+        limit = int(request.params.get("limit", 12))
+        interests = getattr(context.config.persona, "interests", []) or []
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="read_top_posts",
+            params={"cookie_label": context.config.cookie_label, "limit": limit},
+            context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+
+        posts = res.data.get("tweets", []) or []
+        # رتّب أهم البوستات الأقرب لتخصص الموظف أولاً
+        if interests and posts:
+            def _rel(t):
+                return relevance_score(f"{t.get('text','')} {t.get('handle','')}", interests)
+            posts.sort(key=_rel, reverse=True)
+        context.scratch["top_posts"] = posts
+
+        if posts:
+            preview = "; ".join((t.get("text", "") or "")[:70] for t in posts[:3])
+            context.memory.remember(
+                context.config.id, MemoryLayerType.WORKING,
+                f"Top posts seen ({len(posts)}): {preview}", importance=1,
+            )
+        return CapabilityResult.ok(self.name, tweets=posts, count=len(posts))
+
+
+class BrowseSpecialtyNewsCapability(ICapability):
+    """Browse the LATEST specialty news via Playwright only (no news/search MCP).
+
+    Runs an X *live* search (``search_tweets`` mode=live) on the persona's
+    interests so the employee follows the freshest news in its field. Results
+    are normalized into news-like items and stored in ``scratch['news']`` (and
+    ``scratch['specialty_news']``) so the content creator grounds original posts
+    on them, exactly like the old news feed did — but sourced from Playwright.
+    """
+
+    name = "browse_specialty_news"
+    required_mcp = ["playwright_x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        from ..employee.persona_templates import relevance_score
+        from ..skills.builtin import _best_tweet_media, _is_ad_or_spam_text
+
+        interests = getattr(context.config.persona, "interests", []) or []
+        if not interests:
+            return CapabilityResult.ok(self.name, news=[], count=0, note="no interests set")
+
+        lang = getattr(context.config.persona, "language", "ar") or "ar"
+        limit = int(request.params.get("limit", 12))
+        # استعلام بحث حي على X لأحدث ما يخص التخصص (Playwright فقط)
+        query = " OR ".join(interests[:3])
+        if lang in ("ar", "en"):
+            query = f"({query}) lang:{lang}"
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="search_tweets",
+            params={"cookie_label": context.config.cookie_label,
+                    "query": query, "mode": "live", "limit": limit},
+            context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+
+        tweets = res.data.get("tweets", []) or []
+        min_rel = int((context.config.business_rules or {}).get("min_relevance_score", 1))
+        items: List[dict] = []
+        for t in tweets:
+            text = (t.get("text") or "").strip().replace("\n", " ")
+            if not text or _is_ad_or_spam_text(text):
+                continue
+            if interests and relevance_score(text, interests) < min_rel:
+                continue
+            items.append({
+                "title": text[:120],
+                "summary": text[:280],
+                "media_url": _best_tweet_media((t.get("media") or "").strip()),
+                "url": (t.get("url") or "").strip(),
+                "handle": (t.get("handle") or "").strip(),
+                "source": "specialty_news",
+            })
+
+        context.scratch["specialty_news"] = items
+        # ادمجها في مجمّع الأخبار الذي يعتمده منشئ المحتوى للتأسيس عليه
+        existing = context.scratch.get("news") or []
+        context.scratch["news"] = existing + items
+
+        if items:
+            preview = "; ".join(i["title"][:60] for i in items[:3])
+            context.memory.remember(
+                context.config.id, MemoryLayerType.WORKING,
+                f"Specialty news via Playwright ({len(items)}): {preview}", importance=1,
+            )
+        return CapabilityResult.ok(self.name, news=items, count=len(items), query=query)
+
+
+class ResearchTopicCapability(ICapability):
+    name = "research_topic"
+    required_mcp = ["browser"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        url = request.params.get("url")
+        topic = request.params.get("topic", "")
+        if url:
+            res = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="read_page",
+                params={"url": url}, context={"server": "browser"},
+            ))
+            if not res.success:
+                return CapabilityResult.fail(res.error, self.name)
+            summary = res.data.get("text", "")[:1500]
+            context.memory.remember(
+                context.config.id, MemoryLayerType.SEMANTIC,
+                f"Research on {topic or url}: {summary}", importance=2,
+                metadata={"url": url},
+            )
+            return CapabilityResult.ok(self.name, url=url, summary=summary)
+        return CapabilityResult.fail("url is required for research", self.name)
+
+
+class ReadNotificationsCapability(ICapability):
+    """Read the replies/mentions directed at THIS account (the X Mentions tab)
+    via the Playwright X MCP server, so the employee can reply back to people who
+    are talking to it. Populates ``scratch['mentions']`` (each: handle/text/url)
+    and drops the account's own posts, keeping only incoming replies from others.
+    """
+
+    name = "read_notifications"
+    required_mcp = ["playwright_x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="read_notifications",
+            params={
+                "cookie_label": context.config.cookie_label,
+                "limit": int(request.params.get("limit", 15)),
+                "headless": request.params.get("headless", True),
+            },
+            context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+
+        mentions = res.data.get("tweets", []) or []
+        # استبعد تغريدات الحساب نفسه — نُبقي فقط ردود الآخرين الموجّهة إلينا
+        own = (context.config.account_username or "").lstrip("@").strip().lower()
+        if own:
+            mentions = [
+                m for m in mentions
+                if (m.get("handle", "") or "").lstrip("@").strip().lower() != own
+            ]
+        context.scratch["mentions"] = mentions
+        if mentions:
+            preview = "; ".join((m.get("text", "") or "")[:70] for m in mentions[:3])
+            context.memory.remember(
+                context.config.id, MemoryLayerType.WORKING,
+                f"Mentions/replies seen ({len(mentions)}): {preview}", importance=1,
+            )
+        return CapabilityResult.ok(self.name, tweets=mentions, count=len(mentions))
+
+
+class StoreKnowledgeCapability(ICapability):
+    name = "store_knowledge"
+    required_mcp = ["memory"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        content = request.params.get("content", "")
+        if not content:
+            return CapabilityResult.fail("content is required", self.name)
+        context.memory.remember(
+            context.config.id, MemoryLayerType.SEMANTIC, content,
+            key=request.params.get("key"), importance=int(request.params.get("importance", 2)),
+        )
+        return CapabilityResult.ok(self.name, stored=True)
+
+
+class FetchTrendsCapability(ICapability):
+    """Fetch real trending topics from the Trend Detector store (Google Trends,
+    X, Reddit, TikTok collectors all feed ``td_candidates``).
+
+    Returns HOT/validated candidates ranked by relevance to the employee's
+    interests, each with title, summary, keywords, source url and media_url so
+    content can be grounded in a real trend and attach its image/video.
+    """
+
+    name = "fetch_trends"
+    required_mcp: List[str] = []
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        from datetime import datetime, timedelta, timezone
+
+        from app.db.database import SessionLocal
+        from app.trend_detector.models import Candidate, Classification
+
+        from ..employee.persona_templates import relevance_score
+
+        limit = int(request.params.get("limit", 10))
+        hours = int(request.params.get("hours", 48))
+        interests = getattr(context.config.persona, "interests", []) or []
+
+        db = SessionLocal()
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+            rows = (
+                db.query(Candidate)
+                .filter(Candidate.status.in_(["hot", "validated", "early"]))
+                .filter(Candidate.created_at >= cutoff)
+                .order_by(Candidate.score.desc())
+                .limit(80)
+                .all()
+            )
+            trends = []
+            for c in rows:
+                clf = (
+                    db.query(Classification)
+                    .filter(Classification.candidate_id == c.id)
+                    .first()
+                )
+                summary = ""
+                category = ""
+                if clf:
+                    summary = clf.summary_ar or clf.summary_en or ""
+                    category = clf.category or ""
+                trends.append({
+                    "title": c.title or "",
+                    "summary": summary or (c.content or ""),
+                    "keywords": c.keywords or "",
+                    "url": c.url or "",
+                    "media_url": c.media_url or "",
+                    "category": category,
+                    "score": float(c.score or 0.0),
+                    "platforms": c.platforms or "",
+                })
+
+            # رتّب حسب صلة الموضوع بتخصص الموظف؛ إن لم تتطابق أي كلمة استخدم الأعلى ترنداً
+            if interests:
+                def _rel(t):
+                    hay = f"{t['title']} {t['keywords']} {t['summary']} {t['category']}"
+                    return relevance_score(hay, interests)
+                relevant = [t for t in trends if _rel(t) > 0]
+                relevant.sort(key=lambda t: (_rel(t), t["score"]), reverse=True)
+                ordered = relevant or trends
+            else:
+                ordered = trends
+
+            ordered = ordered[:limit]
+            context.scratch["trends"] = ordered
+            return CapabilityResult.ok(self.name, count=len(ordered), trends=ordered)
+        finally:
+            db.close()
+
+
+def _og_image(article_url: str) -> str:
+    """Best-effort fetch of an article's og:image (for attaching media)."""
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+
+        resp = requests.get(
+            article_url, timeout=12, allow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AEOS/1.0)"},
+        )
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for prop in ("og:image", "twitter:image", "twitter:image:src"):
+            tag = soup.find("meta", property=prop) or soup.find("meta", attrs={"name": prop})
+            if tag and tag.get("content"):
+                img = tag["content"].strip()
+                # تجاهل صور Google News العامة (شعار المصدر) — ليست صورة الخبر
+                if any(h in img.lower() for h in (
+                    "googleusercontent.com", "gstatic.com", "news.google.com")):
+                    return ""
+                return img
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+class FetchNewsCapability(ICapability):
+    """Read REAL recent news via the news MCP (Google News RSS, key-less).
+
+    Builds Saudi/Arabic search feeds from the employee's interests, aggregates
+    the freshest items, ranks them by relevance, and enriches the top picks with
+    an article image (og:image) so content can be grounded in real news and
+    attach media. Results are stored in ``scratch['news']``.
+    """
+
+    name = "fetch_news"
+    required_mcp = ["news"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        from ..employee.news_sources import feeds_for_interests
+        from ..employee.persona_templates import relevance_score
+
+        interests = getattr(context.config.persona, "interests", []) or []
+        lang = getattr(context.config.persona, "language", "ar") or "ar"
+        per_feed = int(request.params.get("per_feed", 8))
+        limit = int(request.params.get("limit", 10))
+        enrich = int(request.params.get("enrich_media", 3))
+
+        feeds = feeds_for_interests(interests, hl=lang, gl=request.params.get("geo", "SA"))
+        seen = set()
+        items: List[dict] = []
+        for feed_url in feeds[:6]:
+            res = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="fetch_feed",
+                params={"feed_url": feed_url, "limit": per_feed},
+                context={"server": "news"},
+            ))
+            if not res.success:
+                continue
+            for it in res.data.get("items", []):
+                title = (it.get("title") or "").strip()
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                items.append({
+                    "title": title,
+                    "summary": (it.get("summary") or "").strip(),
+                    "url": (it.get("link") or "").strip(),
+                    "media_url": (it.get("media_url") or "").strip(),
+                    "source": (it.get("source") or "").strip(),
+                    "published": it.get("published", ""),
+                })
+
+        # رتّب حسب صلة الخبر بتخصص الموظف (إن وُجدت اهتمامات)
+        if interests:
+            def _rel(n):
+                return relevance_score(f"{n['title']} {n['summary']}", interests)
+            ranked = [n for n in items if _rel(n) > 0]
+            ranked.sort(key=lambda n: _rel(n), reverse=True)
+            ordered = ranked or items
+        else:
+            ordered = items
+
+        ordered = ordered[:limit]
+
+        # أرفق صورة للأخبار الأعلى ترتيباً التي لا تملك ميديا
+        for n in ordered[:enrich]:
+            if not n["media_url"] and n["url"]:
+                img = _og_image(n["url"])
+                if img:
+                    n["media_url"] = img
+
+        context.scratch["news"] = ordered
+        return CapabilityResult.ok(self.name, count=len(ordered), news=ordered)
+
+
+#: أنماط بصرية جاهزة — ثبات النمط عبر المنشورات يبني هوية بصرية للحساب
+_IMAGE_STYLES = {
+    "editorial": "clean editorial photo-illustration, muted palette, soft depth of field",
+    "cinematic": "cinematic wide shot, dramatic side lighting, rich contrast, film grain",
+    "minimal": "minimal flat vector illustration, two-tone palette, generous negative space",
+    "infographic": "modern abstract data-visual composition, geometric shapes, no labels",
+    "photoreal": "photorealistic documentary photograph, natural light, shallow depth of field",
+}
+
+
+def _image_prompt(text: str, context: "ExecutionContext") -> str:
+    """برومبت صورة تخدم المنشور نفسه — مبنيّة على نصّه النهائي لا على التوجيه.
+
+    نثبّت نمطاً بصرياً واحداً (``image_style``) فتتشابه صور الحساب وتُبنى هوية
+    بصرية، ونمنع النصّ داخل الصورة (النص العربي يخرج مشوّهاً من مولّدات الصور
+    ويُفسد المنشور).
+    """
+    persona = context.config.persona
+    rules = context.config.business_rules or {}
+    interests = "، ".join((getattr(persona, "interests", None) or [])[:3])
+    style_key = str(rules.get("image_style", "editorial")).strip().lower()
+    style = _IMAGE_STYLES.get(style_key, _IMAGE_STYLES["editorial"])
+    extra = str(rules.get("image_prompt_extra", "")).strip()
+    return (
+        f"{style}. Subject: a visual metaphor for this social post — \"{text[:280]}\". "
+        f"Topic field: {interests or 'general news'}. "
+        "One strong focal subject, uncluttered background, professional quality, "
+        "16:9 friendly composition. "
+        "Absolutely NO text, NO words, NO letters, NO numbers, NO captions, "
+        "no watermark, no logos, no charts with labels, and no faces of real "
+        "identifiable people or politicians."
+        + (f" {extra}" if extra else "")
+    )
+
+
+def _maybe_generate_image(context: "ExecutionContext", text: str,
+                          existing_media: str = "") -> str:
+    """ولّد صورة أصلية للمنشور عند الحاجة، بحد يومي يحترم التكلفة.
+
+    السياسة (``business_rules['generate_images']``):
+    - ``"auto"`` (افتراضي): تُولَّد صورة فقط إن لم توجد ميديا حقيقية.
+    - ``"always"``: تُولَّد دائماً (تتقدّم على ميديا المصدر).
+    - ``"off"``: لا توليد إطلاقاً.
+    الحد اليومي: ``max_generated_images_per_day`` (افتراضي 3).
+    """
+    rules = context.config.business_rules or {}
+    policy = str(rules.get("generate_images", "auto")).strip().lower()
+    if policy in ("off", "0", "false", "no"):
+        return ""
+    if policy == "auto" and existing_media:
+        return ""
+    if not context.mcp.has("image"):
+        return ""
+
+    counters = context.config.runtime_state.counters
+    cap = int(rules.get("max_generated_images_per_day", 3))
+    if cap <= 0 or int(counters.get("generated_images_today", 0)) >= cap:
+        return ""
+
+    res = context.mcp.call(MCPRequest(
+        employee_id=context.config.id, tool="generate_image",
+        params={"prompt": _image_prompt(text, context)},
+        context={"server": "image"},
+    ))
+    if not res.success:
+        logger.info("image generation skipped: %s", res.error)
+        return ""
+    url = (res.data.get("url") or "").strip()
+    if url:
+        counters["generated_images_today"] = int(counters.get("generated_images_today", 0)) + 1
+    return url
+
+
+def _record_strategy(context: "ExecutionContext", request: CapabilityRequest, *,
+                     url: str, text: str, parts: int, has_media: bool) -> None:
+    """اربط المنشور بمحوره وصيغته في سجل الأداء (أساس التعلّم لاحقاً)."""
+    from ..employee import strategy
+
+    try:
+        strategy.record_published(
+            context.config, url=url, text=text,
+            pillar=str(request.params.get("pillar") or ""),
+            format_id=str(request.params.get("format") or ""),
+            parts=parts, has_media=has_media,
+        )
+    except Exception as exc:  # noqa: BLE001 - never break publishing over bookkeeping
+        logger.warning("recording strategy performance failed: %s", exc)
+
+
+class PublishThreadCapability(ICapability):
+    """Publish a real X thread (chained posts) in ONE browser session.
+
+    الثريد أقوى أداة صانع محتوى على X: يشرح فكرة كاملة ويصنع حفظاً ومشاركة.
+    نولّد الأجزاء بنداء LLM واحد بصيغة JSON (فكرة واحدة لكل تغريدة)، ننظّف كل
+    جزء ونضبط طوله، ثم ننشر السلسلة كاملة بضغطة واحدة عبر أداة ``post_thread``
+    (متصفح واحد، فلا ينكسر الثريد في منتصفه). الميديا تُرفق برأس الثريد.
+    """
+
+    name = "publish_thread"
+    required_mcp = ["x"]
+
+    _MAX_PART = 270
+
+    def _generate_parts(self, request: CapabilityRequest,
+                        context: "ExecutionContext") -> List[str]:
+        wanted = max(2, min(int(request.params.get("parts", 4) or 4), 8))
+        brief = request.params.get("brief") or "اكتب ثريداً مفيداً في مجال تخصصك."
+        if not (context.llm and context.llm.available):
+            return []
+        data = context.llm.complete_json(
+            system=(
+                "أنت صانع محتوى محترف على X يكتب ثريدات عربية عالية الجودة. "
+                "أعد JSON فقط بالشكل: {\"parts\": [\"التغريدة الأولى\", \"...\"]} — "
+                f"من {wanted - 1} إلى {wanted} تغريدات."
+            ),
+            prompt=(
+                f"{_content_prompt(brief, context)}\n\n"
+                "قواعد الثريد الإلزامية:\n"
+                f"- كل تغريدة أقل من {self._MAX_PART} حرفاً ومكتملة المعنى بذاتها.\n"
+                "- التغريدة الأولى خطّاف قوي يوعد بقيمة محدّدة (بلا مبالغة ولا clickbait).\n"
+                "- كل تغريدة تحمل فكرة واحدة فقط وتبني على ما قبلها.\n"
+                "- الأخيرة خلاصة عملية أو سؤال يفتح نقاشاً.\n"
+                "- بلا ترقيم آلي (1/5) وبلا هاشتاقات إلا واحداً في الأخيرة كحد أقصى.\n"
+                "- بلا عبارات تمهيدية مثل «ثريد:» أو «سلسلة تغريدات».\n"
+            ),
+            temperature=0.8,
+        ) or {}
+        raw = data.get("parts") if isinstance(data, dict) else None
+        parts: List[str] = []
+        for item in (raw or []):
+            cleaned = _normalize_post_text(str(item or ""))
+            if len(cleaned) > self._MAX_PART:
+                cleaned = _normalize_post_text(cleaned[: self._MAX_PART])
+            if cleaned:
+                parts.append(cleaned)
+        return parts[:wanted]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        parts = [str(t).strip() for t in (request.params.get("texts") or []) if str(t).strip()]
+        if not parts:
+            parts = self._generate_parts(request, context)
+        if len(parts) < 2:
+            return CapabilityResult.fail(
+                "could not generate a thread (need at least 2 parts)", self.name)
+
+        media_url = (request.params.get("media_url", "") or "").strip()
+        if media_url and (not _is_http_url(media_url) or _is_weak_media(media_url)):
+            media_url = ""
+        media_url = media_url or _maybe_generate_image(context, parts[0], media_url)
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="post_thread",
+            params={"texts": parts, "media_url": media_url},
+            context=_x_context(context),
+        ))
+        # الميديا ليست جوهر الثريد: إن أفشلتها المنصة أعِد المحاولة نصّاً فقط
+        err = (res.error or "").lower()
+        if not res.success and media_url and "مهلة" not in (res.error or "") and "timeout" not in err:
+            logger.warning("post_thread with media failed, retrying text-only: %s", res.error)
+            res = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="post_thread",
+                params={"texts": parts, "media_url": ""},
+                context=_x_context(context),
+            ))
+            media_url = ""
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+
+        head = parts[0]
+        url = (res.data.get("tweet_url") or "") if isinstance(res.data, dict) else ""
+        context.memory.remember(
+            context.config.id, MemoryLayerType.LONG_TERM,
+            f"Published post (thread {len(parts)} parts): {head[:200]}", importance=3,
+            metadata={"tweet_url": url, "parts": len(parts)},
+        )
+        _mark_topic_engaged(context, " ".join(parts))
+        _record_strategy(context, request, url=url, text=head,
+                         parts=len(parts), has_media=bool(media_url))
+        output = dict(res.data or {})
+        output.setdefault("text", head)
+        output["texts"] = parts
+        output["parts"] = len(parts)
+        return CapabilityResult.ok(self.name, **output)
+
+
+class QuotePostCapability(ICapability):
+    """Quote-tweet: repost with the employee's own commentary.
+
+    أقوى من إعادة النشر الصامتة: يضيف رأياً/زاوية فيبني صوت الحساب بدل نقل
+    كلام غيره. النص يُولَّد من التغريدة الأصلية بأسلوب الشخصية.
+    """
+
+    name = "quote_post"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        tweet_url = (request.params.get("tweet_url") or "").strip()
+        if not tweet_url:
+            return CapabilityResult.fail("tweet_url is required", self.name)
+
+        text = (request.params.get("text") or "").strip()
+        if not text:
+            original = (request.params.get("original_text") or "").strip()[:400]
+            if not original:
+                return CapabilityResult.fail(
+                    "original_text is required to write a quote comment", self.name)
+            persona = context.config.persona
+            lang = getattr(persona, "language", "ar") or "ar"
+            dialect = getattr(persona, "dialect", "") or ""
+            gen = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="generate",
+                params={
+                    "prompt": (
+                        f"هذه تغريدة في مجالك:\n«{original}»\n\n"
+                        f"اكتب تعليق اقتباس (Quote) قصيراً باللغة ({lang})"
+                        + (f" وبلهجة {dialect}" if dialect else "") + ":\n"
+                        "- أضف زاوية أو معلومة أو موقفاً واضحاً لا يكرّر نص التغريدة.\n"
+                        "- جملتان كحد أقصى، أقل من 200 حرف، بلا هاشتاقات، وبلا اقتباس النص حرفياً.\n"
+                        "- لا تقل «أقتبس» أو «أشارككم»، اكتب التعليق مباشرة.\n"
+                        "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر."
+                    ),
+                    "system": context.persona_prompt(),
+                    "temperature": 0.85, "max_tokens": 160,
+                },
+                context={"server": "content"},
+            ))
+            text = (gen.data.get("text", "") or "").strip()
+        if not text:
+            return CapabilityResult.fail("no quote comment generated", self.name)
+        text = _normalize_post_text(text)
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="quote",
+            params={"tweet_url": tweet_url, "text": text},
+            context=_x_context(context),
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        _record_interaction(
+            context, action="retweet", url=tweet_url,
+            handle=request.params.get("handle", ""),
+            text=(request.params.get("original_text") or text),
+        )
+        context.memory.remember(
+            context.config.id, MemoryLayerType.LONG_TERM,
+            f"Published post (quote): {text[:200]}", importance=3,
+            metadata={"quoted": tweet_url},
+        )
+        output = dict(res.data or {})
+        output.setdefault("text", text)
+        output.setdefault("quoted_url", tweet_url)
+        return CapabilityResult.ok(self.name, **output)
+
+
+class SchedulePostCapability(ICapability):
+    """Schedule a post for a future (best-performing) hour.
+
+    صانع المحتوى الحقيقي ينشر في وقت جمهوره لا وقت استيقاظه. نستفيد من عامل
+    الجدولة الجاهز في ``app/x`` (نشر تلقائي + إعادة محاولة)، ونختار الساعة من
+    سجل الأداء (أفضل ساعات التفاعل فعلياً) إن لم يُحدَّد وقت.
+    """
+
+    name = "schedule_post"
+    required_mcp = ["x"]
+
+    def _run_at(self, request: CapabilityRequest, context: "ExecutionContext") -> str:
+        from datetime import datetime, timedelta, timezone as _tz
+
+        explicit = (request.params.get("run_at") or "").strip()
+        if explicit:
+            return explicit
+        hours_ahead = float(request.params.get("hours_ahead", 0) or 0)
+        if hours_ahead > 0:
+            return (datetime.now(_tz.utc) + timedelta(hours=hours_ahead)) \
+                .strftime("%Y-%m-%d %H:%M:%S")
+
+        from ..employee import strategy
+        best = [h for h in (strategy.performance_report(context.config)["best_hours"] or [])]
+        now = datetime.now(_tz.utc)
+        target_hour = int(best[0]["hour"]) if best else (now.hour + 3) % 24
+        run_at = now.replace(minute=0, second=0, microsecond=0)
+        while run_at.hour != target_hour or run_at <= now + timedelta(minutes=20):
+            run_at += timedelta(hours=1)
+        return run_at.strftime("%Y-%m-%d %H:%M:%S")
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        import uuid
+
+        text = (request.params.get("text") or "").strip()
+        if not text:
+            brief = request.params.get("brief") or "اكتب منشوراً أصلياً في مجال تخصصك."
+            gen = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="generate",
+                params={"prompt": _content_prompt(brief, context),
+                        "system": context.persona_prompt(),
+                        "temperature": 0.85, "max_tokens": 220},
+                context={"server": "content"},
+            ))
+            text = (gen.data.get("text", "") or "").strip()
+        if not text:
+            return CapabilityResult.fail("no content to schedule", self.name)
+        text = _normalize_post_text(text)
+
+        media_url = (request.params.get("media_url", "") or "").strip()
+        if media_url and not _is_http_url(media_url):
+            media_url = ""
+        run_at = self._run_at(request, context)
+        event_id = f"aeos-{context.config.id[:8]}-{uuid.uuid4().hex[:10]}"
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="schedule_post",
+            params={"event_id": event_id, "content": text, "run_at": run_at,
+                    "media_url": media_url},
+            context=_x_context(context),
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        _mark_topic_engaged(context, text)
+        context.memory.remember(
+            context.config.id, MemoryLayerType.LONG_TERM,
+            f"Scheduled post for {run_at} UTC: {text[:180]}", importance=2,
+            metadata={"event_id": event_id, "run_at": run_at},
+        )
+        output = dict(res.data or {})
+        output.update({"text": text, "run_at": run_at, "event_id": event_id})
+        return CapabilityResult.ok(self.name, **output)
+
+
+class BookmarkPostCapability(ICapability):
+    """Bookmark a strong post to reuse as raw material later (a creator's swipe file)."""
+
+    name = "bookmark_post"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        tweet_url = (request.params.get("tweet_url") or "").strip()
+        if not tweet_url:
+            return CapabilityResult.fail("tweet_url is required", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="bookmark",
+            params={"tweet_url": tweet_url}, context=_x_context(context),
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        text = (request.params.get("original_text") or "").strip()
+        if text:
+            context.memory.remember(
+                context.config.id, MemoryLayerType.SEMANTIC,
+                f"مرجع محفوظ (bookmark): {text[:240]}", importance=2,
+                metadata={"url": tweet_url, "kind": "bookmark"},
+            )
+        return CapabilityResult.ok(self.name, **(res.data or {}))
+
+
+class UnfollowUserCapability(ICapability):
+    """Unfollow an account that no longer fits the specialty (healthy following list)."""
+
+    name = "unfollow_user"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        profile_url = (request.params.get("profile_url") or "").strip()
+        if not profile_url:
+            return CapabilityResult.fail("profile_url is required", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="unfollow",
+            params={"profile_url": profile_url}, context=_x_context(context),
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        return CapabilityResult.ok(self.name, **(res.data or {}))
+
+
+class DeleteOwnPostCapability(ICapability):
+    """Delete one of the employee's OWN posts (fix a mistake).
+
+    حماية صريحة: يُمنع الحذف إلا لمنشور يملكه الحساب نفسه (نتحقق من كون الرابط
+    داخل حساب الموظف)، فلا يمكن أن تُستخدم القدرة على منشور شخص آخر.
+    """
+
+    name = "delete_own_post"
+    required_mcp = ["x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        tweet_url = (request.params.get("tweet_url") or "").strip()
+        tweet_id = (request.params.get("tweet_id") or "").strip()
+        handle = (context.config.account_username or "").strip().lstrip("@").lower()
+        if tweet_url:
+            if handle and f"/{handle}/status/" not in tweet_url.lower():
+                return CapabilityResult.fail(
+                    "refusing to delete a post that is not owned by this account", self.name)
+            tweet_id = tweet_id or tweet_url.rstrip("/").split("/status/")[-1].split("?")[0]
+        if not tweet_id.isdigit():
+            return CapabilityResult.fail("a valid own tweet_url/tweet_id is required", self.name)
+
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="delete_tweet",
+            params={"tweet_id": tweet_id}, context=_x_context(context),
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        context.memory.remember(
+            context.config.id, MemoryLayerType.REFLECTION,
+            f"حذفت منشوري {tweet_id}: {request.params.get('reason', 'تصحيح خطأ')}",
+            importance=3,
+        )
+        return CapabilityResult.ok(self.name, tweet_id=tweet_id, **(res.data or {}))
+
+
+class ReadProfileCapability(ICapability):
+    """Read a target account's bio + recent posts (know who you engage with)."""
+
+    name = "read_profile"
+    required_mcp = ["playwright_x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        handle = (request.params.get("handle") or "").strip().lstrip("@")
+        if not handle:
+            return CapabilityResult.fail("handle is required", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="read_user_profile",
+            params={"cookie_label": context.config.cookie_label, "handle": handle,
+                    "limit": int(request.params.get("limit", 20))},
+            context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        profile = dict(res.data or {})
+        context.scratch.setdefault("profiles", {})[f"@{handle}"] = profile
+        return CapabilityResult.ok(self.name, **profile)
+
+
+class ReadOwnMetricsCapability(ICapability):
+    """Read the employee's OWN posts performance and learn from it.
+
+    هذه هي حلقة التغذية الراجعة: بدونها كان الموظف ينشر في الفراغ. نقرأ أرقام
+    منشوراته الحقيقية، نحدّث سجل الأداء (محور/صيغة/ساعة)، ونضع تقرير التعلّم في
+    الـscratch ليستفيد منه اختيار المحتوى القادم والذاكرة المعرفية.
+    """
+
+    name = "read_own_metrics"
+    required_mcp = ["playwright_x"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        from ..employee import strategy
+
+        handle = (request.params.get("handle")
+                  or context.config.account_username or "").strip().lstrip("@")
+        if not handle:
+            return CapabilityResult.fail("account handle is unknown", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="read_my_posts",
+            params={"cookie_label": context.config.cookie_label, "handle": handle,
+                    "limit": int(request.params.get("limit", 15))},
+            context={"server": "playwright_x", "cookie_label": context.config.cookie_label},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+
+        posts = res.data.get("posts", []) or []
+        stats = strategy.update_metrics(context.config, posts)
+        report = strategy.performance_report(context.config)
+        context.scratch["own_posts"] = posts
+        context.scratch["performance_report"] = report
+        return CapabilityResult.ok(self.name, count=len(posts), **stats,
+                                   report=report)
+
+
+class GenerateImageCapability(ICapability):
+    """Generate an original image for content (visual identity of the creator)."""
+
+    name = "generate_image"
+    required_mcp = ["image"]
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        topic = (request.params.get("topic") or request.params.get("prompt") or "").strip()
+        if not topic:
+            return CapabilityResult.fail("topic/prompt is required", self.name)
+        res = context.mcp.call(MCPRequest(
+            employee_id=context.config.id, tool="generate_image",
+            params={"prompt": _image_prompt(topic, context)},
+            context={"server": "image"},
+        ))
+        if not res.success:
+            return CapabilityResult.fail(res.error, self.name)
+        return CapabilityResult.ok(self.name, **(res.data or {}))
+
+
+class WaitCapability(ICapability):
+    """A no-op action: the decision engine may choose to do nothing this cycle."""
+
+    name = "wait"
+    required_mcp: List[str] = []
+
+    def execute(self, request: CapabilityRequest, context: "ExecutionContext") -> CapabilityResult:
+        return CapabilityResult.ok(self.name, waited=True,
+                                   reason=request.params.get("reason", "no action needed"))
+
+
+def default_capabilities() -> List[ICapability]:
+    """All built-in capabilities (registered at bootstrap)."""
+    return [
+        PublishContentCapability(),
+        PublishThreadCapability(),
+        QuotePostCapability(),
+        SchedulePostCapability(),
+        ReplyToUserCapability(),
+        RetweetCapability(),
+        LikePostCapability(),
+        FollowUserCapability(),
+        UnfollowUserCapability(),
+        BookmarkPostCapability(),
+        DeleteOwnPostCapability(),
+        ReadProfileCapability(),
+        ReadOwnMetricsCapability(),
+        GenerateImageCapability(),
+        BrowseTimelineCapability(),
+        BrowseXTrendsCapability(),
+        BrowseTopPostsCapability(),
+        BrowseSpecialtyNewsCapability(),
+        ResearchTopicCapability(),
+        ReadNotificationsCapability(),
+        StoreKnowledgeCapability(),
+        FetchTrendsCapability(),
+        FetchNewsCapability(),
+        WaitCapability(),
+    ]
