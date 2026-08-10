@@ -127,7 +127,11 @@ class MainAgent:
                     }
             
             elif intent == "generate_identity":
-                identity_response = self._handle_generate_identity(message, entities)
+                identity_response = self._handle_generate_identity(
+                    message, entities,
+                    pinned_account=(metadata or {}).get("pinned_account"),
+                    user_id=user_id,
+                )
                 if db and conversation_id:
                     try:
                         memory_service.add_message(
@@ -473,13 +477,42 @@ class MainAgent:
             }
 
     # ─────────────────── توليد الهوية الوهمية ───────────────────
-    def _handle_generate_identity(self, message: str, entities: Dict[str, Any]) -> str:
-        """ينشئ هوية وهمية عبر سيرفر app/identity"""
+    @staticmethod
+    def _employee_persona(entities: Dict[str, Any],
+                          pinned_account: Optional[str],
+                          user_id: Optional[int]):
+        """يجلب برسونا الموظف الذكي المستهدف (@حساب → المثبّت → موظف المستخدم الوحيد)."""
+        try:
+            from app.aeos.bootstrap import get_platform
+            from app.aeos.services.employee_commands import _resolve_cfg
+
+            cfg = _resolve_cfg(get_platform(), entities, pinned_account, user_id)
+            if cfg and cfg.persona:
+                return cfg
+        except Exception as e:
+            print(f"[Identity] تعذّر جلب برسونا الموظف: {e}")
+        return None
+
+    @staticmethod
+    def _persona_identity_params(persona) -> Dict[str, Any]:
+        """يحوّل برسونا الموظف إلى معايير توليد هوية (المنطق المشترك في
+        app/aeos/services/identity_service — نفس المصدر لتوليد المعاينة
+        هنا ولآلية التطبيق على X)."""
+        from app.aeos.services.identity_service import persona_identity_params
+
+        return persona_identity_params(persona)
+
+    def _handle_generate_identity(self, message: str, entities: Dict[str, Any],
+                                  pinned_account: Optional[str] = None,
+                                  user_id: Optional[int] = None) -> str:
+        """ينشئ هوية عبر سيرفر app/identity — مبنية على برسونا الموظف الذكي إن وُجد."""
         from app.services import identity_bridge
 
         # تأكد أن السيرفر شغّال
         try:
-            identity_bridge.start_identity_server()
+            if not identity_bridge.start_identity_server():
+                return ("⚠️ فشل تشغيل سيرفر توليد الهويات. "
+                        "تأكد أن GEMINI_API_KEY موجود في ملف .env الرئيسي.")
         except Exception as e:
             return f"⚠️ فشل تشغيل سيرفر توليد الهويات: {e}"
 
@@ -489,14 +522,32 @@ class MainAgent:
             # لو ما حدد، نفترض نعم (الميزة الكاملة)
             with_images = True
 
-        # حدّد لو هو طلب عشوائي بحت أو محدد
+        # حدّد لو هو طلب بمعايير صريحة
         has_specifics = any(entities.get(k) for k in
                             ["gender", "nationality", "orientation",
                              "bio_length", "skin_tone"])
 
+        # الأساس: برسونا الموظف الذكي إن وُجدت — لا عشوائية
+        persona_cfg = self._employee_persona(entities, pinned_account, user_id)
+        persona_based = persona_cfg is not None
+
         try:
-            if not has_specifics:
-                # طلب عشوائي
+            if persona_based:
+                params = self._persona_identity_params(persona_cfg.persona)
+                # معايير المستخدم الصريحة تتقدّم على المستنتَج من البرسونا
+                if entities.get("nationality"):
+                    params["nationality"] = entities["nationality"]
+                if entities.get("orientation"):
+                    params["orientation"] = entities["orientation"]
+                if entities.get("gender"):
+                    params["gender"] = entities["gender"]
+                if entities.get("bio_length"):
+                    params["bioLength"] = entities["bio_length"]
+                if entities.get("skin_tone"):
+                    params["skinTone"] = entities["skin_tone"]
+                result = identity_bridge.generate_profile(params, with_images=with_images)
+            elif not has_specifics:
+                # لا موظف ولا معايير → طلب عشوائي
                 if with_images:
                     result = identity_bridge.generate_random_profile_with_images()
                 else:
@@ -528,7 +579,12 @@ class MainAgent:
         data = result.get("data", {})
 
         # بناء الرد
-        lines = ["✅ **تم توليد هوية وهمية جديدة:**", ""]
+        if persona_based:
+            header = (f"✅ **تم توليد هوية مبنية على برسونا الموظف الذكي "
+                      f"@{persona_cfg.account_username}:**")
+        else:
+            header = "✅ **تم توليد هوية وهمية جديدة:**"
+        lines = [header, ""]
         if data.get("name"):
             lines.append(f"👤 **الاسم:** {data['name']}")
         if data.get("username"):

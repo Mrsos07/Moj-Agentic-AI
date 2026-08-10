@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     OPENAI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4"
     OPENAI_MAX_TOKENS: int = 2000
     OPENAI_TEMPERATURE: float = 0.7

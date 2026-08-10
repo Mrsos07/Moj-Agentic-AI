@@ -282,6 +282,21 @@ def api_regenerate_text():
         return jsonify({'success': False, 'error': safe_error(e)}), 500
 
 
+@app.route('/api/image/prompts', methods=['POST'])
+@limiter.limit("30 per minute")
+def api_image_prompts():
+    """Construct image prompts from params (deterministic, no LLM call).
+    Lets callers regenerate a single image without a full text generation."""
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({'success': False, 'error': 'No parameters provided'}), 400
+        prompts = construct_image_prompts(params)
+        return jsonify({'success': True, 'data': prompts})
+    except Exception as e:
+        return jsonify({'success': False, 'error': safe_error(e)}), 500
+
+
 @app.route('/api/image/generate', methods=['POST'])
 @limiter.limit("10 per minute")
 def api_generate_image():

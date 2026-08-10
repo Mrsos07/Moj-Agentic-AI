@@ -78,6 +78,8 @@ class IntentType(str, Enum):
     EMPLOYEE_SET_SCHEDULE = "employee_set_schedule"  # ضبط الجدولة/ساعات العمل
     EMPLOYEE_UPDATE_PERSONA = "employee_update_persona"  # تعديل الاهتمامات/اللهجة/الأسلوب
     EMPLOYEE_TEACH = "employee_teach"              # تعليم الموظف معلومة/توجيه دائم
+    # توليد هوية من برسونا الموظف وتطبيقها على حسابه في X (اسم/بايو/صورة/هيدر)
+    EMPLOYEE_APPLY_IDENTITY = "employee_apply_identity"
     # عرض بيانات الموظف الحيّة (يجلبها فوراً من مصادره ويناقشها)
     EMPLOYEE_SHOW_NEWS = "employee_show_news"          # أخبار قوقل حسب تخصصه
     EMPLOYEE_SHOW_TRENDS = "employee_show_trends"      # ترندات حسابه
@@ -102,6 +104,7 @@ EMPLOYEE_INTENTS = frozenset({
     IntentType.EMPLOYEE_SET_SCHEDULE,
     IntentType.EMPLOYEE_UPDATE_PERSONA,
     IntentType.EMPLOYEE_TEACH,
+    IntentType.EMPLOYEE_APPLY_IDENTITY,
     IntentType.EMPLOYEE_SHOW_NEWS,
     IntentType.EMPLOYEE_SHOW_TRENDS,
     IntentType.EMPLOYEE_SHOW_TIMELINE,
@@ -147,6 +150,7 @@ _INTENT_DESCRIPTIONS: Dict[str, str] = {
     "employee_set_schedule": "change AI employee schedule interval or working hours",
     "employee_update_persona": "change AI employee interests/dialect/tone/persona",
     "employee_teach": "teach the AI employee a fact or a permanent instruction",
+    "employee_apply_identity": "generate a new X profile identity (name/bio/avatar/header) FROM the AI employee's persona and APPLY it to the employee's X account",
     "employee_show_news": "employee fetches & shows Google News for its specialty",
     "employee_show_trends": "employee fetches & shows the X trends its account sees",
     "employee_show_timeline": "employee fetches & shows its home timeline tweets",
@@ -856,6 +860,16 @@ class IntentService:
                 r"employee.*tone",
                 r"employee.*dialect",
             ],
+            # توليد هوية من البرسونا وتطبيقها على حساب X (اسم/بايو/صورة/هيدر)
+            IntentType.EMPLOYEE_APPLY_IDENTITY: [
+                r"طبّ?ق.*هوي.*(?:الموظف|للموظف|موظف)",
+                r"طبّ?ق.*(?:الهوية|هوية).*(?:اكس|إكس|تويتر|\bx\b|الحساب)",
+                r"(?:حدّ?ث|غيّ?ر|عدّ?ل|جدّ?د)\s*هوية\s*(?:ال)?موظف",
+                r"هوية\s*(?:ال)?موظف.*(?:اكس|إكس|تويتر|\bx\b)",
+                r"(?:حدّ?ث|غيّ?ر|عدّ?ل|جدّ?د).*(?:صورة|بايو|هيدر|غلاف|اسم).*(?:الموظف|للموظف)",
+                r"apply.*identity.*(?:employee|agent)",
+                r"(?:employee|agent).*identity.*(?:apply|update|refresh)",
+            ],
             IntentType.EMPLOYEE_TEACH: [
                 r"علّ?م.*الموظف",
                 r"تعلّ?م.*الموظف",
@@ -1077,6 +1091,25 @@ class IntentService:
     def _apply_employee_overrides(self, text_lower: str, detected: IntentType,
                                   conf: float) -> tuple:
         """يحسم التباس نوايا الموظف الذكي ويضمن ثقة كافية لتوجيهها."""
+        # «حدّث/عدّل/غيّر/طبّق هوية الموظف …» يطابق أنماط update_profile
+        # (عدل.*هوي) أيضاً — لكن ذكر الموظف مع فعل تعديل/تطبيق يعني توليد
+        # هوية من برسوناه وتطبيقها، لا تعديل حقول يدوية. أفعال التوليد وحدها
+        # (ولّد/أنشئ) تبقى generate_identity (معاينة بلا تطبيق على X).
+        if detected in (IntentType.UPDATE_PROFILE, IntentType.GENERATE_IDENTITY,
+                        IntentType.EMPLOYEE_UPDATE_PERSONA):
+            # «هوية» أو أي حقل من حقولها (صورة/بايو/هيدر/غلاف) في سياق الموظف.
+            # نستثني الطلبات التي تحمل قيمة صريحة (رابط أو «إلى "..."») لأنها
+            # تعديل يدوي مقصود وليست توليداً من البرسونا.
+            _explicit_value = re.search(r"https?://|إلى\s*[\"'«]|الى\s*[\"'«]",
+                                        text_lower)
+            if (not _explicit_value
+                    and re.search(r"هوي|صور[ةه]|بايو|هيدر|غلاف", text_lower)
+                    and re.search(r"الموظف|للموظف|بالموظف|employee|\bagent\b",
+                                  text_lower)
+                    and re.search(r"طبّ?ق|حدّ?ث|غيّ?ر|عدّ?ل|جدّ?د|ركّ?ب|ثبّ?ت|"
+                                  r"apply|update|refresh|set", text_lower)):
+                return IntentType.EMPLOYEE_APPLY_IDENTITY, max(conf, 0.95)
+
         if detected in EMPLOYEE_INTENTS:
             conf = max(conf, 0.9)
             # "شغّل/فعّل الموظف الآن" أو ذكر "دورة" ⇒ تشغيل دورة الآن

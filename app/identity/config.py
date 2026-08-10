@@ -1,7 +1,10 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+# fallback: .env الرئيسي في جذر المشروع (يحوي GEMINI_API_KEY)
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'

@@ -100,11 +100,13 @@ def update_profile_on_x(
     banner_path: Optional[str] = None,
     headless: bool = True,
 ):
-    chrome_channel = os.getenv('XSUITE_CHROME_CHANNEL', '').strip() or None
+    # كبقية الوحدات (x_actions/x_follow/…): كروم المثبَّت افتراضياً — كروميوم
+    # Playwright المرفق غير منزَّل هنا، وكان غيابه يُفشل التطبيق بصمت.
+    chrome_channel = os.getenv('XSUITE_CHROME_CHANNEL', '').strip() or "chrome"
     with sync_playwright() as p:
-        if chrome_channel:
+        try:
             browser = p.chromium.launch(channel=chrome_channel, headless=headless)
-        else:
+        except Exception:
             browser = p.chromium.launch(headless=headless)
         context = browser.new_context(storage_state=storage_state_path)
         page = context.new_page()
@@ -138,21 +140,27 @@ def update_profile_on_x(
             _handle_crop_if_any(page)
 
         if name:
-            _fill_first_match(page, [
+            filled = _fill_first_match(page, [
                 ("css", "input[name='displayName']"),
                 ("role", r"^Name\\b"),
                 ("role", r"^الاسم\\b"),
             ], name)
+            if not filled:
+                raise RuntimeError("لم أجد حقل الاسم في نموذج تعديل البروفايل — لم يُحفظ شيء.")
 
         if bio:
+            filled = False
             try:
                 loc = page.locator("textarea[name='description'], textarea")
                 if loc.count() > 0:
                     loc.first.fill(bio, timeout=8000)
-                else:
-                    _fill_first_match(page, [("role", r"^Bio\\b"), ("role", r"^النبذة|^نبذة|^نبذه")], bio)
+                    filled = True
             except Exception:
-                _fill_first_match(page, [("role", r"^Bio\\b"), ("role", r"^النبذة|^نبذة|^نبذه")], bio)
+                pass
+            if not filled:
+                filled = _fill_first_match(page, [("role", r"^Bio\\b"), ("role", r"^النبذة|^نبذة|^نبذه")], bio)
+            if not filled:
+                raise RuntimeError("لم أجد حقل النبذة في نموذج تعديل البروفايل — لم يُحفظ شيء.")
 
         if location:
             _fill_first_match(page, [
@@ -170,6 +178,32 @@ def update_profile_on_x(
 
         page.get_by_test_id("Profile_Save_Button").click(timeout=30_000)
         page.wait_for_timeout(2500)
+
+        # تحقق فعلي: النقر على «حفظ» قد يمر بلا أثر (خطأ تحقق في X، حقل لم
+        # يُعبّأ، جلسة منتهية) — أعد فتح النموذج واقرأ القيم المحفوظة فعلاً.
+        # إبلاغ نجاح زائف أسوأ من فشل صريح: النظام يزامن البرسونا على أساسه.
+        if name or bio:
+            page.goto("https://x.com/settings/profile", wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
+            problems = []
+            if name:
+                current = None
+                try:
+                    current = page.locator("input[name='displayName']").first.input_value(timeout=10_000)
+                except Exception:
+                    problems.append("تعذّر قراءة حقل الاسم للتحقق")
+                if current is not None and current.strip() != name.strip():
+                    problems.append(f"الاسم لم يُحفظ (الحالي: {current.strip()!r})")
+            if bio:
+                current = None
+                try:
+                    current = page.locator("textarea[name='description'], textarea").first.input_value(timeout=10_000)
+                except Exception:
+                    problems.append("تعذّر قراءة حقل النبذة للتحقق")
+                if current is not None and current.strip() != bio.strip():
+                    problems.append("النبذة لم تُحفظ")
+            if problems:
+                raise RuntimeError("الحفظ لم يكتمل: " + "؛ ".join(problems))
 
         context.close()
         browser.close()

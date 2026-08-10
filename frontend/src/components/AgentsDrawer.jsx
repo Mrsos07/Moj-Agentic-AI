@@ -16,6 +16,8 @@ import {
   MdDelete,
   MdAdd,
   MdChat,
+  MdBadge,
+  MdEdit,
 } from 'react-icons/md'
 
 // تسميات عربية للمهارات و MCPs
@@ -102,6 +104,9 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
   const [delBusy, setDelBusy] = useState({})   // label -> bool (delete)
   const [insightBusy, setInsightBusy] = useState({}) // "label:kind" -> bool
   const [wizardOpen, setWizardOpen] = useState(false) // معالج إنشاء موظف جديد
+  const [identBusy, setIdentBusy] = useState({})     // label -> 'preview' | 'apply' | 'field:<field>'
+  const [identPreview, setIdentPreview] = useState({}) // label -> {name, bio, avatar_url, banner_url}
+  const [identEdit, setIdentEdit] = useState({})       // label -> {field, prompt} (تعديل عنصر منفرد)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -573,12 +578,85 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
     if (!empId) { onNotify?.('فعّل الموظف أولاً.'); return }
     try {
       const token = localStorage.getItem('token')
+      // force_fresh: الدورة اليدوية مقصودة — امسح كل المصادر من جديد بدل
+      // إعادة استخدام ذاكرة الرصد (TTL ساعة)؛ بدونها تبدو الدورة اليدوية
+      // «بلا أدوات» لأنها تقفز مباشرة للتحليل بلقطة قديمة.
       await axios.post(`/api/aeos/employees/${empId}/trigger`,
-        { event_type: 'manual', payload: {}, sync: false },
+        { event_type: 'manual', payload: { force_fresh: true }, sync: false },
         { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       onNotify?.(`🚀 تم إيقاظ الموظف @${label} لتنفيذ دورة الآن.`)
     } catch (e) {
       onNotify?.(`❌ تعذّر تشغيل @${label}`)
+    }
+  }
+
+  // ── هوية X من الشخصية: توليد معاينة (اسم/بايو/صورة/هيدر) ثم تطبيقها ──
+  const previewIdentity = async (label) => {
+    const row = rows.find(r => r.label === label)
+    const empId = row?.agent?.employee_id
+    if (!empId) { onNotify?.('فعّل الموظف أولاً.'); return }
+    setIdentBusy(prev => ({ ...prev, [label]: 'preview' }))
+    try {
+      const token = localStorage.getItem('token')
+      // الخادم يمهل توليد الصور 300ث (IMAGE_API_TIMEOUT) — مهلة الواجهة يجب أن تتجاوزها
+      const res = await axios.post(`/api/aeos/employees/${empId}/identity/preview`, {},
+        { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 330000 })
+      const ident = res.data?.identity
+      if (ident) {
+        setIdentPreview(prev => ({ ...prev, [label]: ident }))
+      } else {
+        onNotify?.(`❌ لم ترجع هوية للمعاينة لـ @${label}`)
+      }
+    } catch (e) {
+      const detail = e?.response?.data?.detail
+      onNotify?.(`❌ تعذّر توليد هوية لـ @${label}: ${detail || (e?.code === 'ECONNABORTED' ? 'استغرق التوليد وقتاً أطول من المتوقّع — أعد المحاولة' : 'خطأ غير متوقع')}`)
+    } finally {
+      setIdentBusy(prev => ({ ...prev, [label]: null }))
+    }
+  }
+
+  const applyIdentity = async (label) => {
+    const row = rows.find(r => r.label === label)
+    const empId = row?.agent?.employee_id
+    const ident = identPreview[label]
+    if (!empId || !ident) return
+    setIdentBusy(prev => ({ ...prev, [label]: 'apply' }))
+    try {
+      const token = localStorage.getItem('token')
+      const res = await axios.post(`/api/aeos/employees/${empId}/identity/apply`,
+        { identity: ident },
+        { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 15000 })
+      onNotify?.(res.data?.message || `🪩 جارِ تطبيق الهوية على @${label}… ستصلك النتيجة في الشات.`)
+      setIdentPreview(prev => ({ ...prev, [label]: null }))
+    } catch (e) {
+      onNotify?.(`❌ تعذّر تطبيق الهوية على @${label}: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
+    } finally {
+      setIdentBusy(prev => ({ ...prev, [label]: null }))
+    }
+  }
+
+  // ── تعديل عنصر واحد من الهوية (صورة/هيدر/اسم/بايو) ببرومبت اختياري ──
+  const regenerateField = async (label, field) => {
+    const row = rows.find(r => r.label === label)
+    const empId = row?.agent?.employee_id
+    if (!empId) return
+    const prompt = (identEdit[label]?.prompt || '').trim()
+    setIdentBusy(prev => ({ ...prev, [label]: `field:${field}` }))
+    try {
+      const token = localStorage.getItem('token')
+      const res = await axios.post(`/api/aeos/employees/${empId}/identity/field`,
+        { field, prompt },
+        { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 330000 })
+      const patch = res.data?.patch
+      if (patch) {
+        setIdentPreview(prev => ({ ...prev, [label]: { ...(prev[label] || {}), ...patch } }))
+        setIdentEdit(prev => ({ ...prev, [label]: null }))
+      }
+    } catch (e) {
+      const detail = e?.response?.data?.detail
+      onNotify?.(`❌ تعذّر تعديل العنصر: ${detail || (e?.code === 'ECONNABORTED' ? 'استغرق التوليد وقتاً أطول من المتوقّع — أعد المحاولة' : 'خطأ غير متوقع')}`)
+    } finally {
+      setIdentBusy(prev => ({ ...prev, [label]: null }))
     }
   }
 
@@ -810,6 +888,134 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                       💡 اقتراحات
                     </button>
                   </div>
+
+                  {/* هوية X من الشخصية: توليد + معاينة + تطبيق بضغطة */}
+                  {!identPreview[label] ? (
+                    <button
+                      onClick={() => previewIdentity(label)}
+                      disabled={!agent?.employee_id || !!identBusy[label]}
+                      title="يولّد هوية كاملة (اسم + بايو + صورة + هيدر) من شخصية الموظف ويعرضها للمعاينة قبل تطبيقها على حسابه في X"
+                      className="w-full flex items-center justify-center gap-2 mt-2 px-3 py-2 rounded-xl border-2 border-dashed border-primary/60 text-primary font-bold text-xs hover:bg-primary/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {identBusy[label] === 'preview' ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                          جارِ توليد الهوية من الشخصية… (قد تأخذ دقيقتين)
+                        </>
+                      ) : (
+                        <>
+                          <MdBadge size={17} /> هوية X من الشخصية (معاينة ثم تطبيق)
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <div className="mt-2 rounded-xl border border-primary/40 overflow-hidden bg-gray-50 dark:bg-card-dark/40">
+                      {/* معاينة بشكل بروفايل X مصغّر */}
+                      {identPreview[label].banner_url && (
+                        <img src={identPreview[label].banner_url} alt="header"
+                          className="w-full h-20 object-cover" />
+                      )}
+                      <div className="px-3 pb-3">
+                        <div className="flex items-end gap-2 -mt-6">
+                          {identPreview[label].avatar_url && (
+                            <img src={identPreview[label].avatar_url} alt="avatar"
+                              className="size-14 rounded-full border-4 border-card-light dark:border-card-dark object-cover shrink-0" />
+                          )}
+                          <div className="min-w-0 pt-7">
+                            <p className="text-sm font-bold text-text-primary-light dark:text-text-primary-dark truncate">
+                              {identPreview[label].name || '—'}
+                            </p>
+                            <p className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">@{label}</p>
+                          </div>
+                        </div>
+                        {identPreview[label].bio && (
+                          <p className="mt-1.5 text-xs text-text-primary-light dark:text-text-primary-dark leading-relaxed">
+                            {identPreview[label].bio}
+                          </p>
+                        )}
+                        <div className="flex items-center gap-2 mt-2.5">
+                          <button
+                            onClick={() => applyIdentity(label)}
+                            disabled={identBusy[label] === 'apply'}
+                            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-white text-xs font-bold hover:bg-primary/90 disabled:opacity-50"
+                          >
+                            {identBusy[label] === 'apply'
+                              ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              : <MdCheckCircle size={15} />}
+                            تطبيق على X
+                          </button>
+                          <button
+                            onClick={() => previewIdentity(label)}
+                            disabled={!!identBusy[label]}
+                            title="توليد هوية مختلفة من نفس الشخصية"
+                            className="flex items-center gap-1 px-2.5 py-2 rounded-lg border border-border-light dark:border-border-dark text-xs text-text-primary-light dark:text-text-primary-dark hover:bg-primary/10 disabled:opacity-50"
+                          >
+                            {identBusy[label] === 'preview'
+                              ? <div className="w-3.5 h-3.5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                              : <MdRefresh size={15} />}
+                            إعادة توليد
+                          </button>
+                          <button
+                            onClick={() => setIdentPreview(prev => ({ ...prev, [label]: null }))}
+                            disabled={!!identBusy[label]}
+                            className="px-2.5 py-2 rounded-lg border border-border-light dark:border-border-dark text-xs text-text-secondary-light dark:text-text-secondary-dark hover:bg-gray-100 dark:hover:bg-card-dark disabled:opacity-50"
+                          >
+                            إلغاء
+                          </button>
+                        </div>
+                        {/* تعديل عنصر منفرد: صورة / هيدر / اسم / بايو — ببرومبت اختياري */}
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2.5 pt-2 border-t border-border-light dark:border-border-dark">
+                          <span className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">تعديل عنصر:</span>
+                          {[['avatar', 'الصورة'], ['banner', 'الهيدر'], ['name', 'الاسم'], ['bio', 'البايو']].map(([f, fl]) => (
+                            <button
+                              key={f}
+                              onClick={() => setIdentEdit(prev => ({ ...prev, [label]: prev[label]?.field === f ? null : { field: f, prompt: prev[label]?.prompt || '' } }))}
+                              disabled={!!identBusy[label]}
+                              title={`إعادة توليد ${fl} فقط — مع إمكانية كتابة طلب يوجّه التعديل`}
+                              className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] disabled:opacity-50 transition-colors ${identEdit[label]?.field === f
+                                ? 'border-primary bg-primary/10 text-primary font-bold'
+                                : 'border-border-light dark:border-border-dark text-text-primary-light dark:text-text-primary-dark hover:bg-primary/10'}`}
+                            >
+                              {identBusy[label] === `field:${f}`
+                                ? <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                                : <MdEdit size={12} />}
+                              {fl}
+                            </button>
+                          ))}
+                        </div>
+                        {identEdit[label]?.field && (
+                          <div className="flex items-center gap-1.5 mt-1.5">
+                            <input
+                              type="text"
+                              value={identEdit[label]?.prompt || ''}
+                              onChange={e => setIdentEdit(prev => ({ ...prev, [label]: { ...prev[label], prompt: e.target.value } }))}
+                              onKeyDown={e => { if (e.key === 'Enter' && !identBusy[label]) regenerateField(label, identEdit[label].field) }}
+                              placeholder={identEdit[label].field === 'avatar' ? 'وصف التعديل (اختياري) — مثال: خلفية زرقاء وملامح أكثر جدية'
+                                : identEdit[label].field === 'banner' ? 'وصف التعديل (اختياري) — مثال: مشهد مدينة ليلاً بألوان هادئة'
+                                  : identEdit[label].field === 'name' ? 'وصف التعديل (اختياري) — مثال: اسم أقصر وأسهل حفظاً'
+                                    : 'وصف التعديل (اختياري) — مثال: بايو أقصر مع لمسة حماسية'}
+                              disabled={!!identBusy[label]}
+                              dir="rtl"
+                              className="flex-1 min-w-0 px-2 py-1.5 rounded-lg border border-border-light dark:border-border-dark bg-white dark:bg-card-dark text-[11px] text-text-primary-light dark:text-text-primary-dark placeholder:text-text-secondary-light/60 dark:placeholder:text-text-secondary-dark/60 focus:outline-none focus:border-primary"
+                            />
+                            <button
+                              onClick={() => regenerateField(label, identEdit[label].field)}
+                              disabled={!!identBusy[label]}
+                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-primary text-white text-[11px] font-bold hover:bg-primary/90 disabled:opacity-50 shrink-0"
+                            >
+                              {identBusy[label] === `field:${identEdit[label].field}`
+                                ? <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                : <MdRefresh size={13} />}
+                              توليد
+                            </button>
+                          </div>
+                        )}
+                        <p className="mt-1.5 text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
+                          التطبيق يغيّر الاسم والبايو والصورة والهيدر في حساب X الحقيقي، ويحدّث برسونا الموظف لتطابقها. التعديل المنفرد يحدّث المعاينة فقط — اضغط «تطبيق على X» لاعتماده.
+                        </p>
+                      </div>
+                    </div>
+                  )}
 
                   {/* حذف: الموظف الذكي فقط، أو الموظف + الحساب المرتبط */}
                   <div className="flex items-center gap-2 mt-3 pt-3 border-t border-border-light dark:border-border-dark">

@@ -17,8 +17,13 @@ export default defineConfig({
         // اطبع سطراً هادئاً بدل Stack trace، والمتصفح يعيد الاتصال تلقائياً
         configure: (proxy) => {
           proxy.on('error', (err) => {
+            // ECONNRESET هو التوقيع الطبيعي لإعادة تشغيل الباك إند (WatchFiles)
+            // أو تحديث الصفحة: كل السوكتات تُصفَّر دفعةً واحدة. طبعُه كـstack
+            // trace كان يُغرق الطرفية ويُخفي الأخطاء الحقيقية.
             if (err?.code === 'ECONNREFUSED' || err?.errors) {
               console.log('[vite] backend (8000) غير متاح مؤقتاً — سيُعاد الاتصال تلقائياً')
+            } else if (err?.code === 'ECONNRESET' || err?.code === 'EPIPE') {
+              console.log('[vite] انقطع السوكت (إعادة تشغيل الباك إند أو تحديث الصفحة) — إعادة وصل تلقائية')
             } else {
               console.error('[vite] ws proxy error:', err)
             }

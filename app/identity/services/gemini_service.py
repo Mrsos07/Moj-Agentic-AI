@@ -218,23 +218,17 @@ def _save_image_bytes(image_bytes: bytes, ext: str = "png") -> str:
     return filename
 
 
-def generate_image(prompt: str, aspect_ratio: str = "1:1") -> str:
-    """Generate an image using Gemini 2.5 Flash Image - Returns URL path on server"""
-    
-    response = genai_client.models.generate_content(
-        model='gemini-2.5-flash-image',
-        contents=[prompt],
-        config=genai_types.GenerateContentConfig(
-            response_modalities=['Image'],
-            image_config=genai_types.ImageConfig(
-                aspect_ratio=aspect_ratio,
-            )
-        )
-    )
-    
-    if response.candidates and response.candidates[0].content.parts:
-        for part in response.candidates[0].content.parts:
-            if part.inline_data is not None:
+def _extract_image_from_response(response) -> str:
+    """يستخرج أول صورة من رد Gemini ويحفظها؛ يعيد '' إن لم توجد.
+
+    قد يعيد Gemini مرشحاً بـ content=None (حجب أمان أو رد فارغ عابر) —
+    الوصول المباشر لـ .content.parts كان ينهار بـ
+    "'NoneType' object has no attribute 'parts'"."""
+    for cand in (getattr(response, 'candidates', None) or []):
+        content = getattr(cand, 'content', None)
+        parts = getattr(content, 'parts', None) if content is not None else None
+        for part in (parts or []):
+            if getattr(part, 'inline_data', None) is not None:
                 raw_data = part.inline_data.data
                 mime_type = part.inline_data.mime_type or "image/png"
                 ext = mime_type.split('/')[-1] if '/' in mime_type else 'png'
@@ -242,8 +236,40 @@ def generate_image(prompt: str, aspect_ratio: str = "1:1") -> str:
                     raw_data = base64.b64decode(raw_data)
                 filename = _save_image_bytes(raw_data, ext)
                 return f"/static/generated/{filename}"
-    
-    raise ValueError("No image was returned from Gemini.")
+    return ""
+
+
+def generate_image(prompt: str, aspect_ratio: str = "1:1") -> str:
+    """Generate an image using Gemini 2.5 Flash Image - Returns URL path on server"""
+    last_error = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 * attempt)  # الردود الفارغة غالباً عابرة — أعد المحاولة
+        try:
+            response = genai_client.models.generate_content(
+                model='gemini-2.5-flash-image',
+                contents=[prompt],
+                config=genai_types.GenerateContentConfig(
+                    response_modalities=['Image'],
+                    image_config=genai_types.ImageConfig(
+                        aspect_ratio=aspect_ratio,
+                    )
+                )
+            )
+        except Exception as e:
+            last_error = e
+            continue
+
+        url_path = _extract_image_from_response(response)
+        if url_path:
+            return url_path
+
+        reasons = [str(getattr(c, 'finish_reason', '?'))
+                   for c in (getattr(response, 'candidates', None) or [])]
+        last_error = ValueError(
+            f"No image was returned from Gemini (finish_reason={reasons or 'no candidates'}).")
+
+    raise last_error if last_error else ValueError("No image was returned from Gemini.")
 
 
 def generate_profile_image(prompt: str) -> str:

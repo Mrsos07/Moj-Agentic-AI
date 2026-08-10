@@ -10,9 +10,14 @@
 ## Graph memory (Zep/Graphiti + embedded Kuzu)
 - Code: `app/aeos/memory/graphiti_store.py`, wired in `app/aeos/bootstrap.py`,
   consumed by `EmotionPhase` / `GraphMemoryPhase` in `app/aeos/cognition/phases.py`.
-- Graph DB file: `data/graphiti_kuzu` (gitignored). If it becomes unopenable
-  (older Kuzu version / truncated WAL) the store quarantines it as
-  `graphiti_kuzu.corrupt-<ts>` and rebuilds automatically.
+- Graph DB file: `%LOCALAPPDATA%\Moj-Agentic-AI\graphiti_kuzu` on this machine
+  (`_default_db_path()`: the repo lives under OneDrive, and OneDrive syncing a
+  live Kuzu file corrupts it — a freshly rebuilt DB crashed again 2 days later
+  with all access serialized, which ruled out concurrency). The repo-relative
+  `data/graphiti_kuzu` default only applies outside OneDrive; `GRAPHITI_KUZU_DB`
+  overrides either. If the DB becomes unopenable (older Kuzu version / truncated
+  WAL) the store quarantines it as `graphiti_kuzu.corrupt-<ts>` and rebuilds
+  automatically.
 - Verify end-to-end (needs `OPENAI_API_KEY`, ~2 min, real OpenAI calls):
   `.\venv\Scripts\python.exe verify_graph_memory.py`
   Inspect live data instead: `... verify_graph_memory.py --db data/graphiti_kuzu --employee <id> --inspect-only`
@@ -39,6 +44,33 @@
   and `evidence`, and `_drop_instruction_echoes` deterministically removes any
   line that is a near-restatement of `persona.instructions/dos/donts/values`.
 - No facts ⇒ no emotional state. Never synthesise one from the persona.
+
+## Kuzu segfaults kill the whole backend — serialize EVERY access
+- Symptom the user sees: "the employee runs one cycle, then the AI employee and
+  the chat history disappear". The backend process vanishes with **no Python
+  traceback** — because a native extension crashed, not Python.
+- Proof, not guesswork: Windows Event Log had 15 crashes in one day, all with
+  `Faulting module: _kuzu.cp312-win_amd64.pyd`, `Exception code: 0xc0000005`
+  (access violation), same fault offset. Get it with:
+  `Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='Application Error'}`
+  A Python-side repro exits with code `-1073741819` (= 0xC0000005).
+- Trigger: a Kuzu **read concurrent with a write**. `ingest()` is fire-and-forget
+  (LLM entity extraction takes ~40s) and the next cycle's `EmotionPhase` calls
+  `search_facts` 30s later — straight into the write. The lock used to guard
+  writes only.
+- Therefore: `search_facts`, `recent_facts`, `stats` and `ingest` must ALL hold
+  `self._lock()`, and `KuzuDriver(max_concurrent_queries=1)` — Graphiti runs its
+  hybrid-search queries in parallel via `asyncio.gather`, and the outer lock does
+  not stop that internal parallelism. `verify_creator.py` asserts all of this.
+- Cost of serializing: the first search after an ingest waits ~10-16s for the
+  write to finish. That is the correct trade — the alternative is a dead process.
+- **Half-written DBs crash again on the next write** (measured: a copy of the live
+  65 MB DB crashed even WITH the fix, while a fresh DB survived). That is the
+  death loop: crash → damaged file → crash. `_mark_write_start/_end` write a
+  `<db>.writing` marker; finding it at startup means the previous process died
+  mid-write, so `_recover_from_hard_crash()` quarantines the file (rename, never
+  delete) and rebuilds. Fixing the concurrency does NOT repair an already damaged
+  file — it must be rotated once.
 
 ## Kuzu is single-process — never treat a lock error as corruption
 - Only ONE process may open `data/graphiti_kuzu`. While the app runs, any side
@@ -84,6 +116,44 @@
 - When adding such a check, verify the testid live first — a wrong selector turns
   a working feature into a permanent failure. `removeBookmark` and `-unfollow`
   were confirmed against the real UI.
+
+## Backend "hangs" are usually a zombie reloader, not a blocked event loop
+- Symptom: port 8000 accepts TCP but answers nothing (even `/api/aeos/health`),
+  the UI shows no employees and no conversations, and vite floods with
+  `ws proxy error: read ECONNRESET`.
+- Cause: uvicorn's `--reload` supervisor OWNS the listening socket. If the worker
+  process dies (Ctrl+C hitting only the child, a crash mid-reload) the supervisor
+  keeps listening forever with nothing behind it. A new `run.py` then cannot bind.
+- `run.py::_free_port()` now clears the port before binding (same trick x_bridge
+  uses for 5789). `RELOAD=0` runs a single process with no supervisor, and
+  `PORT=8010` runs a throwaway instance — **use a separate PORT when testing so
+  you never kill the user's running app** (I did this once; don't repeat it).
+- `run.py::_run_with_self_healing_reload` replaces the stock reloader: it checks
+  worker liveness on every watch-loop wakeup (~10s) and respawns a worker that
+  died unexpectedly (e.g. a Kuzu segfault), instead of holding the port as a
+  zombie. Ctrl+C is still clean (`should_exit` guard + 0.5s grace) and a
+  crash-at-startup loop is throttled to one respawn per 5s. Verified by killing
+  the worker of a dummy app on PORT=8010 and watching it revive.
+- Diagnose with py-spy, not guesswork: `venv\Scripts\py-spy.exe dump --pid <pid>`.
+  A stack in `watchfiles/main.py` + `basereload.py` and NO child process means
+  exactly this zombie state.
+- A 45s `search_tweets` timeout does NOT block HTTP: cycles run in worker threads
+  (verified — `/api/conversations/` kept returning 200 during one).
+
+## WebSocket drops: the browser cannot see protocol-level pongs
+- uvicorn pings every 20s (`ws_ping_interval`), which keeps idle sockets alive,
+  but the browser API exposes no pong. So after an abrupt backend death the
+  client keeps `readyState === OPEN` and silently receives nothing forever.
+- Fixed with an app-level heartbeat: the client sends `{"type":"ping"}` every 25s
+  and the `/ws/chat` handler replies `{"type":"pong"}`. That reply MUST be handled
+  before the chat-message path, or a ping is treated as an empty user message and
+  wakes the agent.
+- The client also force-reconnects after 70s of inbound silence, uses exponential
+  backoff (1→15s, was a flat 3s that hammered a restarting backend), and
+  reconnects immediately on `online` / `visibilitychange`.
+- `ECONNRESET` in the vite proxy is the normal signature of a backend restart or a
+  page refresh (all sockets reset at once — you will see a burst with identical
+  timestamps). It is logged as one quiet line so real errors stay visible.
 
 ## The browser lock is the usual cause of "انتهت المهلة"
 - `browser_lock` (in `app/services/x_bridge.py`) serialises ALL Playwright work.

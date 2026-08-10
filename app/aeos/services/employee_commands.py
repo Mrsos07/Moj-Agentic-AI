@@ -27,6 +27,7 @@ EMPLOYEE_INTENT_VALUES = frozenset({
     "employee_activate", "employee_pause", "employee_run_cycle",
     "employee_status", "employee_list", "employee_delete",
     "employee_set_schedule", "employee_update_persona", "employee_teach",
+    "employee_apply_identity",
     "employee_show_news", "employee_show_trends",
     "employee_show_timeline", "employee_show_top_posts",
     "employee_analyze",
@@ -128,6 +129,7 @@ def handle(intent: str, entities: Dict[str, Any], raw_text: str,
                 "employee_set_schedule": "ضبط جدولته",
                 "employee_update_persona": "تعديل شخصيته",
                 "employee_teach": "تعليمه",
+                "employee_apply_identity": "تطبيق هوية جديدة عليه",
             }.get(intent, "هذا الإجراء")
             return _need_account_msg(action, must_exist=True)
 
@@ -145,6 +147,9 @@ def handle(intent: str, entities: Dict[str, Any], raw_text: str,
             return _handle_update_persona(platform, cfg, entities)
         if intent == "employee_teach":
             return _handle_teach(platform, cfg, entities, raw_text)
+        if intent == "employee_apply_identity":
+            from . import identity_service
+            return identity_service.request_apply_identity(cfg, user_id, entities)
         if intent in _SHOW_INTENT_TO_KIND:
             from . import employee_data
             return employee_data.request_data(_SHOW_INTENT_TO_KIND[intent], cfg, user_id)
