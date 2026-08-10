@@ -744,6 +744,37 @@ def check_fact_dedup_and_diversity() -> None:
           f"{len(merged)} → {merged[0][:60] if merged else '-'}")
 
 
+def check_kuzu_access_is_serialized() -> None:
+    """حارس ارتداد: كل وصول إلى Kuzu مُسلسل، وإلا انهارت العملية كلها.
+
+    Kuzu امتداد أصلي: تزامن قراءة مع كتابة يُنتج Access Violation
+    (0xC0000005) يقتل الباك-إند بلا استثناء بايثون. حدث 15 مرة في يوم واحد.
+    """
+    import inspect
+
+    from app.aeos.memory import graphiti_store as gs
+
+    for fn_name in ("search_facts", "recent_facts", "stats", "ingest"):
+        src = inspect.getsource(getattr(gs.GraphitiStore, fn_name))
+        check(f"{fn_name} يُسلسل وصوله إلى Kuzu", "self._lock()" in src)
+
+    driver_src = inspect.getsource(gs.GraphitiStore._open_driver)
+    check("تواز Graphiti الداخلي مُقيَّد بواحد",
+          "max_concurrent_queries=1" in driver_src)
+
+    ingest_src = inspect.getsource(gs.GraphitiStore.ingest)
+    check("الكتابة تُعلَّم لكشف الموت المفاجئ",
+          "_mark_write_start" in ingest_src and "_mark_write_end" in ingest_src)
+
+    init_src = inspect.getsource(gs.GraphitiStore._initialize)
+    check("البدء يفحص علامة الموت وسط الكتابة",
+          "_recover_from_hard_crash" in init_src)
+
+    recover_src = inspect.getsource(gs.GraphitiStore._recover_from_hard_crash)
+    check("والقاعدة نصف المكتوبة تُحجر لا تُستخدم",
+          "_quarantine_db" in recover_src)
+
+
 def check_capabilities_registered() -> None:
     from app.aeos.capabilities.handlers import default_capabilities
     from app.aeos.mcp.servers.x_mcp import XPlatformMCP
@@ -943,6 +974,8 @@ def main() -> int:
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")
     check_fact_dedup_and_diversity()
+    print("\n=== 5j) تسلسل الوصول إلى Kuzu (منع انهيار العملية) ===")
+    check_kuzu_access_is_serialized()
     print("\n=== 6) أدوات المبدع مُسجّلة وموصولة ===")
     check_capabilities_registered()
     print("\n=== 7) قراءة عدّادات X (عربي/إنجليزي) ===")

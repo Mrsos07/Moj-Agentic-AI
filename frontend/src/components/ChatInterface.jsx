@@ -27,6 +27,14 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
   // (StrictMode يركّب المكوّن مرتين في التطوير فكانت الرسائل تصل مكررة)
   const wsRef = useRef(null)
   const reconnectTimerRef = useRef(null)
+  // نبضة + مراقب: المتصفح لا يرى ping/pong الخاص بالبروتوكول، فإن مات الخادم
+  // فجأة (إعادة تشغيل/انهيار) يبقى readyState=OPEN ولا تصل رسائل أبداً —
+  // «اتصال ميت صامت». نرسل نبضة دورية ونعيد الاتصال إن انقطع الوارد.
+  const heartbeatRef = useRef(null)
+  const lastInboundRef = useRef(Date.now())
+  const retryRef = useRef(0)
+  const HEARTBEAT_MS = 25000
+  const SILENCE_LIMIT_MS = 70000
   const [isConnected, setIsConnected] = useState(false)
   const [showSuggestions, setShowSuggestions] = useState(true)
   const [accountsOpen, setAccountsOpen] = useState(false)
@@ -72,9 +80,27 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
 
   useEffect(() => {
     connectWebSocket()
+
+    // لا تنتظر المؤقّت في الحالتين المعروفتين لعودة الاتصال: رجوع الشبكة،
+    // ورجوع المستخدم إلى التبويب (المتصفح يخفض المؤقّتات في التبويب المخفي
+    // فيبقى الاتصال مقطوعاً دقائق بعد عودة الظهور).
+    const revive = () => {
+      if (document.visibilityState === 'hidden') return
+      const sock = wsRef.current
+      if (!sock || sock.readyState === WebSocket.CLOSED) {
+        retryRef.current = 0
+        connectWebSocket()
+      }
+    }
+    window.addEventListener('online', revive)
+    document.addEventListener('visibilitychange', revive)
+
     return () => {
       // ألغِ أي إعادة اتصال مجدولة، ثم أغلق السوكت الحالي إغلاقاً مقصوداً
       // (تصفير wsRef قبل close يمنع onclose من إعادة الاتصال)
+      window.removeEventListener('online', revive)
+      document.removeEventListener('visibilitychange', revive)
+      stopHeartbeat()
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current)
         reconnectTimerRef.current = null
@@ -181,34 +207,72 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     const wsUrl = `${protocol}//${window.location.host}/ws/chat`
     
     const websocket = new WebSocket(wsUrl)
-    
+
     websocket.onopen = () => {
       console.log('WebSocket connected')
       setIsConnected(true)
+      retryRef.current = 0
+      lastInboundRef.current = Date.now()
+      startHeartbeat()
     }
-    
+
     websocket.onmessage = (event) => {
+      lastInboundRef.current = Date.now()
       const data = JSON.parse(event.data)
+      // الـpong إشارة حياة فقط — لا شأن له بمنطق المحادثة
+      if (data?.type === 'pong') return
       handleWebSocketMessage(data)
     }
     
     websocket.onerror = (error) => {
       console.error('WebSocket error:', error)
     }
-    
+
     websocket.onclose = () => {
       console.log('WebSocket disconnected')
       setIsConnected(false)
+      stopHeartbeat()
       // أعد الاتصال فقط إن كان هذا هو السوكت النشط (ليس إغلاقاً مقصوداً
       // من التنظيف ولا سوكتاً قديماً استُبدل) — يمنع تراكم الاتصالات المكررة
       if (wsRef.current === websocket) {
         wsRef.current = null
-        reconnectTimerRef.current = setTimeout(connectWebSocket, 3000)
+        scheduleReconnect()
       }
     }
     
     wsRef.current = websocket
     setWs(websocket)
+  }
+
+  // تراجع أسّي: إعادة اتصال كل 3 ثوان ثابتة تُغرق الخادم أثناء إعادة تشغيله
+  // وتُغرق سجل vite بالأخطاء؛ نبدأ سريعاً ثم نتباعد بسقف 15 ثانية.
+  const scheduleReconnect = () => {
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    const attempt = retryRef.current++
+    const delay = Math.min(1000 * Math.pow(2, attempt), 15000)
+    reconnectTimerRef.current = setTimeout(connectWebSocket, delay)
+  }
+
+  const stopHeartbeat = () => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current)
+      heartbeatRef.current = null
+    }
+  }
+
+  const startHeartbeat = () => {
+    stopHeartbeat()
+    heartbeatRef.current = setInterval(() => {
+      const sock = wsRef.current
+      if (!sock || sock.readyState !== WebSocket.OPEN) return
+      // صمت طويل مع سوكت «مفتوح» = اتصال ميت: أغلقه ليعمل onclose ويعيد الوصل
+      if (Date.now() - lastInboundRef.current > SILENCE_LIMIT_MS) {
+        console.warn('WebSocket صامت — إعادة الاتصال')
+        try { sock.close() } catch { /* ignore */ }
+        return
+      }
+      try { sock.send(JSON.stringify({ type: 'ping' })) } catch { /* ignore */ }
+    }, HEARTBEAT_MS)
   }
 
   const handleWebSocketMessage = (data) => {

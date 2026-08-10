@@ -708,6 +708,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 }, websocket)
                 continue
             
+            # نبضة على مستوى التطبيق: المتصفح لا يرى ping/pong الخاص بالبروتوكول،
+            # فبدونها يظل السوكت «مفتوحاً» ظاهرياً بعد موت الخادم ولا تصل رسائل.
+            # يجب أن تُعالج قبل أي شيء، وإلا حُسبت رسالةً فارغة وأُزعج الوكيل بها.
+            if message_data.get("type") == "ping":
+                await manager.send_message(
+                    {"type": "pong", "timestamp": datetime.now().isoformat()},
+                    websocket,
+                )
+                continue
+
             user_message = message_data.get("message", "")
             session_id = message_data.get("session_id", None)
             user_id = message_data.get("user_id", None)

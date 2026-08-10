@@ -17,11 +17,39 @@ from typing import Dict, Any, Optional
 IDENTITY_PORT = int(os.getenv("IDENTITY_PORT", "5990"))
 IDENTITY_BASE_URL = f"http://127.0.0.1:{IDENTITY_PORT}"
 IDENTITY_DIR = Path(__file__).resolve().parent.parent / "identity"
-API_TIMEOUT = 120  # توليد الصور قد يأخذ وقتاً
+API_TIMEOUT = 120  # الطلبات النصية
+# generate-full = نص + صورتا Gemini متتاليتان (بروفايل + هيدر)، كل صورة قد
+# تأخذ 30-90 ثانية — 120ث كانت تقطع الطلب قبل اكتماله («انتهت مهلة الانتظار»).
+IMAGE_API_TIMEOUT = 300
 
 _process: Optional[subprocess.Popen] = None
 _log_fh = None  # منع تجمّد العملية الابنة على أنبوب stdout غير مقروء
 IDENTITY_LOG = IDENTITY_DIR / "identity_server.log"
+
+
+def _resolve_gemini_key() -> Optional[str]:
+    """يجلب مفتاح Gemini من كل المصادر الممكنة بالترتيب.
+
+    1) متغيرات البيئة (GEMINI_API_KEY أو API_KEY).
+    2) settings (pydantic يقرأ .env الرئيسي لكنه لا يصدّر للبيئة).
+    3) قراءة .env الرئيسي مباشرة كحل أخير.
+    """
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+    if key:
+        return key
+    try:
+        from app.core.config import settings
+        if getattr(settings, "GEMINI_API_KEY", None):
+            return settings.GEMINI_API_KEY
+    except Exception:
+        pass
+    try:
+        from dotenv import dotenv_values
+        root_env = Path(__file__).resolve().parent.parent.parent / ".env"
+        values = dotenv_values(root_env)
+        return values.get("GEMINI_API_KEY") or values.get("API_KEY")
+    except Exception:
+        return None
 
 
 def _is_running() -> bool:
@@ -95,13 +123,17 @@ def start_identity_server() -> bool:
     env["FLASK_RUN_PORT"] = str(IDENTITY_PORT)
     env["PORT"] = str(IDENTITY_PORT)
 
-    # تمرير مفتاح Gemini من .env الرئيسي إلى خدمة Identity
-    # نقبل أي من الاسمين: GEMINI_API_KEY (المفضّل) أو API_KEY (للتوافق)
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+    # تمرير مفتاح Gemini من .env الرئيسي إلى خدمة Identity.
+    # المفتاح موجود في .env لكنه لا يصل إلى os.environ تلقائياً: إعدادات
+    # pydantic تقرأ .env داخل كائن settings فقط ولا تصدّره للبيئة، لذلك
+    # os.getenv وحده يفشل ويقلع السيرفر بلا مفتاح فينهار عند الاستيراد.
+    gemini_key = _resolve_gemini_key()
     if gemini_key:
         env["API_KEY"] = gemini_key
+        env["GEMINI_API_KEY"] = gemini_key
     else:
-        print("[Identity-Bridge] ⚠️ GEMINI_API_KEY غير موجود في .env — السيرفر لن يشتغل")
+        print("[Identity-Bridge] ❌ GEMINI_API_KEY غير موجود في .env — لن أشغّل السيرفر")
+        return False
 
     try:
         # وجّه المخرجات إلى ملف سجل بدل PIPE غير مقروء يتجمّد عند امتلائه.
@@ -199,7 +231,8 @@ def generate_random_profile() -> Dict[str, Any]:
 def generate_profile(params: Dict[str, Any], with_images: bool = False) -> Dict[str, Any]:
     """ولّد هوية بمعايير مُحددة. with_images=True يولّد الصور أيضاً."""
     endpoint = "/api/profile/generate-full" if with_images else "/api/profile/generate"
-    return _api_call("POST", endpoint, json=params)
+    timeout = IMAGE_API_TIMEOUT if with_images else API_TIMEOUT
+    return _api_call("POST", endpoint, json=params, timeout=timeout)
 
 
 def generate_random_profile_with_images() -> Dict[str, Any]:
@@ -217,7 +250,18 @@ def regenerate_bio(params: Dict[str, Any]) -> Dict[str, Any]:
     return _api_call("POST", "/api/bio/regenerate", json=params)
 
 
+def regenerate_text(params: Dict[str, Any]) -> Dict[str, Any]:
+    """أعد توليد كل النصوص (اسم/يوزر/بايو) بلا صور"""
+    return _api_call("POST", "/api/text/regenerate", json=params)
+
+
+def construct_prompts(params: Dict[str, Any]) -> Dict[str, Any]:
+    """يبني برومبتات الصورتين من المعايير (حتمي، بلا استدعاء LLM)"""
+    return _api_call("POST", "/api/image/prompts", json=params)
+
+
 def generate_image(prompt: str, image_type: str = "profile") -> Dict[str, Any]:
     """ولّد صورة واحدة. image_type: 'profile' أو 'header'"""
     return _api_call("POST", "/api/image/generate",
-                     json={"prompt": prompt, "type": image_type})
+                     json={"prompt": prompt, "type": image_type},
+                     timeout=IMAGE_API_TIMEOUT)

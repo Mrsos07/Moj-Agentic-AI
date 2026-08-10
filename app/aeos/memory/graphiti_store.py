@@ -23,7 +23,9 @@ GraphitiStore — Zep/Graphiti temporal knowledge-graph memory (self-hosted).
 
 متغيرات البيئة (اختيارية):
 - ``GRAPHITI_ENABLED``    — "0" لتعطيل الميزة (الافتراضي مفعّلة).
-- ``GRAPHITI_KUZU_DB``    — مسار قاعدة Kuzu (الافتراضي data/graphiti_kuzu).
+- ``GRAPHITI_KUZU_DB``    — مسار قاعدة Kuzu (الافتراضي data/graphiti_kuzu،
+  وعلى ويندوز داخل OneDrive يصبح ``%LOCALAPPDATA%\Moj-Agentic-AI\graphiti_kuzu``
+  لأن مزامنة OneDrive تُتلف قاعدة Kuzu الحيّة — انظر ``_default_db_path``).
 - ``GRAPHITI_MIN_SCORE``  — أدنى تشابه دلالي مقبول (الافتراضي 0.3؛ افتراضي
   Graphiti 0.6 صارم جداً على الاستعلامات العربية الفضفاضة فيعيد صفر نتائج).
 """
@@ -45,7 +47,26 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 logger = logging.getLogger("aeos.memory.graphiti")
 
-_DEFAULT_DB = Path(__file__).resolve().parents[3] / "data" / "graphiti_kuzu"
+def _default_db_path() -> Path:
+    """المسار الافتراضي للقاعدة — **خارج أي مجلد يزامنه OneDrive**.
+
+    السبب مُشاهَد لا نظري: المشروع يعيش داخل ``OneDrive\\Desktop`` والقاعدة
+    كانت في ``data/graphiti_kuzu``. OneDrive يفتح الملف ويقرؤه (بصمة/رفع)
+    أثناء كتابة Kuzu فيه — وKuzu محرّك أصلي يفترض ملفاً لا يلمسه غيره، فتنتج
+    قاعدة نصف سليمة تُسقط العملية (0xC0000005) عند كتابة لاحقة، حتى بعد
+    إعادة بناء نظيفة (قاعدة 8/3 الجديدة انهارت في 8/5 رغم قفل التسلسل).
+    لذلك على ويندوز نضع القاعدة في ``%LOCALAPPDATA%`` إن كان جذر المشروع
+    داخل OneDrive. ``GRAPHITI_KUZU_DB`` يتجاوز كل هذا صراحةً.
+    """
+    repo_default = Path(__file__).resolve().parents[3] / "data" / "graphiti_kuzu"
+    in_onedrive = any(p.lower().startswith("onedrive") for p in repo_default.parts)
+    local_app = os.getenv("LOCALAPPDATA", "")
+    if in_onedrive and local_app:
+        return Path(local_app) / "Moj-Agentic-AI" / "graphiti_kuzu"
+    return repo_default
+
+
+_DEFAULT_DB = _default_db_path()
 _RETRY_COOLDOWN = 300.0          # ثانية قبل إعادة محاولة تهيئة فشلت عابراً
 
 #: بصمات أخطاء **التزاحم** (عملية أخرى تحتجز القاعدة) — ليست تلفاً أبداً.
@@ -141,6 +162,7 @@ class GraphitiStore:
                 return False
             try:
                 Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+                self._recover_from_hard_crash()
                 driver = self._open_driver()
                 self._setup_fts_indexes(driver)
                 self._loop = asyncio.new_event_loop()
@@ -159,6 +181,57 @@ class GraphitiStore:
                 self._shutdown_loop()
                 return False
 
+    @property
+    def _writing_marker(self) -> Path:
+        return Path(self._db_path + ".writing")
+
+    def _recover_from_hard_crash(self) -> None:
+        """اكشف موتاً مفاجئاً وسط كتابة، واحجر القاعدة المتضرّرة تلقائياً.
+
+        Kuzu امتداد أصلي: انهياره (0xC0000005) يقتل العملية بلا استثناء ولا
+        تنظيف، فتبقى القاعدة نصف مكتوبة. وقد رأينا أن مثل هذه القاعدة تُسقط
+        العملية مرةً أخرى عند أول كتابة تالية — أي حلقة موت لا تنتهي: التطبيق
+        يعمل ~20 دقيقة ثم يختفي، وهكذا (15 مرة في يوم واحد).
+
+        العلامة تُكتب قبل كل كتابة وتُمحى بعدها. وجودها عند البدء يعني أن
+        العملية السابقة ماتت وسط الكتابة ⇒ نحجر الملف (نقل لا حذف، قابل
+        للاستعادة) ونبني قاعدة نظيفة، فتُشفى الحلقة من نفسها.
+        """
+        marker = self._writing_marker
+        if not marker.exists():
+            return
+        try:
+            detail = marker.read_text(encoding="utf-8", errors="replace")[:200]
+        except Exception:  # noqa: BLE001
+            detail = ""
+        logger.warning(
+            "Graph DB was mid-write when the process died (%s) - quarantining it; "
+            "a half-written Kuzu file crashes the process again on the next write",
+            detail or "no detail",
+        )
+        try:
+            marker.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+        if os.getenv("GRAPHITI_AUTO_REPAIR", "1").strip().lower() in ("0", "false", "no"):
+            logger.warning("auto-repair disabled - keeping the damaged db as-is")
+            return
+        self._quarantine_db(reason="crash")
+
+    def _mark_write_start(self, what: str) -> None:
+        try:
+            self._writing_marker.write_text(
+                f"{datetime.now(timezone.utc).isoformat()} {what}", encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _mark_write_end(self) -> None:
+        try:
+            self._writing_marker.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _open_driver(self):
         """افتح سائق Kuzu؛ وإن كانت القاعدة غير قابلة للفتح انقلها للحجر وأعد البناء.
 
@@ -172,7 +245,10 @@ class GraphitiStore:
             with warnings.catch_warnings():
                 # تحذير إيقاف دعم Kuzu في graphiti-core — مقصود ومُدار هنا
                 warnings.simplefilter("ignore", DeprecationWarning)
-                drv = KuzuDriver(db=self._db_path, max_concurrent_queries=2)
+                # 1 لا 2: Graphiti ينفّذ استعلامات البحث الهجين متوازيةً عبر
+                # asyncio.gather، وأي تواز على اتصال Kuzu واحد يُسقط العملية
+                # بـAccess Violation. القفل الخارجي لا يمنع هذا التواز الداخلي.
+                drv = KuzuDriver(db=self._db_path, max_concurrent_queries=1)
             # ثغرة في graphiti-core 0.29.2: سائق Kuzu لا يهيّئ ``_database``
             # بينما ``add_episode`` يقارن به عند تمرير group_id — و clone()
             # في Kuzu تعيد نفس الكائن، لذا يكفي وجود السمة.
@@ -199,14 +275,15 @@ class GraphitiStore:
             self._quarantine_db()
             return _build()
 
-    def _quarantine_db(self) -> None:
+    def _quarantine_db(self, reason: str = "corrupt") -> None:
+        """انقل ملفات القاعدة جانباً (نقل لا حذف — قابل للاستعادة يدوياً)."""
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         for suffix in ("", ".wal", ".tmp", ".shadow"):
             src = Path(self._db_path + suffix)
             if not src.exists():
                 continue
             try:
-                src.rename(f"{src}.corrupt-{stamp}")
+                src.rename(f"{src}.{reason}-{stamp}")
             except OSError as exc:
                 logger.warning("could not quarantine %s: %s", src, exc)
 
@@ -270,7 +347,16 @@ class GraphitiStore:
             return None
 
     def _lock(self) -> asyncio.Lock:
-        """قفل يُسلسل تغذية الحلقات — Kuzu لا يتحمّل كتابات متزامنة."""
+        """قفل يُسلسل **كل** وصول إلى Kuzu — قراءةً وكتابةً بلا استثناء.
+
+        سبب حاسم مُثبَت: Kuzu (امتداد أصلي) ينهار بـAccess Violation
+        (0xC0000005) إذا تزامن استعلام قراءة مع معاملة كتابة، فيقتل عملية
+        الباك-إند بالكامل بلا أي استثناء بايثون — سُجّل 15 انهياراً في يوم واحد،
+        وكان المستخدم يرى «الموظف الذكي والمحادثة يختفيان بعد كل دورة».
+        النمط الذي يُفجّره: ``ingest`` لا يُنتظر (استخراج الكيانات عبر LLM يطول
+        دقيقة)، وبعد 30 ثانية تبدأ الدورة التالية فتستدعي ``search_facts``.
+        كان القفل يحمي الكتابة فقط، فبقيت القراءة تتزامن معها.
+        """
         with self._init_lock:
             if self._ingest_lock is None:
                 self._ingest_lock = asyncio.Lock()
@@ -318,6 +404,9 @@ class GraphitiStore:
 
         async def _add() -> None:
             async with self._lock():
+                # علامة «كتابة جارية»: إن مات Kuzu أصلياً في المنتصف نكتشفه
+                # عند البدء التالي فنحجر الملف بدل الدخول في حلقة موت
+                self._mark_write_start(f"{name}/{employee_id}")
                 try:
                     await self._graphiti.add_episode(
                         name=name,
@@ -331,6 +420,9 @@ class GraphitiStore:
                 except Exception as exc:  # noqa: BLE001
                     self.counters["ingest_failed"] += 1
                     logger.warning("Graphiti ingest failed: %s", exc)
+                finally:
+                    # الوصول إلى هنا يعني أن العملية نجت من الكتابة
+                    self._mark_write_end()
 
         return self._submit(_add())
 
@@ -360,6 +452,11 @@ class GraphitiStore:
         config.node_config.sim_min_score = self._min_score
 
         async def _run() -> List[str]:
+            # القفل إلزامي هنا: بحثٌ يتزامن مع كتابة يُسقط العملية كلها
+            async with self._lock():
+                return await _search_all()
+
+        async def _search_all() -> List[str]:
             facts: List[str] = []
             for q in cleaned:
                 words = q.split(" ")
@@ -428,7 +525,12 @@ class GraphitiStore:
         """نسخة متزامنة من الاحتياطي الزمني (تشخيص/عرض)."""
         if not self.available:
             return []
-        fut = self._submit(self._recent_facts_async(employee_id, limit))
+
+        async def _guarded() -> List[str]:
+            async with self._lock():
+                return await self._recent_facts_async(employee_id, limit)
+
+        fut = self._submit(_guarded())
         if fut is None:
             return []
         try:
@@ -452,17 +554,18 @@ class GraphitiStore:
         async def _counts() -> Dict[str, int]:
             out: Dict[str, int] = {}
             where = " WHERE n.group_id = $group_id" if employee_id else ""
-            for label, key in (("Episodic", "episodes"), ("Entity", "entities"),
-                               ("RelatesToNode_", "facts")):
-                try:
-                    records, _, _ = await self._graphiti.driver.execute_query(
-                        f"MATCH (n:{label}){where} RETURN count(n) AS c",
-                        **({"group_id": employee_id} if employee_id else {}),
-                    )
-                    out[key] = int((records or [{}])[0].get("c") or 0)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("Graphiti stats %s failed: %s", label, exc)
-                    out[key] = -1
+            async with self._lock():  # عدّ متزامن مع كتابة = انهيار العملية
+                for label, key in (("Episodic", "episodes"), ("Entity", "entities"),
+                                   ("RelatesToNode_", "facts")):
+                    try:
+                        records, _, _ = await self._graphiti.driver.execute_query(
+                            f"MATCH (n:{label}){where} RETURN count(n) AS c",
+                            **({"group_id": employee_id} if employee_id else {}),
+                        )
+                        out[key] = int((records or [{}])[0].get("c") or 0)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("Graphiti stats %s failed: %s", label, exc)
+                        out[key] = -1
             return out
 
         fut = self._submit(_counts())

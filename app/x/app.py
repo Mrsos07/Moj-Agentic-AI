@@ -984,8 +984,8 @@ def api_profile_update():
                 banner_path=banner_path,
                 headless=headless,
             )
-            log_operation('profile', cookie_label, 'success', 'تم تعديل البروفايل (أو تمت المحاولة) ✅')
-            return jsonify({'success': True, 'task_id': op_id, 'message': 'تمت محاولة تعديل البروفايل ✅'}), 200
+            log_operation('profile', cookie_label, 'success', 'تم تعديل البروفايل والتحقق من حفظه ✅')
+            return jsonify({'success': True, 'task_id': op_id, 'message': 'تم تعديل البروفايل والتحقق من حفظه ✅'}), 200
         except Exception as e:
             log_operation('profile', cookie_label, 'error', f'فشل تعديل البروفايل: {e}')
             return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500

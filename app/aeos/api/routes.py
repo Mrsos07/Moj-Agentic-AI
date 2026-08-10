@@ -86,6 +86,20 @@ class TriggerIn(BaseModel):
     sync: bool = False                # run synchronously (blocking) if true
 
 
+class IdentityFieldIn(BaseModel):
+    """إعادة توليد عنصر واحد من الهوية (avatar/banner/name/bio) مع برومبت
+    اختياري يوجّه التعديل."""
+    field: str
+    prompt: Optional[str] = ""
+
+
+class IdentityApplyIn(BaseModel):
+    """تطبيق هوية على حساب X: مرّر identity من معاينة سابقة لتطبيقها كما هي،
+    أو اتركها فارغة ليولّد هوية جديدة من البرسونا ثم يطبّقها."""
+    user_id: Optional[int] = None
+    identity: Optional[Dict[str, Any]] = None   # {name, bio, avatar_url, banner_url}
+
+
 class AgentToggleIn(BaseModel):
     """Enable/disable an autonomous agent for a connected account (chatbot toggle)."""
     platform: str = "x"
@@ -150,6 +164,20 @@ def create_employee(body: EmployeeIn) -> Dict[str, Any]:
         scheduler=SchedulerConfig.from_dict(body.scheduler or {}),
     )
     saved = platform.repository.save(cfg)
+
+    # هوية الحساب من البرسونا عند الإنشاء (اسم + نبذة + صورة) — في الخلفية
+    try:
+        from ..mcp.registry import MCPRegistry
+        from ..services.identity import apply_persona_identity_async
+
+        apply_persona_identity_async(
+            saved, llm=platform.llm,
+            mcp=platform.container.resolve(MCPRegistry),
+            repo=platform.repository,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("identity apply scheduling failed for %s", saved.id)
+
     return {"ok": True, "employee": saved.to_dict()}
 
 
@@ -325,6 +353,61 @@ def trigger(employee_id: str, body: TriggerIn) -> Dict[str, Any]:
         return {"ok": True, "mode": "sync", "report": report}
     event_id = platform.trigger_event(body.event_type, employee_id, body.payload)
     return {"ok": True, "mode": "async", "event_id": event_id}
+
+
+# ─────────── هوية X من البرسونا (اسم/بايو/صورة/هيدر) ───────────
+@router.post("/employees/{employee_id}/identity/preview")
+def identity_preview(employee_id: str) -> Dict[str, Any]:
+    """يولّد هوية كاملة من برسونا الموظف (اسم + بايو + صورة + هيدر)
+    للمعاينة في الواجهة — بلا أي تغيير على حساب X. يستغرق ~دقيقة
+    (صورتا Gemini). الصور روابط مؤقتة تُحذف بعد ساعة — طبّق أو أعد التوليد."""
+    from ..services import identity_service
+
+    cfg = get_platform().repository.get(employee_id)
+    if not cfg:
+        raise HTTPException(404, "employee not found")
+    try:
+        identity = identity_service.generate_preview(cfg)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("identity preview failed for %s", employee_id)
+        raise HTTPException(500, str(exc))
+    return {"ok": True, "account_username": cfg.account_username,
+            "identity": identity}
+
+
+@router.post("/employees/{employee_id}/identity/field")
+def identity_field(employee_id: str, body: IdentityFieldIn) -> Dict[str, Any]:
+    """يعيد توليد عنصر واحد من الهوية (صورة/هيدر/اسم/بايو) من البرسونا
+    مع برومبت اختياري — للمعاينة فقط، بلا تغيير على X. الصور تأخذ 30-90ث."""
+    from ..services import identity_service
+
+    cfg = get_platform().repository.get(employee_id)
+    if not cfg:
+        raise HTTPException(404, "employee not found")
+    if body.field not in identity_service.IDENTITY_FIELDS:
+        raise HTTPException(400, f"field must be one of {identity_service.IDENTITY_FIELDS}")
+    try:
+        patch = identity_service.generate_field(cfg, body.field, body.prompt or "")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("identity field regen failed for %s/%s", employee_id, body.field)
+        raise HTTPException(500, str(exc))
+    return {"ok": True, "field": body.field, "patch": patch}
+
+
+@router.post("/employees/{employee_id}/identity/apply")
+def identity_apply(employee_id: str, body: IdentityApplyIn) -> Dict[str, Any]:
+    """يطبّق الهوية على حساب X في الخلفية (متصفح + كوكيز الحساب) ويعيد
+    إقراراً فورياً؛ النتيجة النهائية تُدفع لشات المستخدم عند الاكتمال."""
+    from ..services import identity_service
+
+    cfg = get_platform().repository.get(employee_id)
+    if not cfg:
+        raise HTTPException(404, "employee not found")
+    ack = identity_service.request_apply_identity(
+        cfg, body.user_id if body.user_id is not None else cfg.user_id,
+        identity=body.identity,
+    )
+    return {"ok": True, "message": ack}
 
 
 @router.get("/stats")

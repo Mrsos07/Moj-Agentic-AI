@@ -364,8 +364,23 @@ def _api_call(method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
     needs_lock = any(endpoint.startswith(e) for e in _BROWSER_ENDPOINTS)
     if needs_lock:
         with browser_lock:
-            return _do_request(method, url, **kwargs)
-    return _do_request(method, url, **kwargs)
+            return _request_with_revive(method, url, **kwargs)
+    return _request_with_revive(method, url, **kwargs)
+
+
+def _request_with_revive(method: str, url: str, **kwargs) -> Dict[str, Any]:
+    """طلب مع إنعاش تلقائي: لو مات سيرفر app/x (انهيار/قتل يدوي للبورت) كانت كل
+    العمليات تفشل بـ«غير متاح» إلى أن يُعاد تشغيل الـbackend كاملاً — نعيد
+    تشغيله مرة واحدة ونكرر الطلب."""
+    res = _do_request(method, url, **kwargs)
+    if not res.get("success") and "غير متاح" in str(res.get("message", "")):
+        print("[X-Bridge] سيرفر app/x غير متاح — محاولة إعادة تشغيله…", flush=True)
+        try:
+            if start_xsuite_server():
+                res = _do_request(method, url, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            print(f"[X-Bridge] فشل الإنعاش: {e}", flush=True)
+    return res
 
 
 def _do_request(method: str, url: str, **kwargs) -> Dict[str, Any]:
