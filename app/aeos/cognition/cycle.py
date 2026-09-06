@@ -63,6 +63,8 @@ class CognitiveCycle:
             "critique": context.scratch.get("critique"),
             "plan": context.scratch.get("plan_preview"),
             "decisions": context.scratch.get("decision_log"),
+            "initial_decisions": context.scratch.get("initial_decisions"),
+            "execution_plan": context.scratch.get("execution_plan"),
             "guard_report": context.scratch.get("guard_report"),
             "results": context.scratch.get("execution_results"),
             "directed_note": (context.scratch.get("directed_engagement_note")

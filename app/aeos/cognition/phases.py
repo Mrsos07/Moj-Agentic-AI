@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -620,42 +621,59 @@ class DecidePhase(ICognitivePhase):
         proposals = context.scratch.get("proposals", [])
         decisions = self._engine.decide(proposals, context)
         context.scratch["decisions"] = decisions
-        context.scratch["decision_log"] = [d.to_dict() for d in decisions]
+        context.scratch["decision_log"] = deepcopy([d.to_dict() for d in decisions])
+        context.scratch["initial_decisions"] = deepcopy(context.scratch["decision_log"])
 
-        # بثّ خطة العمل التي اتُّخذت هذه الدورة (شفافية احترافية للمستخدم)
-        account = getattr(context.config, "account_username", "") or "الموظف الذكي"
-        _labels = {
-            "publish_content": "نشر منشور أصلي",
-            "publish_thread": "نشر ثريد (سلسلة تغريدات)",
-            "quote_post": "اقتباس مع تعليق",
-            "schedule_post": "جدولة منشور لوقت أفضل",
-            "reply_to_user": "الرد على تغريدة",
-            "retweet_post": "إعادة نشر",
-            "like_post": "إعجاب",
-            "follow_user": "متابعة حساب",
-            "unfollow_user": "إلغاء متابعة",
-            "bookmark_post": "حفظ مرجع للإلهام",
-            "delete_own_post": "حذف منشور خاطئ",
-            "read_profile": "قراءة ملف حساب",
-            "read_own_metrics": "قراءة أداء منشوراته",
-            "generate_image": "توليد صورة للمحتوى",
-            "research_topic": "بحث معمّق في موضوع",
-            "store_knowledge": "حفظ معرفة",
-            "wait": "الانتظار دون إجراء",
-        }
-        acts = [d.action.capability for d in decisions]
-        acts = [a for a in acts if a != "wait"]
-        if acts:
-            from collections import Counter
-            counts = Counter(acts)
-            plan_line = "، ".join(
-                f"{_labels.get(a, a)} (×{n})" if n > 1 else _labels.get(a, a)
-                for a, n in counts.items()
-            )
-            context.emit_progress(
-                f"🎯 **@{account} قرّر خطة هذه الدورة:** {plan_line}.",
-                intent="aeos_cycle_deciding",
-            )
+
+def _announce_execution_plan(context, plan) -> None:
+    # بثّ خطة العمل التي اتُّخذت هذه الدورة (شفافية احترافية للمستخدم)
+    account = getattr(context.config, "account_username", "") or "الموظف الذكي"
+    _labels = {
+        "publish_content": "نشر منشور أصلي",
+        "publish_thread": "نشر ثريد (سلسلة تغريدات)",
+        "quote_post": "اقتباس مع تعليق",
+        "schedule_post": "جدولة منشور لوقت أفضل",
+        "reply_to_user": "الرد على تغريدة",
+        "retweet_post": "إعادة نشر",
+        "like_post": "إعجاب",
+        "follow_user": "متابعة حساب",
+        "unfollow_user": "إلغاء متابعة",
+        "bookmark_post": "حفظ مرجع للإلهام",
+        "delete_own_post": "حذف منشور خاطئ",
+        "read_profile": "قراءة ملف حساب",
+        "read_own_metrics": "قراءة أداء منشوراته",
+        "generate_image": "توليد صورة للمحتوى",
+        "research_topic": "بحث معمّق في موضوع",
+        "store_knowledge": "حفظ معرفة",
+        "wait": "الانتظار دون إجراء",
+    }
+    guard = context.scratch.get("guard_report") or {}
+    if guard.get("rejected"):
+        reasons = "؛ ".join(dict.fromkeys(
+            str(r) for r in (guard.get("reasons") or {}).values() if r))
+        context.emit_progress(
+            f"استبعدت {len(guard['rejected'])} من الاختيارات الأولية بعد المراجعة: "
+            f"{reasons or 'لا تتوافق مع الشخصية أو النشاط السابق'}."
+            + (" اخترت بديلاً اجتاز المراجعة." if guard.get("substituted") else ""),
+            intent="aeos_cycle_plan_review",
+        )
+    acts = [entry["capability"] for entry in plan if entry["capability"] != "wait"]
+    if acts:
+        from collections import Counter
+        counts = Counter(acts)
+        plan_line = "، ".join(
+            f"{_labels.get(a, a)} (×{n})" if n > 1 else _labels.get(a, a)
+            for a, n in counts.items()
+        )
+        context.emit_progress(
+            f"**@{account} قرّر خطة هذه الدورة بعد المراجعة:** {plan_line}.",
+            intent="aeos_cycle_deciding",
+        )
+    else:
+        context.emit_progress(
+            f"@{account}: لا يوجد إجراء قابل للتنفيذ في هذه الدورة بعد المراجعة.",
+            intent="aeos_cycle_deciding",
+        )
 
 
 #: تسميات عربية واضحة لأنواع الإجراءات — تجعل مراجعة الحارس أدق وأوضح
@@ -706,6 +724,9 @@ def _action_guard_entry(idx: int, decision) -> str:
             parts.append(f"النص/المحتوى: «{text}»")
     if rationale:
         parts.append(f"مبرر الاقتراح: {rationale}")
+    directive = p.get("skill_directive")
+    if isinstance(directive, str) and directive.strip():
+        parts.append(f"توجيه المهارة المراد تطبيقه (لا يتجاوز تعليمات الشخصية): {directive[:1200]}")
     return " | ".join(parts)
 
 
@@ -976,20 +997,63 @@ class ExecutePhase(ICognitivePhase):
     name = "execute"
 
     def run(self, context: "ExecutionContext") -> None:
+        from ..decision.engine import WeightedUtilityDecisionEngine
+
+        decisions = deepcopy(context.scratch.get("decisions", []))
+        plan = []
+        for i, decision in enumerate(decisions):
+            entry = deepcopy(decision.to_dict())
+            params = entry["params"] or {}
+            entry["action_id"] = f"{context.cycle_id or 'cycle'}:{i + 1}"
+            entry["target"] = str(params.get("tweet_url") or params.get("profile_url")
+                                  or params.get("handle") or "")
+            plan.append(entry)
+        context.scratch["execution_plan"] = deepcopy(plan)
+        context.scratch["decision_log"] = deepcopy(plan)
+        blocked_phases = set(context.scratch.get("phase_errors") or []) & {"plan", "decide", "guard"}
+        if blocked_phases:
+            context.emit_progress(
+                "توقفت قبل التنفيذ لتعطّل اعتماد الخطة في مرحلة: "
+                + "، ".join(sorted(blocked_phases)), intent="aeos_cycle_plan_review")
+        else:
+            _announce_execution_plan(context, plan)
         results = []
-        for decision in context.scratch.get("decisions", []):
+        policy = WeightedUtilityDecisionEngine()
+        for decision, entry in zip(decisions, plan):
             action = decision.action
+            outcome = {"action_id": entry["action_id"], "capability": action.capability,
+                       "target": entry["target"]}
+            context.scratch["active_action"] = deepcopy(entry)
             try:
+                skill_skip = ""
+                skill_id = (action.params or {}).get("_skill")
+                if skill_id:
+                    from ..skills import custom as CS
+                    spec = next((s for s in CS.list_specs(context.config) if s.get("id") == skill_id), None)
+                    skill_skip = (CS.should_run(context.config, spec, context) if spec else
+                                  "المهارة ليست مثبتة لهذا الموظف")
+                if blocked_phases or skill_skip or not policy._allowed(action, context):
+                    reason = ("لم تكتمل مراجعة الخطة" if blocked_phases else skill_skip or
+                              "لم يعد الإجراء مسموحاً وفق الحدود أو الميزانية الحالية")
+                    results.append({**outcome, "success": False, "status": "skipped", "error": reason})
+                    context.emit_progress(f"لم أنفّذ {action.capability}: {reason}.",
+                                          intent="aeos_cycle_action_result")
+                    continue
                 result = context.capabilities.execute(
-                    CapabilityRequest(name=action.capability, params=action.params),
+                    CapabilityRequest(name=action.capability, params=deepcopy(action.params)),
                     context,
                 )
                 results.append({
-                    "capability": action.capability,
+                    **outcome,
+                    "status": "succeeded" if result.success else "failed",
                     "success": result.success,
                     "output": result.output,
                     "error": result.error,
                 })
+                if not result.success:
+                    context.emit_progress(
+                        f"تعذّر تنفيذ {action.capability}: {result.error or 'لم يتأكد نجاح الأداة'}.",
+                        intent="aeos_cycle_action_result")
                 # maintain counters (e.g. posts_today + ميزانيات التفاعل اليومية)
                 if result.success:
                     # حصة المهارة المخصّصة تُستهلك عند التنفيذ لا عند الاقتراح
@@ -1008,8 +1072,13 @@ class ExecutePhase(ICognitivePhase):
             except Exception as exc:  # noqa: BLE001
                 logger.exception("capability execution failed")
                 results.append({
-                    "capability": action.capability, "success": False, "error": str(exc),
+                    **outcome, "success": False, "status": "failed", "error": str(exc),
                 })
+                context.emit_progress(
+                    f"تعذّر تنفيذ {action.capability}: {str(exc)[:200]}.",
+                    intent="aeos_cycle_action_result")
+            finally:
+                context.scratch.pop("active_action", None)
         context.scratch["execution_results"] = results
         # سجّل أنواع الإجراءات المنفّذة بنجاح هذه الدورة، ليتجنّب محرّك القرار
         # تكرار نفس النوع في الدورة التالية (تنويع فعلي عبر الدورات).
@@ -1034,9 +1103,11 @@ class EvaluatePhase(ICognitivePhase):
     def run(self, context: "ExecutionContext") -> None:
         results = context.scratch.get("execution_results", [])
         successes = sum(1 for r in results if r.get("success"))
-        failures = len(results) - successes
+        skipped = sum(1 for r in results if r.get("status") == "skipped")
+        failures = len(results) - successes - skipped
         context.scratch["evaluation"] = {
             "actions": len(results), "successes": successes, "failures": failures,
+            "skipped": skipped,
         }
         # naive goal progress bump on success
         if successes:
@@ -1057,7 +1128,8 @@ class LearnPhase(ICognitivePhase):
             lesson = f"Cycle via {context.event.type.value}: chose to wait; no actions taken."
         else:
             done = ", ".join(
-                f"{r['capability']}({'ok' if r.get('success') else 'fail'})" for r in results
+                f"{r['capability']}({r.get('status') or ('ok' if r.get('success') else 'fail')})"
+                for r in results
             )
             lesson = (
                 f"Cycle via {context.event.type.value}: executed {done}. "
@@ -1121,7 +1193,8 @@ class SupportPhase(ICognitivePhase):
 
     def run(self, context: "ExecutionContext") -> None:
         obs = context.scratch.get("observations", {}) or {}
-        results = context.scratch.get("execution_results", []) or []
+        results = [r for r in context.scratch.get("execution_results", []) or []
+                   if r.get("status") != "skipped"]
         rs = context.config.runtime_state
         flags = rs.flags
 
@@ -1484,16 +1557,17 @@ class GraphMemoryPhase(ICognitivePhase):
         actions: List[Dict[str, Any]] = []
         for r in context.scratch.get("execution_results", []) or []:
             out = r.get("output") if isinstance(r.get("output"), dict) else {}
+            skipped = r.get("status") == "skipped"
             action: Dict[str, Any] = {
                 "الإجراء": r.get("capability", "?"),
-                "النتيجة": "نجح" if r.get("success") else "فشل",
+                "النتيجة": "لم يُنفّذ" if skipped else ("نجح" if r.get("success") else "فشل"),
             }
             if not r.get("success") and r.get("error"):
-                action["سبب_الفشل"] = str(r["error"])[:160]
-            target = out.get("handle") or out.get("username") or out.get("tweet_url")
+                action["سبب_عدم_التنفيذ" if skipped else "سبب_الفشل"] = str(r["error"])[:160]
+            target = out.get("handle") or out.get("username") or r.get("target") or out.get("tweet_url")
             if target:
                 action["الهدف"] = str(target)[:120]
-            content = out.get("text") or out.get("content")
+            content = out.get("text") or out.get("reply_text") or out.get("content")
             if content:
                 action["المحتوى"] = str(content)[:280]
             topic = out.get("topic") or out.get("hashtag")
