@@ -32,6 +32,9 @@
   (`--config-only` for no network, `--no-image` to skip the priciest check).
   A wrong key produces 401 on every path — which is exactly how you tell
   "wiring is right, key is wrong" apart from "wiring is wrong".
+- Image generation defaults to GPT Image 2: `openai/gpt-image-2` on OpenRouter,
+  `gpt-image-2` on OpenAI. `verify_openrouter.py --config-only` also checks the
+  image-model defaults and mocked ImageMCP dispatch without generating paid images.
 - Do not change `OPENROUTER_EMBEDDING_MODEL` casually: a different embedding
   model changes vector dimensions, and every vector already stored in the graph
   becomes incomparable — the whole graph must be rebuilt.
