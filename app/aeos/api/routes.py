@@ -642,6 +642,131 @@ def employee_content_strategy(employee_id: str) -> Dict[str, Any]:
     }
 
 
+class SkillGenerateIn(BaseModel):
+    """برومبت المالك: «ماذا تريد أن يتقن موظفك؟»"""
+    prompt: str
+    activate: bool = False            # true = ولّد واحفظ وفعّل مباشرة
+
+
+class SkillSaveIn(BaseModel):
+    """حفظ مواصفة مهارة (من معاينة سابقة أو بعد تعديلها يدوياً)."""
+    spec: Dict[str, Any]
+
+
+class SkillPatchIn(BaseModel):
+    enabled: Optional[bool] = None
+
+
+def _employee_or_404(employee_id: str):
+    cfg = get_platform().repository.get(employee_id)
+    if not cfg:
+        raise HTTPException(404, "employee not found")
+    return cfg
+
+
+@router.get("/employees/{employee_id}/skills")
+def list_employee_skills(employee_id: str) -> Dict[str, Any]:
+    """مهارات هذا الموظف: المدمجة المثبّتة + المخصّصة التي أنشأها المالك."""
+    from ..skills import custom as CS
+
+    cfg = _employee_or_404(employee_id)
+    specs = CS.list_specs(cfg)
+    return {
+        "ok": True,
+        "employee_id": employee_id,
+        "installed_skills": list(cfg.installed_skills or []),
+        "custom_skills": [
+            {**s, "summary": CS.describe_spec(s), "runs_today": CS.runs_today(cfg, s["id"])}
+            for s in specs
+        ],
+    }
+
+
+@router.post("/employees/{employee_id}/skills/generate")
+def generate_employee_skill(employee_id: str, body: SkillGenerateIn) -> Dict[str, Any]:
+    """حوّل برومبت المالك إلى مواصفة مهارة — **معاينة بلا حفظ** افتراضياً.
+
+    المالك يرى بالعربية متى تعمل المهارة وماذا تفعل وبأي حدود، ثم يفعّلها.
+    ``activate=true`` يحفظها ويفعّلها فوراً لمن يريد المسار السريع.
+    """
+    from ..skills import custom as CS
+
+    cfg = _employee_or_404(employee_id)
+    try:
+        spec = CS.generate_spec(body.prompt, cfg, get_platform().llm)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    saved = False
+    if body.activate:
+        spec = CS.save_spec(cfg, spec)
+        get_platform().repository.save(cfg)
+        saved = True
+    return {"ok": True, "employee_id": employee_id, "saved": saved,
+            "skill": spec, "summary": CS.describe_spec(spec)}
+
+
+@router.post("/employees/{employee_id}/skills")
+def save_employee_skill(employee_id: str, body: SkillSaveIn) -> Dict[str, Any]:
+    """احفظ/حدّث مهارة مخصّصة (تمرّ إلزامياً بالتطبيع والقوائم البيضاء)."""
+    from ..skills import custom as CS
+
+    cfg = _employee_or_404(employee_id)
+    if not (body.spec or {}).get("actions"):
+        raise HTTPException(400, "spec.actions is required")
+    spec = CS.save_spec(cfg, body.spec)
+    get_platform().repository.save(cfg)
+    return {"ok": True, "skill": spec, "summary": CS.describe_spec(spec)}
+
+
+@router.patch("/employees/{employee_id}/skills/{skill_id}")
+def patch_employee_skill(employee_id: str, skill_id: str,
+                         body: SkillPatchIn) -> Dict[str, Any]:
+    """تفعيل/إيقاف مهارة مخصّصة دون حذفها."""
+    from ..skills import custom as CS
+
+    cfg = _employee_or_404(employee_id)
+    if body.enabled is None:
+        raise HTTPException(400, "nothing to update")
+    if not CS.set_enabled(cfg, skill_id, body.enabled):
+        raise HTTPException(404, "skill not found")
+    get_platform().repository.save(cfg)
+    return {"ok": True, "skill_id": skill_id, "enabled": body.enabled}
+
+
+@router.delete("/employees/{employee_id}/skills/{skill_id}")
+def delete_employee_skill(employee_id: str, skill_id: str) -> Dict[str, Any]:
+    from ..skills import custom as CS
+
+    cfg = _employee_or_404(employee_id)
+    if not CS.delete_spec(cfg, skill_id):
+        raise HTTPException(404, "skill not found")
+    get_platform().repository.save(cfg)
+    return {"ok": True, "deleted": skill_id}
+
+
+@router.get("/employees/{employee_id}/interactions")
+def employee_interactions(employee_id: str, limit: int = 10) -> Dict[str, Any]:
+    """ما تعلّمه الموظف عن **تفاعله** فعلياً: ماذا أثمر ومع مَن.
+
+    نظير ``/content-strategy`` لكن لجانب التفاعل: نسبة الاستجابة لكل نوع
+    (رد/إعجاب/اقتباس/إعادة نشر/متابعة)، والحسابات الأكثر تجاوباً، ودرجة
+    الإلحاح على كل حساب. هذه الأرقام هي ما يرجّح به محرّك القرار أهدافه.
+    """
+    from ..employee import interaction_ledger as IL
+
+    cfg = get_platform().repository.get(employee_id)
+    if not cfg:
+        raise HTTPException(404, "employee not found")
+    return {
+        "ok": True,
+        "employee_id": employee_id,
+        "account_username": cfg.account_username,
+        "summary": IL.summary_line(cfg),
+        **IL.report(cfg, limit=max(1, min(int(limit), 50))),
+    }
+
+
 @router.get("/employees/{employee_id}/graph-memory")
 def employee_graph_memory(
     employee_id: str, query: str = "", limit: int = 10

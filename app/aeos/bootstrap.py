@@ -181,6 +181,26 @@ class AEOSPlatform:
                       payload=payload or {}, source="api_sync")
         return self._runtime.run_cycle(employee_id, event)
 
+    def notify_owner(self, employee_id: str, text: str,
+                     intent: str = "aeos_cycle_progress") -> bool:
+        """أبلغ صاحب الحساب في الشات (تخزين + دفع حيّ) من خارج الدورة.
+
+        ضرورية لأوامر الشات: أمر المالك قد لا يُنفّذ لسبب مشروع (الموظف موقوف،
+        دورة جارية، لم يُعثر على هدف) وترْكُه بلا خبر يجعل النظام يبدو كأنه
+        تجاهل الأمر — وهو أسوأ من الفشل المعلن.
+        """
+        cfg = self._repo.get(employee_id)
+        if cfg is None or getattr(cfg, "user_id", None) is None:
+            return False
+        try:
+            self._runtime._emit_progress(
+                cfg.user_id, text, intent,
+                getattr(cfg, "account_username", "") or "")
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("notify_owner failed for %s", employee_id)
+            return False
+
     @property
     def repository(self) -> IEmployeeRepository:
         return self._repo
@@ -227,6 +247,7 @@ class AEOSPlatform:
         from .scheduler.timewindow import compute_next_wake, is_within_active_hours
 
         cfg = self._repo.get_by_account(platform, account_username)
+        newly_created = cfg is None
         if cfg is None:
             cfg = EmployeeConfig(
                 id=uuid.uuid4().hex,
@@ -237,9 +258,10 @@ class AEOSPlatform:
                 persona=Persona.from_dict(persona) if persona else Persona(
                     display_name=account_username),
                 installed_skills=[
-                    "daily_content_creator", "community_engager",
+                    "on_this_day", "daily_content_creator", "community_engager",
                     "timeline_engager", "viral_content_creator",
                     "content_quoter", "swipe_file", "directed_engager",
+                    "directed_mission",
                 ],
                 mcp_servers=[
                     "x", "playwright_x", "content", "memory", "browser", "news",
@@ -293,9 +315,10 @@ class AEOSPlatform:
         # أزل خادم البحث القديم فقط (search = stub غير مُهيّأ)؛ ونُبقي news فعّالاً.
         cfg.mcp_servers = [s for s in cfg.mcp_servers if s not in ("search",)]
         _baseline_skills = [
-            "daily_content_creator", "community_engager",
+            "on_this_day", "daily_content_creator", "community_engager",
             "timeline_engager", "viral_content_creator",
             "content_quoter", "swipe_file", "directed_engager",
+            "directed_mission",
         ]
         cfg.installed_skills = list(dict.fromkeys(list(cfg.installed_skills or []) + _baseline_skills))
         cfg.business_rules.setdefault("max_posts_per_cycle", 1)
@@ -372,6 +395,21 @@ class AEOSPlatform:
         saved = self._repo.save(cfg)
         if hasattr(self._repo, "set_next_wake") and saved.scheduler.next_wake_at:
             self._repo.set_next_wake(saved.id, saved.scheduler.next_wake_at)
+
+        # هوية الحساب من البرسونا — عند الإنشاء الأول فقط، في الخلفية:
+        # اسم معروض + نبذة (LLM) + صورة شخصية مولّدة تعكس التخصص، فيظهر
+        # الحساب بهوية متسقة مع شخصية الموظف من أول لحظة.
+        if newly_created and enabled:
+            try:
+                from .services.identity import apply_persona_identity_async
+
+                apply_persona_identity_async(
+                    saved, llm=self._llm,
+                    mcp=self.container.resolve(MCPRegistry), repo=self._repo,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("identity apply scheduling failed for %s", saved.id)
+
         return self._agent_view(saved)
 
     def _agent_view(self, cfg) -> Dict[str, Any]:

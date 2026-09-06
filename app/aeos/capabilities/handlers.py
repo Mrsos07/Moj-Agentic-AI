@@ -8,10 +8,12 @@ The employee logic never names an MCP server directly — it names a capability.
 from __future__ import annotations
 
 import logging
+import random
 import re
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Sequence
 from urllib.parse import urlparse
 
+from ..employee import x_algorithm
 from ..mcp.base import MCPRequest
 from ..memory.base import MemoryLayerType
 from .base import CapabilityRequest, CapabilityResult, ICapability
@@ -65,7 +67,9 @@ _INTERACTION_LABELS = {
     "reply": "رد",
     "like": "إعجاب",
     "retweet": "إعادة نشر",
+    "quote": "اقتباس مع تعليق",
     "follow": "متابعة",
+    "bookmark": "حفظ مرجع",
     "post": "منشور",
 }
 
@@ -87,6 +91,7 @@ def _record_interaction(
     to the employee each cycle. Every entry carries machine-readable metadata
     (action/url/handle/topic) so recall stays tidy and filterable.
     """
+    from ..employee import interaction_ledger
     from ..employee.persona_templates import normalize_topic_words
 
     if url:
@@ -94,6 +99,18 @@ def _record_interaction(
     topic_src = (text or handle or "").strip()
     if topic_src:
         _mark_topic_engaged(context, topic_src)
+
+    # سجلّ التفاعل المتعلّم: يربط هذا التفاعل بالحساب المستهدف حتى تُنسب إليه
+    # الاستجابة لاحقاً (منشن/رد وارد منه) فيتعلّم محرّك القرار ما يُثمر فعلاً.
+    capability = interaction_ledger.ACTION_TO_CAPABILITY.get(action, "")
+    if capability:
+        try:
+            interaction_ledger.record(
+                context.config, capability=capability, url=url,
+                handle=handle or "", text=text or "",
+            )
+        except Exception:  # noqa: BLE001 - السجل لا يُسقط تنفيذ إجراء ناجح
+            logger.exception("interaction ledger record failed")
 
     label = _INTERACTION_LABELS.get(action, action)
     snippet = (text or "").strip().replace("\n", " ")[:160]
@@ -224,6 +241,11 @@ def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> 
             issues.append("echo_brief")
     # تكرار المطلع: أول ثلاث كلمات تطابق منشوراً سابقاً — بأربع كلمات كان
     # الفحص شكلياً لا يمسك شيئاً، فالمطالع المكرّرة تتشابه في أولها لا في رابعها.
+    # إنهاء المنشورات دائماً بسؤال أشهر ما يجعل الحساب يبدو آلياً — نطلب إعادة
+    # التوليد مرةً واحدة فقط (غير مانع للنشر) حتى لا نقتل منشوراً جيداً.
+    if _ends_with_question(t) and not _question_allowed(
+            context.scratch.get("recent_posts") or []):
+        issues.append("question_ending")
     opening = " ".join(t.split()[:3]).lower()
     if len(opening.split()) == 3:
         for prev in (context.scratch.get("recent_posts") or [])[:8]:
@@ -235,7 +257,7 @@ def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> 
 
 #: عيوب تستحق إعادة توليد
 _HARD_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief",
-                        "repeated_opening"}
+                        "repeated_opening", "question_ending"}
 
 #: عيوب تمنع النشر نهائياً لو بقيت بعد إعادة التوليد. تكرار المطلع ليس منها:
 #: شخصية تبدأ منشوراتها دائماً بنمط واحد (مثل «عاجل:») كانت ستُمنع من النشر
@@ -251,6 +273,8 @@ _QUALITY_FIX_HINTS = {
     "echo_brief": "لا تُعِد صياغة التعليمات؛ اكتب محتوى فعلياً عن الموضوع نفسه "
                   "بزاوية محدّدة.",
     "repeated_opening": "ابدأ بمطلع مختلف تماماً عن منشوراتك السابقة.",
+    "question_ending": "لا تنهِ المنشور بسؤال (منشوراتك السابقة انتهت بأسئلة)؛ "
+                         "اختم بجملة موقف أو خلاصة ملموسة.",
 }
 
 
@@ -276,7 +300,7 @@ def _is_http_url(value: str) -> bool:
         return False
 
 
-#: أنماط مطالع تتناوب عبر الدورات — بلا تناوب تبدأ كل المنشورات بالنمط نفسه
+#: أنماط مطالع تتناوب — بلا تناوب تبدأ كل المنشورات بالنمط نفسه
 #: فيصير الحساب أحادي النغمة حتى لو تنوّعت مواضيعه.
 _HOOK_STYLES = (
     "ابدأ بحقيقة أو رقم صادم في جملة قصيرة جداً، ثم فسّره.",
@@ -285,12 +309,144 @@ _HOOK_STYLES = (
     "ابدأ بسؤال محدّد جداً (لا سؤال عام)، ثم أجب عنه بنفسك بإيجاز.",
     "ابدأ بمشهد/تفصيلة ملموسة (مكان، لحظة، رقم)، ثم اربطها بالفكرة.",
     "ابدأ بتصحيح اعتقاد شائع («ليس السبب … بل …»).",
+    "ابدأ بجملة اعتراضية عفوية كأنك تكمل حديثاً («المشكلة ليست هنا…»).",
+    "ابدأ بمقارنة زمنية («قبل سنتين … اليوم …»).",
 )
+
+#: نبرات كتابة تتناوب أيضاً — المطلع وحده لا يكفي: النبرة والإيقاع هما ما يجعل
+#: الحساب يبدو إنساناً حيّاً لا قالباً واحداً يتكرّر بمواضيع مختلفة.
+_POST_VOICES = (
+    "نبرة تحليلية هادئة: سبب ثم نتيجة، بلا انفعال.",
+    "نبرة حاسمة قصيرة: رأي واضح بلا تحفّظ، جملة أو جملتان فقط.",
+    "نبرة سردية: مشهد/تفصيلة أولاً ثم الخلاصة.",
+    "نبرة عملية مباشرة: معلومة + ماذا تعني عملياً.",
+    "نبرة ساخرة خفيفة ومؤدّبة بلا تجريح ولا استهزاء بأشخاص.",
+    "نبرة تعليمية مبسّطة: فكّك المسألة في سطرين بلا مصطلحات ثقيلة.",
+    "نبرة تأمّلية شخصية: ملاحظة صادقة بصيغة المتكلّم بلا وعظ.",
+)
+
+#: أنماط ردود تتناوب — أهمّ سبب لظهور الموظف «آلياً» أن كل ردوده بنفس البناء
+#: (مجاملة + سؤال). التناوب يكسر ذلك، والسؤال صار نمطاً واحداً من عدّة.
+_REPLY_MODES = (
+    "وافق باختصار ثم أضف معلومة أو رقماً لم يذكره النص الأصلي.",
+    "اختلف بلطف وبيّن سببك في جملة واحدة محدّدة.",
+    "أضف زاوية غائبة عن النقاش بجملة قصيرة حاسمة.",
+    "علّق بملاحظة عملية واحدة: ماذا يعني هذا فعلياً.",
+    "اكتب ملاحظة شخصية عفوية قصيرة (مشاهدة أو تجربة)، بلا مبالغة.",
+    "لخّص الفكرة بجملة واحدة أدقّ من الأصل.",
+    "اطرح سؤالاً واحداً محدّداً جداً (لا سؤالاً عاماً) وانتهِ عنده.",
+    "صحّح تفصيلة أو مفهوماً بلطف مع دليل مختصر.",
+)
+
+#: مفتاح تدوير الأساليب في runtime_state.flags (يستمر بين الدورات)
+_STYLE_ROTATION_FLAG = "style_rotation"
+
+
+def _pick_variant(context: "ExecutionContext", key: str,
+                  options: Sequence[str]) -> str:
+    """اختر أسلوباً يختلف عن آخر ما استُخدم — عشوائي لكن بذاكرة.
+
+    التدوير بمؤشّر الدورة فقط (``cycles % len``) كان متوقّعاً وثابت الترتيب، ومع
+    أكثر من فعل في الدورة نفسها كان كل الأفعال تأخذ النمط ذاته. هنا نستبعد آخر
+    نصف الأنماط المستخدمة ونختار عشوائياً من الباقي، ونحفظ التاريخ في
+    ``runtime_state.flags`` ليستمر التنويع عبر الدورات.
+    """
+    if not options:
+        return ""
+    flags = context.config.runtime_state.flags
+    rotation = flags.setdefault(_STYLE_ROTATION_FLAG, {})
+    if not isinstance(rotation, dict):
+        rotation = {}
+        flags[_STYLE_ROTATION_FLAG] = rotation
+    history = [i for i in (rotation.get(key) or []) if isinstance(i, int)]
+    if not history:
+        # لا تاريخ بعد (موظف جديد أو مفتاح جديد): اختيار حتمي بمؤشر الدورة.
+        # الاختيار العشوائي البحت هنا يسمح بتكرار نفس النمط في أول دورات متتالية
+        # (احتمال التصادم بين 6 سحبات من 8 أنماط ≈ 54%) — والتنويع يجب أن يكون
+        # مضموناً لا احتمالياً.
+        cycles = int(getattr(context.config.runtime_state, "cycles_completed", 0) or 0)
+        idx = cycles % len(options)
+        history.append(idx)
+        rotation[key] = history[-len(options):]
+        return options[idx]
+    ban = set(history[-max(1, len(options) // 2):])
+    pool = [i for i in range(len(options)) if i not in ban] or list(range(len(options)))
+    idx = random.choice(pool)
+    history.append(idx)
+    rotation[key] = history[-len(options):]
+    return options[idx]
 
 
 def _hook_style(context: "ExecutionContext") -> str:
-    cycles = int(getattr(context.config.runtime_state, "cycles_completed", 0) or 0)
-    return _HOOK_STYLES[cycles % len(_HOOK_STYLES)]
+    return _pick_variant(context, "hook", _HOOK_STYLES)
+
+
+_QUESTION_MARKS = ("?", "؟")
+
+
+def _ends_with_question(text: str) -> bool:
+    return (text or "").strip().endswith(_QUESTION_MARKS)
+
+
+def _recent_reply_texts(context: "ExecutionContext") -> List[str]:
+    """نصوص ردود الموظف نفسها (لا التغريدات التي ردّ عليها).
+
+    ``scratch['recent_replies']`` مبنيّ من ذاكرة المحادثة التي تخزّن نصّ التغريدة
+    الأصلية لأغراض منع تكرار الموضوع، فلا يصلح للحكم على أسلوب الردود. لذلك
+    نحفظ نصوص الردود الفعلية في الحالة الدائمة.
+    """
+    flags = context.config.runtime_state.flags
+    return [str(t) for t in (flags.get("recent_reply_texts") or []) if t]
+
+
+def _remember_reply_text(context: "ExecutionContext", text: str) -> None:
+    text = (text or "").strip()
+    if not text:
+        return
+    flags = context.config.runtime_state.flags
+    history = flags.setdefault("recent_reply_texts", [])
+    history.append(text[:200])
+    if len(history) > 12:
+        del history[: len(history) - 12]
+
+
+def _question_allowed(recent: Sequence[str]) -> bool:
+    """هل يُسمح بإنهاء النص بسؤال هذه المرة؟
+
+    إنهاء كل رد/منشور بسؤال («ما رأيكم؟») هو أظهر علامة على الآلية. نمنع السؤال
+    إذا كان آخر نص انتهى بسؤال أو إذا كانت نسبة الأسئلة في آخر النصوص عالية.
+    """
+    texts = [str(t) for t in list(recent)[:5] if t]
+    if not texts:
+        return True
+    if _ends_with_question(texts[0]):
+        return False
+    return sum(1 for t in texts if _ends_with_question(t)) / len(texts) < 0.4
+
+
+def _question_rule_line(allowed: bool) -> str:
+    if allowed:
+        return ("- يجوز سؤال واحد محدّد جداً في النهاية إن أضاف قيمة، ولا تجعله "
+                "عادة في كل نص.")
+    return ("- ممنوع إنهاء النص بسؤال هذه المرة (آخر نصوصك انتهت بأسئلة)؛ "
+            "اختم بجملة موقف أو خلاصة ملموسة.")
+
+
+def _drop_trailing_question(text: str) -> str:
+    """احذف السؤال الختامي إن بقي رغم المنع — بشرط بقاء نصّ مفيد.
+
+    لا نحوّل السؤال إلى جملة (تنتج «ما رأيك.»)؛ إمّا نحذف الجملة الأخيرة كاملةً
+    عندما يبقى مضمون كافٍ، وإلا نُبقي النص كما هو.
+    """
+    t = (text or "").strip()
+    if not _ends_with_question(t):
+        return t
+    parts = [p for p in re.split(r"(?<=[\.!؟?…])\s+", t) if p.strip()]
+    if len(parts) >= 2:
+        kept = " ".join(parts[:-1]).strip()
+        if len(kept) >= 40:
+            return kept
+    return t
 
 
 def _content_prompt(brief: str, context: "ExecutionContext") -> str:
@@ -306,6 +462,7 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
     interests = getattr(persona, "interests", None) or []
     focus = "، ".join(interests) if interests else ""
     dialect = getattr(persona, "dialect", "") or ""
+    question_ok = _question_allowed(context.scratch.get("recent_posts") or [])
     lines = [
         brief.strip(),
         "",
@@ -316,7 +473,8 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
         "- اكتب تغريدة واحدة قصيرة مكتملة المعنى تنتهي بجملة تامة، وممنوع أن "
         "تتركها ناقصة أو تنهيها بـ«...»؛ اضبط طولها لتكتمل ضمن الحد.",
         "- اكتب بأسلوب إنساني طبيعي وعفوي كأنك شخص حقيقي يغرّد من جواله، لا كبيان رسمي ولا كذكاء اصطناعي.",
-        "- نوّع إيقاع الجمل (جملة قصيرة قوية ثم تفصيل)، ويجوز سؤال واحد يفتح نقاشاً.",
+        "- نوّع إيقاع الجمل (جملة قصيرة قوية ثم تفصيل)، وتجنّب البناء المتكرر نفسه في كل مرة.",
+        _question_rule_line(question_ok),
         "- لا تصف ما ستكتبه، ولا تعِد صياغة التعليمات أو الهدف كتغريدة.",
         "- تناول موضوعاً محدّداً وملموساً برأي أو زاوية واضحة، وليس عبارات عامة.",
         "- تجنّب العبارات الفارغة والقوالب المكررة مثل «تحليل موضوعي» أو «دعوة للنقاش» أو «في عالم متسارع» دون مضمون فعلي.",
@@ -332,7 +490,11 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
         "أو مقارنة محدّدة — الجملة التي لا تحمل شيئاً ملموساً تُحذف.",
         "- ممنوع منعاً باتاً هذه القوالب الفارغة: "
         + "، ".join(f"«{c}»" for c in _CLICHES[:8]) + " وما يشبهها.",
-        f"- نمط المطلع المطلوب لهذه الدورة: {_hook_style(context)}",
+        f"- نمط المطلع المطلوب لهذا المنشور: {_hook_style(context)}",
+        f"- النبرة المطلوبة لهذا المنشور (تتغير في كل مرة): "
+        f"{_pick_variant(context, 'voice', _POST_VOICES)}",
+        "- تنوّعُ الأسلوب لا يُلغي الشخصية: الموقف والقيم والتخصص ثابتة، "
+        "والمتغير هو الصياغة والإيقاع.",
     ]
     if focus:
         lines.insert(1, f"مجال التخصص الذي يجب أن يدور حوله المحتوى: {focus}.")
@@ -344,6 +506,12 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
         lines.append("")
         lines.append("سياق ذاكرتك (اطّلع عليه جيداً ولا تكرّر أي موضوع أو صياغة وردت فيه):")
         lines.append(recent)
+    # قواعد خوارزمية X: ردود > إعجابات، لا روابط في المتن، لا إثارة خارج
+    # التخصص — مع ساعات النشر الأنجح المقيسة من أداء هذا الحساب نفسه.
+    report = context.scratch.get("performance_report") or {}
+    best_hours = [h["hour"] for h in (report.get("best_hours") or [])[:3]]
+    lines.append("")
+    lines.append(x_algorithm.algo_prompt_block("post", best_hours=best_hours))
     return "\n".join(lines)
 
 
@@ -493,11 +661,21 @@ class ReplyToUserCapability(ICapability):
             original = (request.params.get("original_text", "") or "").strip()[:400]
             dialect = getattr(persona, "dialect", "") or ""
             dialect_line = f"- التزم باللهجة التالية إلزامياً في الأسلوب: {dialect}.\n" if dialect else ""
-            recent_replies = context.scratch.get("recent_replies") or []
+            # نصوص الردود الفعلية (أحدّ من scratch['recent_replies'] التي تحمل نصّ
+            # التغريدة الأصلية لا ردّ الموظف)، لأن الحكم على تكرار الأسلوب
+            # يحتاج ما كتبه الموظف هو نفسه.
+            own_replies = _recent_reply_texts(context)
+            recent_replies = own_replies or [
+                str(r) for r in (context.scratch.get("recent_replies") or [])
+            ]
             recent_line = ""
             if recent_replies:
-                joined = " | ".join((r or "")[:80] for r in recent_replies[:4])
+                joined = " | ".join((r or "")[:80] for r in recent_replies[-4:])
                 recent_line = f"- لا تكرّر أسلوب أو مضمون ردودك السابقة: {joined}\n"
+            question_ok = _question_allowed(list(reversed(own_replies)))
+            mode = _pick_variant(context, "reply_mode", _REPLY_MODES)
+            if not question_ok and "سؤالاً" in mode:
+                mode = _REPLY_MODES[0]
             # نبرة الطول: في وضع الاختصار الشديد (ردود التنبيهات) نطلب جملة واحدة
             # قصيرة جداً؛ وإلا حتى ثلاث جمل.
             length_line = (
@@ -510,12 +688,17 @@ class ReplyToUserCapability(ICapability):
                 f"اكتب رداً قصيراً طبيعياً باللغة ({lang}) كأنك شخص حقيقي يتفاعل بصدق:\n"
                 f"{dialect_line}"
                 f"{recent_line}"
-                "- أضف قيمة فعلية: معلومة، رأي محدد، أو سؤال ذكي — لا مجاملات عامة.\n"
+                "- أضف قيمة فعلية: معلومة، رأي محدد، أو ملاحظة دقيقة — لا مجاملات عامة.\n"
+                f"- نمط الرد المطلوب هذه المرة (يتغير في كل رد): {mode}\n"
+                f"{_question_rule_line(question_ok)}\n"
+                "- لا تلتزم بقالب واحد: تنوّع في المطلع والطول والإيقاع مثل البشر، مع "
+                "ثبات الشخصية والقيم والتخصص.\n"
                 f"{length_line}"
                 "- لا تذكر أنك ترد أو تعلّق، اكتب الرد مباشرة وبدون علامات اقتباس.\n"
                 "- إن كان النص الأصلي خارج مجال تخصصك أو يبدو إعلانياً/ترويجياً فلا تنجرف وراءه، وحافظ على رد مهني ضمن اختصاصك فقط.\n"
                 "- التزم حرفياً بتعليمات الشخصية ومحظوراتها (Do/Don't) وقيمها الواردة في تعليمات النظام.\n"
-                "- اجعل الرد إنسانياً ومباشراً ويضيف قيمة فعلية قصيرة (Insight/سؤال ذكي) لا مجاملة عامة."
+                "- اجعل الرد إنسانياً ومباشراً ويضيف قيمة فعلية قصيرة (Insight) لا مجاملة عامة.\n"
+                + x_algorithm.algo_prompt_block("reply")
             )
             gen = context.mcp.call(MCPRequest(
                 employee_id=context.config.id, tool="generate",
@@ -524,6 +707,8 @@ class ReplyToUserCapability(ICapability):
                 context={"server": "content"},
             ))
             reply_text = gen.data.get("text", "").strip()
+            if not question_ok:
+                reply_text = _drop_trailing_question(reply_text)
         if not reply_text:
             return CapabilityResult.fail("no reply text generated", self.name)
         # حدّ صارم للطول في وضع الاختصار الشديد
@@ -542,6 +727,7 @@ class ReplyToUserCapability(ICapability):
             handle=request.params.get("handle", ""),
             text=(request.params.get("original_text") or reply_text),
         )
+        _remember_reply_text(context, reply_text)
         output = dict(res.data)
         output.setdefault("reply_text", reply_text)
         return CapabilityResult.ok(self.name, **output)
@@ -723,8 +909,21 @@ class BrowseXTrendsCapability(ICapability):
             elif not interests:
                 matched_hashtag, hashtag_tweets = cand, tweets
         elif hashtags and top and hashtags[0].get("name") == top.get("name"):
-            # أعلى ترند هو نفسه هاشتاق — أعد استخدام تغريداته دون بحث إضافي
-            matched_hashtag, hashtag_tweets = hashtags[0], trend_tweets
+            # أعلى ترند هو نفسه هاشتاق — أعد استخدام تغريداته دون بحث إضافي،
+            # لكن بنفس بوابة الصلة بالاهتمامات: هذا الفرع كان يتبنى الهاشتاق
+            # بلا أي فحص، فالتقط موظفُ فنٍّ وسفرٍ هاشتاقَ كرة قدم (شوهد فعلياً
+            # مع liketoday5 و#GiveIttihadItsRights). موظف بلا اهتمامات محددة
+            # يبقى حراً في مجاراة أي ترند.
+            cand = hashtags[0]
+            if _rel(cand) >= 1 or not interests:
+                matched_hashtag, hashtag_tweets = cand, trend_tweets
+            elif trend_tweets:
+                in_scope = sum(
+                    1 for t in trend_tweets
+                    if relevance_score(t.get("text", ""), interests) >= min_rel
+                )
+                if in_scope >= 1:
+                    matched_hashtag, hashtag_tweets = cand, trend_tweets
 
         if matched_hashtag:
             context.scratch["matched_hashtag"] = matched_hashtag
@@ -1232,9 +1431,11 @@ class PublishThreadCapability(ICapability):
                 f"- كل تغريدة أقل من {self._MAX_PART} حرفاً ومكتملة المعنى بذاتها.\n"
                 "- التغريدة الأولى خطّاف قوي يوعد بقيمة محدّدة (بلا مبالغة ولا clickbait).\n"
                 "- كل تغريدة تحمل فكرة واحدة فقط وتبني على ما قبلها.\n"
-                "- الأخيرة خلاصة عملية أو سؤال يفتح نقاشاً.\n"
+                "- الأخيرة خلاصة عملية ملموسة (وليس سؤالاً روتينياً من نوع «ما رأيكم؟»).\n"
+                "- نوّع إيقاع التغريدات: لا تجعلها كلها بالطول والبناء نفسه.\n"
                 "- بلا ترقيم آلي (1/5) وبلا هاشتاقات إلا واحداً في الأخيرة كحد أقصى.\n"
                 "- بلا عبارات تمهيدية مثل «ثريد:» أو «سلسلة تغريدات».\n"
+                + x_algorithm.algo_prompt_block("thread", include_common=False)
             ),
             temperature=0.8,
         ) or {}
@@ -1330,7 +1531,11 @@ class QuotePostCapability(ICapability):
                         "- أضف زاوية أو معلومة أو موقفاً واضحاً لا يكرّر نص التغريدة.\n"
                         "- جملتان كحد أقصى، أقل من 200 حرف، بلا هاشتاقات، وبلا اقتباس النص حرفياً.\n"
                         "- لا تقل «أقتبس» أو «أشارككم»، اكتب التعليق مباشرة.\n"
-                        "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر."
+                        f"- النبرة المطلوبة هذه المرة (تتغير): "
+                        f"{_pick_variant(context, 'voice', _POST_VOICES)}\n"
+                        "- لا تنهِ التعليق بسؤال روتيني من نوع «ما رأيكم؟».\n"
+                        "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر.\n"
+                        + x_algorithm.algo_prompt_block("quote")
                     ),
                     "system": context.persona_prompt(),
                     "temperature": 0.85, "max_tokens": 160,
@@ -1350,7 +1555,7 @@ class QuotePostCapability(ICapability):
         if not res.success:
             return CapabilityResult.fail(res.error, self.name)
         _record_interaction(
-            context, action="retweet", url=tweet_url,
+            context, action="quote", url=tweet_url,
             handle=request.params.get("handle", ""),
             text=(request.params.get("original_text") or text),
         )
@@ -1455,6 +1660,9 @@ class BookmarkPostCapability(ICapability):
         ))
         if not res.success:
             return CapabilityResult.fail(res.error, self.name)
+        # الحفظ غير علني فلا يدخل سجلّ التفاعل المتعلّم، لكنه يجب أن يمنع
+        # حفظ المنشور نفسه مرتين — وإلا اقترحته مهارة «ملف الإلهام» كل دورة.
+        _mark_engaged(context, tweet_url)
         text = (request.params.get("original_text") or "").strip()
         if text:
             context.memory.remember(

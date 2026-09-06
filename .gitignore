@@ -47,6 +47,10 @@ Thumbs.db
 # Environment variables
 .env
 .env.local
+# أي نسخة احتياطية من .env تحمل المفاتيح الحقيقية — يجب ألا تُرفع أبداً
+.env.bak*
+.env.*.bak
+.env.backup*
 
 # Logs
 *.log
@@ -86,6 +90,10 @@ _diag_*.py
 _test_*.py
 _live_*.py
 _verify_*.py
+_sync_*.py
+
+# نسخ احتياطية من المزامنة اليدوية بين نسختي المستودع — ليست كوداً
+_sync_backup_*/
 
 # server subprocess logs
 app/x/xsuite_server.log

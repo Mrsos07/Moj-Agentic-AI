@@ -24,8 +24,11 @@ TIKTOK_API_PROVIDER = os.getenv("TIKTOK_API_PROVIDER", "rapidapi")  # rapidapi o
 
 GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY", "")
 
+# مزوّد الـ LLM (OpenRouter افتراضياً، OpenAI احتياطاً). لا تُقرأ المفاتيح هنا
+# مباشرة: ``app.core.llm_provider.resolve_llm`` هو المصدر الوحيد لاختيار
+# المزوّد وعنوانه واسم موديله، وإلا انقسم المنطق على ملفين وتباعدا.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 
 
 # =============================================================================

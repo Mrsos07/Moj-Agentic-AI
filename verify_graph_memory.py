@@ -11,7 +11,8 @@ verify_graph_memory.py — تحقّق عملي من فاعلية الذاكرة 
     python verify_graph_memory.py --db data/graphiti_kuzu --inspect-only
     python verify_graph_memory.py --employee <id> --inspect-only
 
-يحتاج ``OPENAI_API_KEY`` (يُقرأ من .env) لأن الاستخراج والـ embeddings عبر OpenAI.
+يحتاج ``OPENROUTER_API_KEY`` (أو ``OPENAI_API_KEY`` احتياطاً، يُقرأ من .env)
+لأن الاستخراج والـ embeddings يمرّان بمزوّد الـ LLM.
 """
 from __future__ import annotations
 
@@ -104,7 +105,7 @@ def run_full(store: GraphitiStore, employee_id: str) -> None:
     other_id = f"{employee_id}-other"
 
     if not check("تهيئة المخزن (available)", store.available, store._db_path):
-        print("\nالمخزن غير متاح — تحقق من OPENAI_API_KEY و graphiti-core.")
+        print("\nالمخزن غير متاح — تحقق من OPENROUTER_API_KEY و graphiti-core.")
         return
 
     # 1) تغذية حلقتين مهيكلتين + انتظار الاستخراج

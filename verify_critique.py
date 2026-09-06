@@ -248,16 +248,16 @@ def check_focus_closes_the_loop() -> None:
           str((ctx.scratch.get("content_plan") or {}).get("format")))
 
     # لكن الأداء الضعيف جداً يجب أن يتفوّق على الترشيح (الترشيح ليس أمراً مطلقاً)
+    # التسجيل متداخل عن قصد: تسجيل أربع «زبدات» متتالية يجعل سقف التتابع
+    # (max_same_choice_streak) يستبعدها هذه المرة، فنقيس التنويع لا الأداء.
     cfg2 = make_config(content_formats=["insight", "story"])
     measured = []
     for i in range(4):
-        url = f"https://x.com/me/status/s{i}"
-        strategy.record_published(cfg2, url=url, text="t", pillar="p", format_id="story")
-        measured.append({"url": url, "likes": 0, "views": 0})
-    for i in range(4):
-        url = f"https://x.com/me/status/i{i}"
-        strategy.record_published(cfg2, url=url, text="t", pillar="p", format_id="insight")
-        measured.append({"url": url, "likes": 800, "views": 40000})
+        s_url, i_url = f"https://x.com/me/status/s{i}", f"https://x.com/me/status/i{i}"
+        strategy.record_published(cfg2, url=s_url, text="t", pillar="p", format_id="story")
+        measured.append({"url": s_url, "likes": 0, "views": 0})
+        strategy.record_published(cfg2, url=i_url, text="t", pillar="p", format_id="insight")
+        measured.append({"url": i_url, "likes": 800, "views": 40000})
     strategy.update_metrics(cfg2, measured)
     plan2 = strategy.choose_plan(cfg2, prefer_format="story")
     check("الأداء المُثبت يتفوّق على ترشيح الحارس", plan2["format"] == "insight",
@@ -272,7 +272,7 @@ def check_llm_path() -> None:
 
     llm = build_llm_provider()
     if not llm.available:
-        print("      (لا مفتاح OpenAI — تخطّي فحص مسار LLM)")
+        print("      (لا مفتاح OPENROUTER_API_KEY — تخطّي فحص مسار LLM)")
         return
     cfg, ctx = _bad_cycle_ctx()
     rule_directives = [i["directive"]

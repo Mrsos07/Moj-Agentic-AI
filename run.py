@@ -131,7 +131,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Starting server...")
     print(f"URL: http://localhost:{PORT}")
-    print("تأكد من إضافة OPENAI_API_KEY في ملف .env")
+    print("تأكد من إضافة OPENROUTER_API_KEY في ملف .env")
     print("=" * 60)
 
     _free_port(PORT)

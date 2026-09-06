@@ -91,6 +91,7 @@ class ObservePhase(ICognitivePhase):
             activity_lines += [f"- {t[:160]}" for t in recent_posts[:6]]
         _history_titles = {
             "reply": "ردودك الأخيرة (لا تكرّر نفس النقاش ولا الصياغة):",
+            "quote": "اقتبستها مع تعليق مؤخراً (لا تقتبس الموضوع نفسه):",
             "retweet": "أعدت نشرها مؤخراً (لا تعِد نشر الموضوع نفسه):",
             "like": "أعجبتَ بها مؤخراً (تجنّب تكرار نفس الموضوع):",
             "follow": "حسابات تابعتها مؤخراً (لا تتابعها من جديد):",
@@ -276,6 +277,7 @@ class ObservePhase(ICognitivePhase):
                             for m in mentions[:5]
                         ]
                         _source("💬", "المنشنات والردود", len(mentions), "موجّهة لحسابه")
+                        self._credit_interactions(context, mentions)
                     else:
                         observations["mentions_error"] = nt.error
                         _source("💬", "المنشنات والردود", None, error=nt.error)
@@ -283,6 +285,50 @@ class ObservePhase(ICognitivePhase):
                     logger.warning("notifications read failed: %s", exc)
                     observations["mentions_error"] = str(exc)
                     _source("💬", "المنشنات والردود", None, error=str(exc))
+
+            # ── بحث الاهتمامات المباشر: أداة الملاذ عندما لا يقدّم التايم لاين
+            # والترندات أهدافاً ضمن التخصص. حساب جديد/تايم لاين عام يعني صفر
+            # أهداف داخل الاهتمامات، فيرفض الحارس كل مقترح وتمضي الدورات بلا
+            # أي فعل (شوهد مع liketoday5: فن/سفر/ترفيه وسط تايم لاين كروي).
+            # نبحث في X مباشرةً بكلمات اهتمامات الموظف فنملأ حوض التفاعل
+            # بأهداف مضمونة الصلة.
+            try:
+                from ..employee.news_sources import INTEREST_QUERIES
+                from ..employee.persona_templates import relevance_score
+
+                interests = getattr(context.config.persona, "interests", []) or []
+                _pool = (context.scratch.get("timeline") or []) + \
+                        (context.scratch.get("trend_tweets") or []) + \
+                        (context.scratch.get("top_posts") or [])
+                in_scope = sum(
+                    1 for t in _pool
+                    if relevance_score(str(t.get("text", "")), interests) >= 1
+                )
+                if interests and in_scope < 3:
+                    from ..mcp.base import MCPRequest
+
+                    found: List[dict] = []
+                    for interest in interests[:2]:
+                        query = (INTEREST_QUERIES.get(interest) or [str(interest)])[0]
+                        sr = context.mcp.call(MCPRequest(
+                            employee_id=context.config.id, tool="search_tweets",
+                            params={"cookie_label": context.config.cookie_label,
+                                    "query": query, "limit": 8},
+                            context={"server": "playwright_x",
+                                     "cookie_label": context.config.cookie_label},
+                        ))
+                        if sr.success:
+                            found += [t for t in (sr.data.get("tweets") or [])
+                                      if t not in found]
+                        if len(found) >= 8:
+                            break
+                    if found:
+                        context.scratch["interest_tweets"] = found
+                        observations["interest_tweets_count"] = len(found)
+                        _source("🎯", "بحث الاهتمامات", len(found),
+                                "تغريدة ضمن التخصص (بحث مباشر)")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("interest search failed: %s", exc)
 
         # اجلب المواضيع الرائجة الحقيقية (قوقل ترند / كاشف الترند) لتأسيس المحتوى عليها
         if context.capabilities.has("fetch_trends"):
@@ -367,6 +413,32 @@ class ObservePhase(ICognitivePhase):
                 + "، ".join(summary_bits) + ". ينتقل الآن للتحليل واتخاذ القرار.",
                 intent="aeos_cycle_observing",
             )
+
+    @staticmethod
+    def _credit_interactions(context: "ExecutionContext", mentions: List[Dict]) -> None:
+        """انسب المنشنات الواردة إلى التفاعلات التي سبقتها (حلقة تعلّم التفاعل).
+
+        هذه هي اللحظة الوحيدة التي يمكن فيها معرفة أن تفاعلاً ما «أثمر»: حسابٌ
+        تفاعلنا معه سابقاً يخاطبنا الآن. بدونها يبقى قرار التفاعل مبنياً على
+        أرقام ثابتة مكتوبة يدوياً ولا يتعلّم شيئاً مهما دارت الدورات.
+        """
+        from ..employee import interaction_ledger
+
+        try:
+            credited = interaction_ledger.credit_signals(context.config, mentions)
+        except Exception:  # noqa: BLE001 - التعلّم لا يُسقط الرصد أبداً
+            logger.exception("interaction credit failed")
+            return
+        if not credited:
+            return
+        context.scratch["interaction_credits"] = credited
+        names = "، ".join(
+            dict.fromkeys(f"@{c['handle']}" for c in credited if c.get("handle")))
+        context.emit_progress(
+            f"🔁 **تفاعل أثمر:** {names} تجاوب مع تفاعلٍ سابق منّي "
+            f"({len(credited)} إشارة) — سأرجّح هذا النوع من الأهداف.",
+            intent="aeos_cycle_observing",
+        )
 
 
 class PerformancePhase(ICognitivePhase):
@@ -625,7 +697,13 @@ def _action_guard_entry(idx: int, decision) -> str:
     if handle:
         parts.append(f"الحساب المستهدف: {handle}")
     if text:
-        parts.append(f"النص/المحتوى: «{text}»")
+        # النشر يُعرض بموجز تكليف (تعليمات توليد + مادة خام) — النص النهائي
+        # يُصاغ لاحقاً وفق الشخصية، فلا يصح الحكم عليه كأنّه المنشور النهائي.
+        if a.capability in PUBLISHING_CAPABILITIES and p.get("brief"):
+            parts.append(
+                f"موجز التكليف (تعليمات توليد وليس نص المنشور النهائي): «{text}»")
+        else:
+            parts.append(f"النص/المحتوى: «{text}»")
     if rationale:
         parts.append(f"مبرر الاقتراح: {rationale}")
     return " | ".join(parts)
@@ -664,12 +742,16 @@ class PersonaGuardPhase(ICognitivePhase):
         payload = context.event.payload or {}
         directed = bool(payload.get("directed_topic"))
         directed_engage = bool(payload.get("directed_engagement"))
-        _engage_caps = {"reply_to_user", "like_post", "retweet_post", "follow_user"}
+        _engage_caps = {"reply_to_user", "like_post", "retweet_post", "quote_post",
+                        "follow_user"}
         guarded_idx = [
             i for i, d in enumerate(decisions)
             if d.action.capability in self._GUARDED
             and not (directed and d.action.capability in PUBLISHING_CAPABILITIES)
             and not (directed_engage and d.action.capability in _engage_caps)
+            # مهمّة موجّهة حرّة: الهدف اختاره الموظف لكن الأمر أمرُ المالك، وقد
+            # مرّ الهدف أصلاً بفلتر التخصص والمحظورات في المهارة نفسها.
+            and not (d.action.params or {}).get("owner_directed")
         ]
         if not guarded_idx:
             return
@@ -694,15 +776,55 @@ class PersonaGuardPhase(ICognitivePhase):
 
         kept = [d for i, d in enumerate(decisions) if i not in reject]
         removed = [_action_guard_text(decisions[i].action) for i in sorted(reject)]
+
+        # جولة الإنقاذ: إن لم يبقَ أي إجراء حقيقي بعد الرفض، جرّب البدلاء
+        # الذين قيّمهم محرّك القرار (الأعلى منفعةً أولاً) عبر نفس طبقتَي
+        # الحراسة. بدونها: max_actions=1 + رفض واحد = دورة كاملة بلا أي فعل
+        # رغم وجود مقترحات صالحة (شوهد مع liketoday5 ثلاث دورات متتالية).
+        substituted: List[str] = []
+        if not any(d.action.capability != "wait" for d in kept):
+            rejected_sigs = {
+                (decisions[i].action.capability,
+                 str((decisions[i].action.params or {}).get("tweet_url")
+                     or (decisions[i].action.params or {}).get("profile_url")
+                     or (decisions[i].action.params or {}).get("handle") or ""))
+                for i in reject
+            }
+            alternates = list(context.scratch.get("decision_alternates") or [])
+            attempts = 0
+            for cand in alternates:
+                if attempts >= 4:   # سقف نداءات التدقيق — لا نحرق الدورة كلها
+                    break
+                sig = (cand.action.capability,
+                       str((cand.action.params or {}).get("tweet_url")
+                           or (cand.action.params or {}).get("profile_url")
+                           or (cand.action.params or {}).get("handle") or ""))
+                if sig in rejected_sigs:
+                    continue
+                attempts += 1
+                cand_reasons: dict = {}
+                if self._deterministic_screen(context, [cand], [0], cand_reasons):
+                    rejected_sigs.add(sig)
+                    continue
+                if context.llm and context.llm.available and \
+                        self._llm_audit(context, [cand], [0], cand_reasons):
+                    rejected_sigs.add(sig)
+                    continue
+                cand.explanation += " | بديل بعد رفض الحارس للاختيار الأول"
+                kept.append(cand)
+                substituted.append(_action_guard_text(cand.action))
+                break
+
         context.scratch["decisions"] = kept
         context.scratch["decision_log"] = [d.to_dict() for d in kept]
         context.scratch["guard_report"] = {
             "reviewed": len(guarded_idx),
             "rejected": removed,
             "reasons": {str(i): reasons.get(i, "") for i in sorted(reject)},
+            "substituted": substituted,
         }
-        logger.info("persona guard rejected %d/%d actions: %s (reasons=%s)",
-                    len(reject), len(guarded_idx), removed, reasons)
+        logger.info("persona guard rejected %d/%d actions: %s (reasons=%s, substituted=%s)",
+                    len(reject), len(guarded_idx), removed, reasons, substituted)
 
     # ─────────────── layer 1: deterministic ───────────────
     @staticmethod
@@ -749,7 +871,19 @@ class PersonaGuardPhase(ICognitivePhase):
         min_conf = float(rules.get("guard_min_confidence", 0.6))
         interests = getattr(context.config.persona, "interests", []) or []
 
-        lines = [_action_guard_entry(i, decisions[i]) for i in candidates]
+        graph_facts = context.scratch.get("graph_handle_facts") or {}
+        lines = []
+        for i in candidates:
+            entry = _action_guard_entry(i, decisions[i])
+            # ما يعرفه الرسم المعرفي عن هذا الحساب تحديداً — يجعل الحكم مبنياً
+            # على تاريخ حقيقي معه لا على نص التغريدة وحده.
+            p = decisions[i].action.params or {}
+            handle = str(p.get("handle") or p.get("profile_url") or "")
+            key = handle.rstrip("/").rsplit("/", 1)[-1].lstrip("@").strip().lower()
+            known = graph_facts.get(key) or []
+            if known:
+                entry += " | من ذاكرتك عنه: " + "؛ ".join(str(f)[:100] for f in known[:2])
+            lines.append(entry)
         recent = (context.scratch.get("recent_activity_summary") or "").strip()
         recent_block = (
             f"\n\nسجلّ نشاط الموظف الأخير (لكشف التكرار):\n{recent[:1200]}"
@@ -769,7 +903,11 @@ class PersonaGuardPhase(ICognitivePhase):
             "5) السمعة: هل فيه إساءة، تحيز خطير، معلومة غير مؤكدة تُنسب كحقيقة، "
             "أو تبنٍّ لمحتوى مسيء عبر رتويت/إعجاب؟ = رفض.\n"
             "ملاحظة: الرتويت والإعجاب تبنٍّ علني للمحتوى المستهدف نفسه — طبّق المعايير "
-            "على النص المستهدف. لا ترفض لمجرد الحذر: ارفض فقط عند مخالفة واضحة.\n\n"
+            "على النص المستهدف. لا ترفض لمجرد الحذر: ارفض فقط عند مخالفة واضحة.\n"
+            "ملاحظة مهمة: إجراءات النشر تُعرض بـ«موجز تكليف» (تعليمات توليد ومادة خام "
+            "قد تكون مقتطعة) — المنشور النهائي سيُصاغ لاحقاً وفق الشخصية ويمر بفحص جودة "
+            "مستقل. احكم على موضوع التكليف ونطاقه فقط، ولا ترفضه بسبب الصياغة أو "
+            "الاكتمال أو انقطاع النص.\n\n"
             "أعِد حصراً JSON بالشكل:\n"
             '{"verdicts": [{"id": رقم الإجراء, "verdict": "approve" أو "reject", '
             '"confidence": رقم من 0 إلى 1, "reason": "سبب مختصر بالعربية"}]}'
@@ -854,6 +992,11 @@ class ExecutePhase(ICognitivePhase):
                 })
                 # maintain counters (e.g. posts_today + ميزانيات التفاعل اليومية)
                 if result.success:
+                    # حصة المهارة المخصّصة تُستهلك عند التنفيذ لا عند الاقتراح
+                    skill_id = (action.params or {}).get("_skill")
+                    if skill_id:
+                        from ..skills.custom import note_run
+                        note_run(context.config, str(skill_id))
                     c = context.config.runtime_state.counters
                     if action.capability in PUBLISHING_CAPABILITIES:
                         c["posts_today"] = c.get("posts_today", 0) + 1
@@ -1131,11 +1274,56 @@ class EmotionPhase(ICognitivePhase):
             queries.append("سلوك وتفاعل الحسابات " + " ".join(handles))
         return queries
 
+    @staticmethod
+    def _candidate_handles(context: "ExecutionContext") -> List[str]:
+        """الحسابات التي قد نتفاعل معها هذه الدورة (بترتيب تكرار الظهور).
+
+        هذه هي الكيانات التي يجب أن نسأل الرسم المعرفي عنها **قبل** القرار،
+        لا بعده: من هو هذا الحساب في تاريخنا؟ هل تجاوب سابقاً؟ هل حدث معه ما
+        يستحق الحذر؟ بدون هذا كان الرسم يُقرأ باستعلامات عامة فقط.
+        """
+        from collections import Counter
+
+        counts: "Counter[str]" = Counter()
+        for key in ("mentions", "top_posts", "interest_tweets", "hashtag_tweets",
+                    "trend_tweets", "timeline"):
+            for item in (context.scratch.get(key) or [])[:12]:
+                if not isinstance(item, dict):
+                    continue
+                handle = str(item.get("handle") or item.get("author")
+                             or item.get("username") or "").strip().lstrip("@").lower()
+                if handle:
+                    counts[handle] += 1
+        return [h for h, _ in counts.most_common(5)]
+
+    def _load_handle_facts(self, context: "ExecutionContext") -> None:
+        """حمّل ما يعرفه الرسم المعرفي عن أهداف هذه الدورة (لقرار التفاعل)."""
+        context.scratch["graph_handle_facts"] = {}
+        if not hasattr(self._graph, "facts_about"):
+            return
+        handles = self._candidate_handles(context)
+        if not handles:
+            return
+        try:
+            known = self._graph.facts_about(
+                context.config.id, [f"@{h}" for h in handles], limit=3) or {}
+        except Exception:  # noqa: BLE001 - الذاكرة لا تُسقط الدورة أبداً
+            logger.exception("graph facts_about failed")
+            return
+        context.scratch["graph_handle_facts"] = known
+        if known:
+            logger.info("graph memory: recalled facts about %d target handles",
+                        len(known))
+
     def run(self, context: "ExecutionContext") -> None:
         context.scratch["emotion_state"] = None
         context.scratch["graph_facts"] = []
+        context.scratch["graph_handle_facts"] = {}
         if self._graph is None or not getattr(self._graph, "available", False):
             return
+
+        # معرفة موجّهة بالهدف: تُستهلك في محرّك القرار وحارس الشخصية
+        self._load_handle_facts(context)
 
         facts = self._graph.search_facts(
             context.config.id, self._build_queries(context), limit=12
@@ -1340,7 +1528,8 @@ class GraphMemoryPhase(ICognitivePhase):
         audience = self._audience(context)
         emo = context.scratch.get("emotion_state") or {}
 
-        if not actions and not lesson and not audience:
+        if not actions and not lesson and not audience \
+                and not context.scratch.get("interaction_credits"):
             return
 
         # حصراً ما يحمل معنى قابلاً للتعلّم. البيانات الدفترية (رقم الدورة،
@@ -1358,6 +1547,34 @@ class GraphMemoryPhase(ICognitivePhase):
             }
         if audience:
             episode["إشارات_الجمهور"] = audience
+        # أثر التفاعل لا سجلّه: «ردّ ناجح» يعني أن الزر عمل، أما «@فلان تجاوب مع
+        # ردّنا» فهو المعلومة الوحيدة القابلة للتعلّم فعلاً. بدونها كان الرسم
+        # يحفظ ما فعلناه ولا يحفظ أبداً ما نفع.
+        credits = context.scratch.get("interaction_credits") or []
+        if credits:
+            episode["تفاعلات_أثمرت"] = [
+                {"الحساب": f"@{c.get('handle', '')}", "نوع_التفاعل": c.get("cap", "")}
+                for c in credits[:5]
+            ]
+        try:
+            from ..employee import interaction_ledger as IL
+
+            if IL.has_evidence(context.config):
+                rep = IL.report(context.config, limit=3)
+                episode["حصيلة_تفاعلي"] = {
+                    "إجمالي": rep["samples"],
+                    "أثمر": rep["reciprocated"],
+                    "عائد_كل_نوع": {
+                        cap: f"{v['reciprocated']}/{v['count']}"
+                        for cap, v in (rep.get("by_capability") or {}).items()
+                    },
+                    "أكثر_الحسابات_تجاوباً": [
+                        h["handle"] for h in (rep.get("top_handles") or [])
+                        if h["reciprocated"]
+                    ][:3],
+                }
+        except Exception:  # noqa: BLE001 - التغذية لا تُسقط الدورة
+            logger.exception("interaction ledger summary for graph failed")
         evaluation = context.scratch.get("evaluation") or {}
         if evaluation:
             episode["الحصيلة"] = {

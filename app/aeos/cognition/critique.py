@@ -164,6 +164,12 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
         "engagement_trend": _engagement_trend(context.config),
     }
     findings["issues"] = _rule_based_issues(findings)
+    # مخالفات خوارزمية X المقيسة على النصوص المنشورة فعلاً (روابط في المتن،
+    # حشو إيموجي، أسئلة قوالب) — نفس عقد issues فتتحول توجيهات تلقائياً.
+    if texts:
+        from ..employee import x_algorithm
+
+        findings["issues"].extend(x_algorithm.virality_findings(texts))
     return findings
 
 
@@ -285,6 +291,22 @@ def build_critique(context: "ExecutionContext") -> Dict[str, Any]:
     ) or "  (لا ردود)"
 
     recurring = _recurring_summary(context.config)
+    # هوية نظيفة بدل persona_prompt(): البرومبت الكامل يحتوي توجيهات الدورة
+    # السابقة نفسها، فكان النموذج يعيد صياغتها كتوجيهات جديدة إلى الأبد —
+    # حلقة صدى جعلت توجيهاً باطلاً (هاشتاق يخالف محظورات الشخصية) يتوارث
+    # عبر الدورات رغم زوال مصدره. الحكم يُبنى على الهوية الثابتة وأرقام
+    # الدورة فقط.
+    p = context.config.persona
+    identity = "\n".join(part for part in [
+        f"الهوية: {p.display_name or context.config.account_username} — {p.role}. "
+        f"اللغة: {p.language}.",
+        f"🔒 تعليمات المستخدم الثابتة (المرجع الأعلى): {p.instructions}"
+        if p.instructions else "",
+        ("التخصص الحصري: " + "، ".join(p.interests))
+        if getattr(p, "interests", None) else "",
+        ("افعل دائماً: " + "؛ ".join(p.dos)) if p.dos else "",
+        ("لا تفعل أبداً: " + "؛ ".join(p.donts)) if p.donts else "",
+    ] if part)
     data = llm.complete_json(
         system=(
             "أنت مدير تحرير صارم ومنصف يراجع أداء صانع محتوى على منصة X بعد كل "
@@ -300,7 +322,7 @@ def build_critique(context: "ExecutionContext") -> Dict[str, Any]:
             + ", ".join(_valid_format_ids())
         ),
         prompt=(
-            f"{context.persona_prompt()}\n\n"
+            f"{identity}\n\n"
             f"أرقام الدورة:\n" + "\n".join(facts_lines) + "\n\n"
             f"ما نشره فعلاً:\n{published_block}\n\n"
             f"ردوده:\n{replies_block}\n\n"
@@ -445,6 +467,11 @@ _ISSUE_LABELS = {
     "plan_ignored": "عدم الالتزام بصيغة خطة المحتوى",
     "engagement_down": "تفاعل هابط",
     "memory_unused": "عدم الاستفادة من الذاكرة المعرفية",
+    "external_link_in_post": "روابط خارجية في متن المنشور تخفض وصوله",
+    "emoji_overload": "حشو إيموجي يوحي بالسبام",
+    "generic_cta": "أسئلة قوالب عامة لا تستدرج ردوداً",
+    "question_ending_every_text": "إنهاء كل نص بسؤال (أسلوب آلي)",
+    "monotone_openings": "مطالع متطابقة تجعل الأسلوب أحادياً",
 }
 
 

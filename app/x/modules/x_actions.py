@@ -305,6 +305,13 @@ def repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_a
         try:
             _goto_tweet(page, tweet_url)
 
+            # سبق نشرها؟ زر unretweet ظاهر يعني «معاد نشرها أصلاً» — نجاح
+            # idempotent. بدون هذا الفحص تنفتح قائمة «Undo repost» ويطابقها
+            # محدد has-text('Repost') فيُلغى الرتويت بالخطأ ثم يفشل التأكيد.
+            if _testid_visible(page, "unretweet", timeout_ms=1_500):
+                page.wait_for_timeout(wait_after_ms)
+                return
+
             # Step 1: open repost menu
             open_menu_selectors = [
                 "div[data-testid='retweet']",
@@ -317,21 +324,33 @@ def repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_a
                 "[aria-label*='إعاده النشر']",
                 "[aria-label*='إعادة نشر']",
             ]
-            _click_first_visible(page, open_menu_selectors, timeout_ms=60_000)
+            # واجهة X تتجاهل بعض النقرات البرمجية بصمت (نفس علّة الكومبوزر):
+            # النقرة «تنجح» ولا تنفتح القائمة، فكان انتظارٌ واحد 15 ثانية
+            # يفشل بـ Timeout waiting for expected UI. الحل: أعد النقر حتى
+            # تظهر القائمة فعلاً بدل انتظار نقرة واحدة قد تكون ضاعت.
+            menu_sel = ["div[role='menu']", "div[role='menuitem']"]
+            for attempt in range(3):
+                _click_first_visible(page, open_menu_selectors, timeout_ms=20_000)
+                try:
+                    _wait_any(page, menu_sel, timeout_ms=5_000)
+                    break
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
+                    page.wait_for_timeout(800)
 
-            # Step 2: choose "Repost" from menu
+            # Step 2: choose "Repost" from menu — داخل القائمة المفتوحة حصراً،
+            # وإلا طابق span عاماً في الصفحة (عدّاد Reposts مثلاً).
             menu_item_selectors = [
                 "div[role='menuitem']:has-text('Repost')",
                 "div[role='menuitem']:has-text('إعادة النشر')",
                 "div[role='menuitem']:has-text('إعاده النشر')",
                 "div[role='menuitem']:has-text('إعادة نشر')",
-                "span:has-text('Repost')",
-                "span:has-text('إعادة النشر')",
-                "span:has-text('إعاده النشر')",
-                "span:has-text('إعادة نشر')",
+                "div[role='menu'] span:has-text('Repost')",
+                "div[role='menu'] span:has-text('إعادة النشر')",
+                "div[role='menu'] span:has-text('إعاده النشر')",
+                "div[role='menu'] span:has-text('إعادة نشر')",
             ]
-            # Wait for menu to appear then click
-            _wait_any(page, ["div[role='menu']", "div[role='menuitem']"], timeout_ms=15_000)
             _click_first_visible(page, menu_item_selectors, timeout_ms=30_000)
 
             # تأكيد فعلي: تحوّل الزر إلى "unretweet" يعني أن إعادة النشر تمّت.
@@ -563,8 +582,17 @@ def quote_tweet(
                 "[aria-label*='إعاده النشر']",
                 "[aria-label*='إعادة نشر']",
             ]
-            _click_first_visible(page, open_menu_selectors, timeout_ms=60_000)
-            _wait_any(page, ["div[role='menu']", "div[role='menuitem']"], timeout_ms=15_000)
+            # نفس علّة النقرة الصامتة في repost_tweet: أعد النقر حتى تنفتح القائمة
+            menu_sel = ["div[role='menu']", "div[role='menuitem']"]
+            for attempt in range(3):
+                _click_first_visible(page, open_menu_selectors, timeout_ms=20_000)
+                try:
+                    _wait_any(page, menu_sel, timeout_ms=5_000)
+                    break
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
+                    page.wait_for_timeout(800)
 
             # Click Quote (EN/AR + تنويعات همزة القطع/الوصل في واجهة X العربية)
             quote_selectors = [

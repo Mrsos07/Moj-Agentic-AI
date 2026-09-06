@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List
 
 from ..skills.base import ProposedAction
@@ -89,12 +90,75 @@ def cycle_limit(capability: str, rules: Dict) -> int:
         return default
 
 
+def _day_progress(config) -> float:
+    """كم انقضى من يوم عمل الموظف (0..1) — مرجع الإيقاع اليومي.
+
+    بلا مرجع زمني تصير «نسبة الاستهلاك» بلا معنى: 50% من الحصة في الساعة
+    الأولى سلوك متكتّل، ونفسها في آخر ساعة تأخّر. نقيس التقدّم داخل ساعات
+    العمل المعلنة للموظف (ومنطقته الزمنية)، ونعيد 1.0 خارجها (آخر اليوم).
+    """
+    sched = getattr(config, "scheduler", None)
+    start = int(getattr(sched, "active_hours_start", 0) or 0)
+    end = int(getattr(sched, "active_hours_end", 23) or 23)
+    tz_name = getattr(sched, "timezone", "") or ""
+    try:
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo(tz_name)) if tz_name else datetime.now()
+    except Exception:  # noqa: BLE001 - منطقة غير معروفة ⇒ توقيت الخادم
+        now = datetime.now()
+    span = (end - start) % 24 or 24
+    elapsed = (now.hour + now.minute / 60.0 - start) % 24
+    return max(0.05, min(1.0, elapsed / span))
+
+
+def capability_streak(config, capability: str) -> int:
+    """كم دورة متتالية (الأحدث أولاً) نُفِّذ فيها هذا النوع من الإجراءات."""
+    history = list((config.runtime_state.flags or {}).get("action_type_history") or [])
+    streak = 0
+    for types in history:
+        if capability in (types or []):
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def streak_limit(rules: Dict) -> int:
+    """أقصى عدد دورات متتالية يُسمح فيها بتكرار نوع الإجراء نفسه."""
+    try:
+        return max(int((rules or {}).get("max_same_capability_streak", 3)), 1)
+    except (TypeError, ValueError):
+        return 3
+
+
+def is_mention_reply(action: "ProposedAction") -> bool:
+    """ردّ على من خاطبنا — له مسار خاص في كل مكان (ميزانية وسقف دورة).
+
+    السقف العام ``max_replies_per_cycle`` (افتراضياً 1) كان يقصّ ردود المنشنات
+    أيضاً، فيقترح ``CommunityEngagerSkill`` ثلاثة ردود على ثلاثة أشخاص خاطبونا
+    ثم يُنفَّذ واحد فقط — بينما القاعدة المعلنة أن «من يخاطبنا يستحق رداً».
+    لذلك لها سقفها الخاص ``max_reply_notifications_per_cycle``.
+    """
+    return (action.capability == "reply_to_user"
+            and bool((action.params or {}).get("is_mention_reply")))
+
+
+def mention_reply_limit(rules: Dict) -> int:
+    """سقف الردود على المنشنات في الدورة الواحدة (مستقل عن سقف الردود العام)."""
+    rules = rules or {}
+    try:
+        return max(int(rules.get("max_reply_notifications_per_cycle", 3)), 0)
+    except (TypeError, ValueError):
+        return 3
+
+
 class WeightedUtilityDecisionEngine(IDecisionEngine):
     """Transparent, explainable weighted-utility policy."""
 
-    #: engagement capabilities rotated across cycles for continuous diversity
-    ENGAGEMENT_ROTATION = ["like_post", "retweet_post", "reply_to_user",
-                           "quote_post", "follow_user"]
+    # ملاحظة تاريخية: كان هنا ``ENGAGEMENT_ROTATION`` يمنح مكافأة لنوع تفاعل
+    # يُختار بحساب ``cycles % 5``. أُزيل: التنويع صار ينشأ من الإيقاع اليومي
+    # (المتأخّر عن حصته يتقدّم) وسقف التتابع، لا من دورة تقويمية عشوائية.
 
     def __init__(
         self,
@@ -113,10 +177,44 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
     def decide(self, proposals: List[ProposedAction], context: "ExecutionContext") -> List[Decision]:
         rules = context.config.business_rules
         max_actions = int(rules.get("max_actions_per_cycle", self.max_actions))
+        # أمر مالك صريح (مهمّة من الشات): لا تقتطعه سقوف الدورة التلقائية.
+        # لو طلب المالك ثلاثة ردود وسقف الردود/الدورة = 1 لنُفّذ ردّاً واحداً
+        # ويظنّ أن الموظف تجاهل أمره.
+        owner_count = sum(1 for p in proposals
+                          if (p.params or {}).get("owner_directed"))
+        if owner_count:
+            max_actions = max(max_actions, owner_count)
 
-        # تدوير نوع التفاعل المُفضّل كل دورة لضمان التنويع المستمر
-        cycles = int(getattr(context.config.runtime_state, "cycles_completed", 0) or 0)
-        preferred_engagement = self.ENGAGEMENT_ROTATION[cycles % len(self.ENGAGEMENT_ROTATION)]
+        counters = context.config.runtime_state.counters
+
+        def _budget_state(cap: str) -> tuple:
+            """(المستهلك، الهدف، نسبة الاستهلاك 0..1) لميزانية النوع اليومية."""
+            if cap not in ENGAGEMENT_BUDGETS:
+                return 0, 0, 0.0
+            counter_key, rule_key, default = ENGAGEMENT_BUDGETS[cap]
+            target = max(int(rules.get(rule_key, default)), 0)
+            used = int(counters.get(counter_key, 0))
+            if target <= 0:
+                return used, target, 1.0
+            return used, target, min(used / target, 1.0)
+
+        # ── الإيقاع اليومي: هل هذا النوع متأخّر عن حصته أم سابق لها؟ ──
+        # يستبدل منطقاً كان يعاقب على «الاستهلاك» مطلقاً بلا مرجع زمني: نوعٌ
+        # استهلك 50% من حصته في أول ساعة كان يُعامَل كنوعٍ استهلكها في آخر
+        # اليوم. النتيجة سلوك متكتّل: يفرغ ميزانية نوع مبكراً ثم يصمت عنه.
+        # الآن المرجع هو تقدّم يوم العمل: المتأخّر عن إيقاعه يُدفع، والسابق
+        # لإيقاعه يُكبح — تنويعٌ ينشأ من البنية لا من مكافأة تدوير عشوائية.
+        day_progress = _day_progress(context.config)
+        pace_weight = float(rules.get("pace_weight", 0.35))
+
+        def _pace_delta(cap: str) -> float:
+            if cap not in ENGAGEMENT_BUDGETS:
+                return 0.0
+            _, target, ratio = _budget_state(cap)
+            if target <= 0:
+                return 0.0
+            return max(-1.0, min(1.0, day_progress - ratio))
+
         # سجل أنواع الإجراءات عبر آخر عدة دورات (الأحدث أولاً) — عقوبة تكرار
         # متدرّجة: ما نُفّذ في الدورة السابقة يُعاقب بقوة، والأقدم أخف — فلا يتكرر
         # الرد/الرتويت دورةً بعد دورة بل يتناوب السلوك طبيعياً.
@@ -127,30 +225,39 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         repeat_penalty = float(rules.get("repeat_penalty", 0.25))
 
         def _history_penalty(cap: str) -> float:
+            """عقوبة تكرار النوع — **مخفّفة ما دامت ميزانيته اليومية غير مستهلكة**.
+
+            كانت عقوبتان تُطرحان على السبب نفسه: عقوبة «تكرار النوع» وعقوبة
+            «استهلاك الميزانية». فالإعجاب بهدف يومي = 12 كان يُعاقَب على تكراره
+            وهو لم يستهلك إلا إعجابين — فينفّذ الموظف تفاعلاً أقل بكثير مما
+            ضبطه المستخدم صراحةً. التنويع مطلوب، لكن ليس على حساب بلوغ الهدف:
+            العقوبة تكبر تدريجياً مع استهلاك الميزانية.
+            """
             pen = 0.0
             for age, types in enumerate(history[:6]):
                 if cap in (types or []):
                     pen += repeat_penalty * (0.5 ** age)
-            return min(pen, repeat_penalty * 2)
+            pen = min(pen, repeat_penalty * 2)
+            if cap in ENGAGEMENT_BUDGETS:
+                pen *= 0.35 + 0.65 * _budget_state(cap)[2]
+            return pen
 
-        counters = context.config.runtime_state.counters
-        budget_pressure = float(rules.get("budget_pressure", 0.30))
+        # ── إشارات التعلّم من سجلّ التفاعل (ما أثمر فعلاً) ──
+        from ..employee import interaction_ledger as IL
 
-        def _budget_factor(cap: str) -> tuple:
-            """(عقوبة استهلاك الميزانية، المستهلك، الهدف) — تناقص العائد اليومي."""
-            if cap not in ENGAGEMENT_BUDGETS:
-                return 0.0, 0, 0
-            counter_key, rule_key, default = ENGAGEMENT_BUDGETS[cap]
-            target = max(int(rules.get(rule_key, default)), 0)
-            used = int(counters.get(counter_key, 0))
-            if target <= 0:
-                return 0.0, used, target
-            return budget_pressure * min(used / target, 1.0), used, target
+        cfg = context.config
+        base_rate = IL.base_rate(cfg)
+        w_affinity = float(rules.get("affinity_weight", 0.25))
+        w_yield = float(rules.get("capability_yield_weight", 0.20))
+        w_explore = float(rules.get("interaction_exploration", 0.10))
+        fatigue_penalty = float(rules.get("handle_fatigue_penalty", 0.12))
 
         scored: List[Decision] = []
         for action in proposals:
             if not self._allowed(action, context):
                 continue
+            params = action.params or {}
+            cap = action.capability
             score = (
                 self.w_impact * action.expected_impact
                 + self.w_urgency * action.urgency
@@ -159,31 +266,64 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
             # محاذاة الأهداف الحقيقية (نوع الهدف × أولويته × ما بقي منه) — وزنها
             # معتبر لا رمزي، وإلا لا تؤثّر أهداف المستخدم في أي قرار.
             w_goal = float(rules.get("goal_weight", 0.25))
-            alignment = context.goal_alignment(action.capability)
+            alignment = context.goal_alignment(cap)
             score += w_goal * alignment
-            # مكافأة تدوير: ادفع نوع التفاعل المستهدف هذه الدورة للأعلى.
-            rotation_bonus = float(rules.get("rotation_bonus", 0.20))
-            if action.capability == preferred_engagement:
-                score += rotation_bonus
             bits = [
                 f"impact={action.expected_impact:.2f}",
                 f"urgency={action.urgency:.2f}", f"risk={action.risk:.2f}",
             ]
             if alignment:
                 bits.append(f"goal_fit={alignment:.2f}")
-            # عقوبة تكرار متدرّجة عبر الدورات السابقة (عدا الانتظار)
-            if action.capability != "wait":
-                pen = _history_penalty(action.capability)
+
+            # ── ما تعلّمه الموظف فعلاً عن تفاعله (لا أرقاماً مكتوبة يدوياً) ──
+            # كل الحدود مركزة حول ``base_rate``: الهدف/النوع المجهول = صفر
+            # تأثير، فلا يُكافأ ولا يُعاقب بلا دليل.
+            if cap in IL.INTERACTION_CAPABILITIES:
+                cap_yield, cap_samples = IL.capability_stats(cfg, cap)
+                delta = w_yield * (cap_yield - base_rate) / max(base_rate, 0.05)
+                score += delta
+                if abs(delta) >= 0.01:
+                    bits.append(f"cap_yield={cap_yield:.2f}/{cap_samples}")
+                # استكشاف: نوع لم يُجرَّب يستحق فرصة، وإلا تجمّد الموظف على
+                # أول نوع صادف نجاحاً ولم يعرف أبداً ما كان يمكن أن ينجح.
+                explore = w_explore / (1.0 + cap_samples)
+                score += explore
+                if explore >= 0.02:
+                    bits.append(f"explore={explore:.2f}")
+
+                handle = str(params.get("handle") or params.get("profile_url") or "")
+                if handle:
+                    aff, aff_n = IL.handle_stats(cfg, handle)
+                    if aff_n:
+                        adelta = w_affinity * (aff - base_rate) / max(base_rate, 0.05)
+                        score += adelta
+                        bits.append(f"affinity={aff:.2f}/{aff_n}")
+                    # إلحاح على حساب واحد = سلوك سبام حتى لو كان كل تفاعل
+                    # مبرَّراً وحده. نوزّع الاهتمام على حسابات مختلفة.
+                    fatigue = IL.handle_fatigue(cfg, handle)
+                    if fatigue >= 2 and not params.get("is_mention_reply"):
+                        fpen = fatigue_penalty * min(fatigue - 1, 4)
+                        score -= fpen
+                        bits.append(f"fatigue={fatigue}(-{fpen:.2f})")
+
+            # عقوبة تكرار متدرّجة عبر الدورات السابقة (عدا الانتظار والنشر —
+            # النشر محدود أصلاً بهدف يومي في _allowed، ومعاقبته على «تكرار»
+            # النشر تحرم حسابات daily_post_target>1 من بلوغ هدفها: الحساب
+            # التوثيقي نشر مرة ثم خسر النشر كل الدورات التالية أمام التفاعل).
+            if cap != "wait" and cap not in PUBLISHING_CAPABILITIES:
+                pen = _history_penalty(cap)
                 if pen:
                     score -= pen
                     bits.append(f"repeat_pen={pen:.2f}")
-            # تناقص العائد: كلما استُهلكت ميزانية النوع اليومية انخفضت أولويته
+            # الإيقاع اليومي: المتأخّر عن حصته يُدفع والسابق لها يُكبح
             # (ردود المنشنات معفاة — من يخاطبنا يستحق رداً دائماً).
-            if not action.params.get("is_mention_reply"):
-                bpen, used, target = _budget_factor(action.capability)
-                if bpen:
-                    score -= bpen
-                    bits.append(f"budget={used}/{target}")
+            if not params.get("is_mention_reply"):
+                used, target, _ratio = _budget_state(cap)
+                pace = _pace_delta(cap)
+                if pace:
+                    score += pace_weight * pace
+                    bits.append(f"pace={used}/{target}@{day_progress:.0%}"
+                                f"({pace:+.2f})")
             bits.append(f"score={score:.2f}")
             scored.append(Decision(
                 action=action, score=score, explanation=" ".join(bits),
@@ -194,15 +334,42 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         # اختر الأعلى فوق العتبة مع احترام **سقف كل نوع في الدورة** كما ضبطه
         # المستخدم (إعجاب/دورة، ردود/دورة، ...). التنويع محفوظ عبر مكافأة
         # التدوير وعقوبة التكرار، لا عبر سقف صلب = 1 يُبطل إعدادات المستخدم.
+        # ردود المنشنات لها سقفها الخاص: من خاطبنا يستحق رداً، ولا يصح أن
+        # يقصّه سقف الردود العام (كان ثلاثة أشخاص يخاطبوننا فيُردّ على واحد).
+        mention_cap = mention_reply_limit(rules)
+        max_actions = max(max_actions, min(
+            mention_cap, sum(1 for p in proposals if is_mention_reply(p))))
+
+        # ضمانة تنويع بنيوية: نوعٌ نُفِّذ في آخر N دورات متتالية يُستبعد هذه
+        # الدورة مهما علت درجته. الأوزان وحدها لا تكفي — القياس أظهر ردّاً
+        # يتكرّر 5 دورات متتالية لأن درجته تبقى الأعلى دائماً. الاستثناءات:
+        # ردّ المنشنات (واجب مهني) وأمر المالك (مرجع أعلى).
+        max_streak = streak_limit(rules)
+        blocked_by_streak = {
+            cap for cap in {d.action.capability for d in scored}
+            if cap not in ("wait",)
+            and capability_streak(context.config, cap) >= max_streak
+        }
+
+        def _eligible(d: "Decision") -> bool:
+            if d.action.capability not in blocked_by_streak:
+                return True
+            return bool(is_mention_reply(d.action)
+                        or (d.action.params or {}).get("owner_directed"))
+
         chosen: List[Decision] = []
         used_counts: Dict[str, int] = {}
         for d in scored:
             if d.score < self.min_score:
                 continue
+            if not _eligible(d):
+                continue
             cap = d.action.capability
-            if cap != "wait":
-                group = cycle_group(cap)
-                limit = cycle_limit(cap, rules)
+            if cap != "wait" and not (d.action.params or {}).get("owner_directed"):
+                group = ("mention_reply" if is_mention_reply(d.action)
+                         else cycle_group(cap))
+                limit = (mention_cap if group == "mention_reply"
+                         else cycle_limit(cap, rules))
                 if used_counts.get(group, 0) >= limit:
                     continue
                 used_counts[group] = used_counts.get(group, 0) + 1
@@ -214,7 +381,12 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         # موجب القيمة (هدف فعلي ضمن التخصص)، نفّذ أفضله بدل الجلوس بلا فعل —
         # الانتظار قرار متعمّد فقط عندما لا يوجد أي خيار ذو قيمة إطلاقاً.
         if not chosen and scored:
+            # فضّل مرشّحاً لا يكسر التنويع، وإن لم يوجد فالفعل خير من الجمود
             best_real = next(
+                (d for d in scored
+                 if d.action.capability != "wait" and d.score > 0.0 and _eligible(d)),
+                None,
+            ) or next(
                 (d for d in scored
                  if d.action.capability != "wait" and d.score > 0.0),
                 None,
@@ -236,6 +408,16 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         # وسجل النشاط الأخير لتجنّب التكرار واختيار الأعلى قيمة فعلاً.
         if bool(rules.get("llm_decision_review", True)):
             chosen = self._llm_review(scored, chosen, context, max_actions)
+
+        # مرشّحون بدلاء للحارس: عندما يرفض الحارس القرار الوحيد (شوهد مع
+        # liketoday5: max_actions=1 ورُفض الرد لخروجه عن التخصص) كانت الدورة
+        # تنتهي بلا أي فعل رغم وجود 6 مقترحات صالحة أخرى. الحارس يجرّب
+        # البديل التالي بدل إهدار الدورة كاملة.
+        chosen_ids = {id(d) for d in chosen}
+        context.scratch["decision_alternates"] = [
+            d for d in scored
+            if id(d) not in chosen_ids and d.action.capability != "wait"
+        ]
         return chosen
 
     def _llm_review(self, scored: List[Decision], chosen: List[Decision],
@@ -252,31 +434,63 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         if len(real) <= 1:
             return chosen
 
+        from ..employee import interaction_ledger as IL
+
+        cfg = context.config
+        graph_facts = context.scratch.get("graph_handle_facts") or {}
         top = scored[:10]
         lines = []
         for i, d in enumerate(top):
             p = d.action.params or {}
             target = p.get("handle") or p.get("profile_url") or p.get("tweet_url") or ""
             content = str(p.get("original_text") or p.get("brief") or p.get("text") or "")[:140]
-            lines.append(
+            line = (
                 f"[{i}] {d.action.capability} | score={d.score:.2f} | الهدف: {target} | "
                 f"المحتوى: {content} | المبرر: {str(d.action.rationale)[:100]}"
             )
+            # ما نعرفه فعلاً عن هذا الهدف: تاريخ تفاعلنا معه وما يقوله الرسم
+            # المعرفي عنه. بدونها كانت المراجعة «تختار» بلا أي معرفة بالعلاقة.
+            handle = str(p.get("handle") or p.get("profile_url") or "")
+            if handle:
+                aff, n = IL.handle_stats(cfg, handle)
+                if n:
+                    line += (f" | تاريخنا معه: تفاعلنا {n} مرة، "
+                             f"احتمال استجابته {aff:.0%}")
+                known = graph_facts.get(IL.normalize_handle(handle)) or []
+                if known:
+                    line += " | من ذاكرتك: " + "؛ ".join(str(f)[:90] for f in known[:2])
+            lines.append(line)
+
+        # حالة الميزانيات اليومية — المراجعة كانت عمياء عنها فتختار نوعاً
+        # كاد يستنفد حصته وتترك نوعاً لم يُستهلك منه شيء.
+        counters = cfg.runtime_state.counters
+        budget_lines = []
+        for cap, (counter_key, rule_key, default) in ENGAGEMENT_BUDGETS.items():
+            target = int((cfg.business_rules or {}).get(rule_key, default))
+            if target > 0:
+                budget_lines.append(
+                    f"{cap}: {int(counters.get(counter_key, 0))}/{target}")
         emo = context.scratch.get("emotion_state") or {}
+        learned = IL.summary_line(cfg)
         data = llm.complete_json(
             system=(
                 "أنت وحدة القرار النهائي لموظف ذكي يدير حساب X باحترافية. "
                 "أمامك مرشّحون حقيقيون مُقيّمون بالمنفعة. اختر التوليفة الأنسب "
                 "لهذه الدورة: قيمة حقيقية للجمهور، تنوّع في أنواع التفاعل، لا تكرار "
-                "لمواضيع/حسابات تفاعلنا معها مؤخراً. يجوز اختيار أكثر من إجراء من "
+                "لمواضيع/حسابات تفاعلنا معها مؤخراً. رجّح الأهداف التي أثبتت "
+                "تجربتنا معها استجابة، ولا تُلحّ على حساب واحد. "
+                "يجوز اختيار أكثر من إجراء من "
                 "النوع نفسه بحدود سقفه المسموح، لكن فضّل التنويع عند تساوي القيمة. "
                 "أجب JSON فقط: "
                 '{"selected": [أرقام المرشّحين], "reason": "مبرر موجز"}'
             ),
             prompt=(
                 f"{context.persona_prompt()}\n\n"
-                f"الحالة العاطفية: {emo.get('mood', 'طبيعية')}\n\n"
-                f"نشاطك الأخير (لا تكرره):\n{context.recent_activity_prompt()[:800]}\n\n"
+                f"الحالة العاطفية: {emo.get('mood', 'طبيعية')}\n"
+                + (f"{learned}\n" if learned else "")
+                + (f"ميزانياتك اليومية المستهلكة: {'، '.join(budget_lines)}\n"
+                   if budget_lines else "")
+                + f"\nنشاطك الأخير (لا تكرره):\n{context.recent_activity_prompt()[:800]}\n\n"
                 f"المرشّحون:\n" + "\n".join(lines) + "\n\n"
                 f"اختر حتى {max_actions} إجراءات (ويجوز إجراء واحد فقط إن كان الأعلى قيمة)."
             ),
@@ -290,6 +504,8 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         reason = str(data.get("reason", ""))[:200]
 
         rules = context.config.business_rules or {}
+        mention_cap = mention_reply_limit(rules)
+        max_streak = streak_limit(rules)
         picked: List[Decision] = []
         used_counts: Dict[str, int] = {}
         for i in idxs:
@@ -299,16 +515,32 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
             cap = d.action.capability
             if cap == "wait":
                 continue
-            group = cycle_group(cap)
-            if used_counts.get(group, 0) >= cycle_limit(cap, rules):
-                continue
-            used_counts[group] = used_counts.get(group, 0) + 1
+            if not (d.action.params or {}).get("owner_directed"):
+                mention = is_mention_reply(d.action)
+                # قيود البنية تسري على اختيار النموذج أيضاً: المراجعة تُرتِّب
+                # المرشّحين ولا تُلغي التنويع. النموذج يميل بثبات إلى الأفعال
+                # «الأكثر إثارة» (الاقتباس/الثريد) فيُنتج نفس السلوك كل دورة.
+                if not mention and capability_streak(context.config, cap) >= max_streak:
+                    continue
+                group = "mention_reply" if mention else cycle_group(cap)
+                limit = mention_cap if mention else cycle_limit(cap, rules)
+                if used_counts.get(group, 0) >= limit:
+                    continue
+                used_counts[group] = used_counts.get(group, 0) + 1
             d.explanation += f" | llm_review: {reason}" if reason else " | llm_review"
             picked.append(d)
             if len(picked) >= max_actions:
                 break
         # إن أعاد الـLLM اختياراً فارغاً/غير صالح نبقي اختيار المنفعة الموزونة
-        return picked or chosen
+        if not picked:
+            return chosen
+        # أوامر المالك ليست محلّ تصويت: أعِد أي إجراء موجّه أسقطته المراجعة.
+        picked_ids = {id(d) for d in picked}
+        for d in chosen:
+            if (d.action.params or {}).get("owner_directed") and id(d) not in picked_ids:
+                d.explanation += " | owner_directed: محفوظ رغم مراجعة الـLLM"
+                picked.insert(0, d)
+        return picked
 
     def _allowed(self, action: ProposedAction, context: "ExecutionContext") -> bool:
         """Enforce business rules (rate limits, quiet hours, allow-lists)."""
@@ -322,6 +554,13 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         # عطّله المستخدم صراحةً.
         if action.capability != "wait" and cycle_limit(action.capability, rules) <= 0:
             return False
+
+        # أمر صريح من المالك (موضوع موجّه / تفاعل موجّه / مهمّة حرّة من الشات):
+        # الميزانيات اليومية وأهداف النشر وُضعت لضبط السلوك التلقائي، لا لتعطيل
+        # أمر طلبه المستخدم الآن. كان «انشر عن 2» يُرفض بصمت إن بلغ الموظف هدفه
+        # اليومي — فيرى المستخدم دورة بلا أي فعل وبلا تفسير.
+        if (action.params or {}).get("owner_directed"):
+            return True
 
         # النشر: النقطة المرجعية الحاسمة لاحترام تعليمات المستخدم.
         # - daily_post_target = 0 يعني: لا نشر إطلاقاً (حتى لو اقترح الـLLM تغريدة).

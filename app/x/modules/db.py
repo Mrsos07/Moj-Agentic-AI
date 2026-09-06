@@ -96,7 +96,32 @@ def upsert_cookie(label: str, filename: str) -> int:
         return int(row['id'])
 
 
+def _cookies_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'cookies')
+
+
+def _sync_cookie_files() -> None:
+    """سجّل في القاعدة أي ملف كوكيز موجود على القرص بلا صف.
+
+    مصدر الحقيقة الفعلي هو الملفات في ``app/x/cookies/``: مسار تسجيل الدخول
+    (loginx) ينسخ الملف ثم يسجّله في القاعدة، وقد رأينا حالة وصل فيها الملف
+    ولم يصل الصف — فصار كل نشر يرجع «cookie not found» رغم أن الحساب مسجّل
+    دخوله فعلاً (liketoday5، 2026-08-05). المزامنة هنا تشفي هذا الانقسام
+    تلقائياً بدل الاعتماد على نجاح خطوتين منفصلتين دائماً.
+    """
+    try:
+        files = [f for f in os.listdir(_cookies_dir()) if f.endswith('.json')]
+    except OSError:
+        return
+    with connect() as con:
+        known = {r['filename'] for r in con.execute("SELECT filename FROM cookies")}
+    for filename in files:
+        if filename not in known:
+            upsert_cookie(filename[:-5], filename)
+
+
 def list_cookies() -> List[Dict[str, Any]]:
+    _sync_cookie_files()
     with connect() as con:
         rows = con.execute("SELECT * FROM cookies ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
@@ -105,7 +130,17 @@ def list_cookies() -> List[Dict[str, Any]]:
 def get_cookie_by_label(label: str) -> Optional[Dict[str, Any]]:
     with connect() as con:
         r = con.execute("SELECT * FROM cookies WHERE label=?", (label,)).fetchone()
-        return dict(r) if r else None
+        if r:
+            return dict(r)
+    # فولباك للملفات: الملف موجود والصف مفقود ⇒ سجّله وأعد المحاولة
+    label = (label or "").strip()
+    filename = f"{label}.json"
+    if label and os.path.isfile(os.path.join(_cookies_dir(), filename)):
+        upsert_cookie(label, filename)
+        with connect() as con:
+            r = con.execute("SELECT * FROM cookies WHERE label=?", (label,)).fetchone()
+            return dict(r) if r else None
+    return None
 
 
 def get_cookie_by_id(cookie_id: int) -> Optional[Dict[str, Any]]:

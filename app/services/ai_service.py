@@ -1,5 +1,5 @@
 from openai import AsyncOpenAI
-from app.core.config import settings
+from app.core.llm_provider import resolve_llm
 from typing import List, Dict, Optional
 import asyncio
 
@@ -14,9 +14,13 @@ FALLBACK_SYSTEM_PROMPT = (
 
 class AIService:
     def __init__(self):
+        # المزوّد يُحلّ مرة واحدة عند البناء: OpenRouter إن وُجد مفتاحه، وإلا
+        # OpenAI. اسم الموديل يأتي من نفس المصدر — تمرير "gpt-4" غير المؤهَّل
+        # إلى OpenRouter يُرفض ويعيد رداً فارغاً بصمت.
+        self._endpoint = resolve_llm()
         self.client = None
-        if settings.OPENAI_API_KEY:
-            self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        if self._endpoint.available:
+            self.client = AsyncOpenAI(**self._endpoint.client_kwargs())
         # ⚠️ Deprecated: لا تستخدم هذا في WebSocket متعدد المستخدمين — يخلط بينهم.
         # احتفظنا به للتوافق مع كود قديم محتمل، لكن المسار الجديد يستخدم
         # get_chat_response_with_history() مع تاريخ من قاعدة البيانات.
@@ -51,10 +55,10 @@ class AIService:
 
         try:
             response = await self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+                model=self._endpoint.model,
                 messages=messages,
-                max_tokens=settings.OPENAI_MAX_TOKENS,
-                temperature=settings.OPENAI_TEMPERATURE,
+                max_tokens=self._endpoint.max_tokens,
+                temperature=self._endpoint.temperature,
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -64,7 +68,7 @@ class AIService:
 
     async def get_response(self, user_message: str) -> str:
         if not self.client:
-            return "مرحباً! أنا مساعد AI. لتفعيل الذكاء الاصطناعي، يرجى إضافة OPENAI_API_KEY في ملف .env"
+            return "مرحباً! أنا مساعد AI. لتفعيل الذكاء الاصطناعي، يرجى إضافة OPENROUTER_API_KEY في ملف .env"
 
         try:
             self.conversation_history.append({
@@ -76,7 +80,7 @@ class AIService:
                 self.conversation_history = self.conversation_history[-20:]
 
             response = await self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+                model=self._endpoint.model,
                 messages=[
                     {
                         "role": "system",
@@ -84,8 +88,8 @@ class AIService:
                     },
                     *self.conversation_history
                 ],
-                max_tokens=settings.OPENAI_MAX_TOKENS,
-                temperature=settings.OPENAI_TEMPERATURE
+                max_tokens=self._endpoint.max_tokens,
+                temperature=self._endpoint.temperature
             )
 
             assistant_message = response.choices[0].message.content

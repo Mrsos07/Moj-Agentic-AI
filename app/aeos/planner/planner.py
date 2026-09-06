@@ -52,7 +52,7 @@ class SkillBasedPlanner(IPlanner):
             rationale="fallback", expected_impact=0.05, urgency=0.05, risk=0.0,
         ))
 
-        return self._dedupe(proposals)
+        return self._limit_per_target(self._dedupe(proposals), context)
 
     def _llm_ideate(self, context: "ExecutionContext") -> List[ProposedAction]:
         prompt = context.planning_prompt()
@@ -177,3 +177,79 @@ class SkillBasedPlanner(IPlanner):
             seen.add(key)
             unique.append(p)
         return unique
+
+    #: إجراءات «صاخبة» على التغريدة نفسها: كلها تُنتج ظهوراً علنياً باسمنا،
+    #: فاجتماع اثنين منها على منشور واحد في دورة واحدة سلوك سبام صريح.
+    _LOUD_CAPS = ("reply_to_user", "quote_post", "retweet_post")
+
+    #: أولوية القيمة عند التزاحم على الهدف نفسه (الأعلى يبقى)
+    _TARGET_PRIORITY = {
+        "reply_to_user": 5, "quote_post": 4, "retweet_post": 3,
+        "follow_user": 2, "like_post": 1, "bookmark_post": 0,
+    }
+
+    #: إجراءات غير علنية: صاحب الحساب لا يُشعَر بها إطلاقاً، فلا معنى لأن
+    #: تستهلك سقف «الإلحاح على حساب واحد» المقصود بمنع إغراقه بالإشعارات.
+    #: (قياس: حسابُها أسقط الحفظ من 14 إلى صفر في محاكاة 40 دورة.)
+    _SILENT_CAPS = ("bookmark_post",)
+
+    @staticmethod
+    def _limit_per_target(proposals: List[ProposedAction],
+                          context: "ExecutionContext") -> List[ProposedAction]:
+        """امنع تكدّس عدة إجراءات صاخبة على الهدف/الحساب نفسه في دورة واحدة.
+
+        ``_dedupe`` يقارن ``(capability, params)`` فقط، والمهارات تسحب كلها من
+        ``_engagement_pool`` نفسه: ``TimelineEngagerSkill`` يردّ على تغريدة،
+        و``ContentQuoterSkill`` يقتبس **نفس** التغريدة (أعلى العناصر صلةً)،
+        وقد ينضم إليهما ريتويت — ثلاثة إشعارات لصاحب المنشور من حسابٍ واحد في
+        دقيقة. الإعجاب يبقى مسموحاً مع إجراء صاخب واحد (سلوك بشري طبيعي).
+
+        أوامر المالك (``owner_directed``) لا تُمسّ إطلاقاً: هو المرجع الأعلى
+        وقد يطلب صراحةً «ردّ واقتبس نفس التغريدة».
+        """
+        from ..employee.interaction_ledger import handle_from_url, normalize_handle
+
+        rules = getattr(context.config, "business_rules", None) or {}
+        try:
+            per_handle = max(int(rules.get("max_actions_per_handle_per_cycle", 2)), 1)
+        except (TypeError, ValueError):
+            per_handle = 2
+
+        ordered = sorted(
+            proposals,
+            key=lambda p: (
+                bool((p.params or {}).get("owner_directed")),
+                SkillBasedPlanner._TARGET_PRIORITY.get(p.capability, 0),
+                p.expected_impact,
+            ),
+            reverse=True,
+        )
+        loud_targets: set = set()
+        handle_counts: dict = {}
+        kept_ids: set = set()
+        for p in ordered:
+            params = p.params or {}
+            if params.get("owner_directed") or p.capability == "wait":
+                kept_ids.add(id(p))
+                continue
+            url = str(params.get("tweet_url") or params.get("profile_url") or "").strip()
+            if url and p.capability in SkillBasedPlanner._LOUD_CAPS:
+                if url in loud_targets:
+                    logger.info("dropping %s on %s (a louder action already targets it)",
+                                p.capability, url[:60])
+                    continue
+                loud_targets.add(url)
+            handle = normalize_handle(params.get("handle") or "") or handle_from_url(url)
+            # من خاطبنا يستحق رداً على كل رسالة: لا يُطبَّق سقف الحساب على
+            # ردود المنشنات وإلا صمتنا عن شخص أرسل لنا ثلاث رسائل.
+            if handle and not params.get("is_mention_reply") \
+                    and p.capability not in SkillBasedPlanner._SILENT_CAPS:
+                if handle_counts.get(handle, 0) >= per_handle:
+                    logger.info("dropping %s on @%s (per-handle cycle cap %d)",
+                                p.capability, handle, per_handle)
+                    continue
+                handle_counts[handle] = handle_counts.get(handle, 0) + 1
+            kept_ids.add(id(p))
+
+        # أعِد الترتيب الأصلي: الترتيب هنا كان لأغراض المفاضلة فقط
+        return [p for p in proposals if id(p) in kept_ids]

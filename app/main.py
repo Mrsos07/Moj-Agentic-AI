@@ -224,6 +224,29 @@ _ACTION_PREFIXES = ("انشر", "اكتب", "غرد", "غرّد", "رد ", "رد
                     "أعجب", "لايك", "ريتويت", "احذف", "امسح")
 
 
+# مهمّة حرّة موجّهة للموظف: «روح للتايم لاين وشوف تغريدة تناسب تخصصك وردّ عليها»
+def _maybe_mission_employee(message: str, pinned_account: Optional[str],
+                            user_id: Optional[int]) -> Optional[str]:
+    """نقاش مفتوح ينتهي بتنفيذ: المستخدم يحدّد **المصدر والفعل** فقط، والموظف
+    يختار الهدف بنفسه. يعيد None إن كانت الرسالة نقاشاً أو محتوى ملصوقاً فيمرّ
+    الطلب للمعالجات الأخرى."""
+    if not (message or "").strip() or not pinned_account:
+        return None
+    try:
+        from app.aeos.bootstrap import get_platform
+        from app.aeos.services import employee_mission
+
+        platform = get_platform()
+        cfg = platform.repository.get_by_account("x", pinned_account)
+        if not cfg:
+            return None
+        return employee_mission.handle_message(
+            message, cfg, platform.llm, user_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee mission routing failed: {e}")
+        return None
+
+
 # توجيه الموظف للتفاعل مع محتوى محدّد من الشات: «تفاعل مع هذا المحتوى …»
 def _maybe_engage_employee(message: str, pinned_account: Optional[str]) -> Optional[str]:
     """إن وجّه المستخدم الموظف المثبّت للتفاعل مع محتوى محدّد ألصقه (رد/إعجاب/
@@ -297,18 +320,25 @@ def _maybe_engage_employee(message: str, pinned_account: Optional[str]) -> Optio
         cfg = platform.repository.get_by_account("x", pinned_account)
         if not cfg:
             return None
-        _threading.Thread(
-            target=platform.run_cycle_now,
-            args=(cfg.id, "manual", {"directed_engagement": {
-                "text": content, "handle": handle, "url": url,
-                "actions": sorted(actions),
-            }}),
-            daemon=True,
-        ).start()
+        from app.aeos.services import employee_mission as _EM
+
         acts_ar = "، ".join({
             "reply": "الرد", "like": "الإعجاب", "retweet": "إعادة النشر",
         }.get(a, a) for a in sorted(actions))
         snippet = _re.sub(r"\s+", " ", content).strip()[:90]
+        # المُرسِل المضمون: يعيد المحاولة إن كانت هناك دورة جارية، ويتحقّق من أن
+        # الفعل وقع فعلاً على X، ويُبلّغ الشات بالسبب إن لم يقع.
+        _threading.Thread(
+            target=_EM.dispatch_directed,
+            args=(cfg, {"force_fresh": True, "directed_engagement": {
+                "text": content, "handle": handle, "url": url,
+                "actions": sorted(actions),
+            }},
+                [_EM.EXPECTED_CAPABILITY[a] for a in sorted(actions)
+                 if a in _EM.EXPECTED_CAPABILITY],
+                f"{acts_ar} على «{snippet}»"),
+            daemon=True,
+        ).start()
         return (f"🫡 تمام! وجّهت الموظف @{pinned_account} للتفاعل ({acts_ar}) مع المحتوى: "
                 f"«{snippet}». يبحث عنه على X الآن ويتفاعل بأسلوب شخصيته، "
                 "وسيوافيك بالنتيجة هنا في الشات. ⏳")
@@ -380,14 +410,19 @@ def _maybe_direct_employee(message: str, pinned_account: Optional[str]) -> Optio
                 return (f"❗ ما عندي موضوع رقم {idx + 1} من آخر دورة. "
                         f"المواضيع المتاحة:\n{shown}")
 
-        # دورة موجّهة فورية في الخلفية (لا نحجب الـWebSocket — التنفيذ يأخذ دقائق)
-        _threading.Thread(
-            target=platform.run_cycle_now,
-            args=(cfg.id, "manual", {"directed_topic": topic}),
-            daemon=True,
-        ).start()
         # اعرض مقتطفاً نظيفاً من الطلب (سطر واحد، مضغوط المسافات)
         snippet = _re.sub(r"\s+", " ", topic).strip()[:90]
+        # دورة موجّهة فورية في الخلفية (لا نحجب الـWebSocket — التنفيذ يأخذ دقائق).
+        # عبر المُرسِل المضمون: النشر يجب أن يقع على X فعلاً، وإلا يُبلَّغ السبب.
+        from app.aeos.services import employee_mission as _EM
+
+        _threading.Thread(
+            target=_EM.dispatch_directed,
+            args=(cfg, {"directed_topic": topic},
+                  ["publish_content", "publish_thread"],
+                  f"نشر منشور عن «{snippet}»"),
+            daemon=True,
+        ).start()
         return (f"🫡 تمام! استلم الموظف @{pinned_account} الطلب: «{snippet}». "
                 "يبحث فيه الآن ويجهّز منشوراً قوياً بأسلوب شخصيته ثم ينشره، "
                 "وسيوافيك بالنتيجة والرابط هنا في الشات. ⏳")
@@ -532,6 +567,34 @@ def _maybe_answer_employee_query(message: str, pinned_account: Optional[str]) ->
         return None
     except Exception as e:  # noqa: BLE001
         print(f"Warning: employee query routing failed: {e}")
+        return None
+
+
+def _employee_open_discussion(message: str, pinned_account: Optional[str]) -> Optional[str]:
+    """نقاش مفتوح مع الموظف المثبّت بلا أي بوابة كلمات مفتاحية.
+
+    آخر محطة قبل رسالة «خارج النطاق»: عندما يوجد موظف ذكي مثبّت في الشات فالمالك
+    يخاطبه هو، فمن الخطأ أن يُجاب بقائمة خدمات البوت. النقاش مؤصَّل ببيانات
+    الموظف وآخر ما جلبه فعلاً، لا بكلام عام."""
+    if not (message or "").strip() or not pinned_account:
+        return None
+    try:
+        from app.aeos.bootstrap import get_platform
+        from app.aeos.services import insights as I
+
+        platform = get_platform()
+        cfg = platform.repository.get_by_account("x", pinned_account)
+        if not cfg:
+            return None
+        try:
+            from app.aeos.services import employee_data
+            extra = employee_data.recent_data_text(cfg.id)
+        except Exception:  # noqa: BLE001
+            extra = ""
+        return I.answer_question(cfg, message, platform.llm, cfg.id,
+                                 extra_context=extra)
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: employee open discussion failed: {e}")
         return None
 
 
@@ -915,6 +978,29 @@ async def websocket_endpoint(websocket: WebSocket):
                 if pinned_account:
                     agent_metadata["pinned_account"] = pinned_account
 
+                # ── مهمّة حرّة موجّهة («روح للتايم لاين وشوف تغريدة وردّ عليها») ──
+                mission_reply = _maybe_mission_employee(
+                    user_message, pinned_account, user_id)
+                if mission_reply:
+                    try:
+                        conv = memory_service.get_or_create_conversation(
+                            db=db, user_id=user_id, session_id=session_id)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="user", content=user_message)
+                        memory_service.add_message(
+                            db=db, conversation_id=conv.id, role="assistant",
+                            content=mission_reply, intent="aeos_employee_mission",
+                            agent="AEOS")
+                    except Exception as _e:
+                        print(f"Warning: persist employee mission failed: {_e}")
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
+                    await manager.send_message({
+                        "type": "assistant_message",
+                        "message": mission_reply,
+                        "timestamp": datetime.now().isoformat(),
+                    }, websocket)
+                    continue
+
                 # ── توجيه الموظف للتفاعل مع محتوى محدّد («تفاعل مع هذا المحتوى …») ──
                 engage_reply = _maybe_engage_employee(user_message, pinned_account)
                 if engage_reply:
@@ -1095,6 +1181,28 @@ async def websocket_endpoint(websocket: WebSocket):
                         "timestamp": datetime.now().isoformat()
                     }, websocket)
                 else:
+                    # موظف ذكي مثبّت؟ المالك يخاطبه هو، فافتح النقاش معه بدل
+                    # رسالة «خارج النطاق» — هذا ما يجعل التوجيه حواراً مفتوحاً.
+                    open_reply = _employee_open_discussion(user_message, pinned_account)
+                    if open_reply:
+                        conversation_id = agent_result.get("conversation_id")
+                        if db and conversation_id:
+                            try:
+                                memory_service.add_message(
+                                    db=db, conversation_id=conversation_id,
+                                    role="assistant", content=open_reply,
+                                    intent="aeos_employee_discussion", agent="AEOS",
+                                )
+                            except Exception as _e:  # noqa: BLE001
+                                print(f"Warning: persist employee discussion failed: {_e}")
+                        await manager.send_message({
+                            "type": "assistant_message",
+                            "message": open_reply,
+                            "metadata": {"agent": "AEOS"},
+                            "timestamp": datetime.now().isoformat(),
+                        }, websocket)
+                        continue
+
                     # الوكيل ما لقى نية مطابقة → النظام بوت خدمات، مو شات عام
                     out_of_scope_message = (
                         "🤖 أنا **موج**، بوت متخصص لإدارة حساباتك على منصات التواصل — لست شاتاً عاماً.\n\n"
