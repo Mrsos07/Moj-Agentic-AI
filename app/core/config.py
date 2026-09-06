@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
     # نفس موديل الـ embeddings السابق — تغييره يبطل متجهات الرسم البياني كلها
     OPENROUTER_EMBEDDING_MODEL: str = "openai/text-embedding-3-small"
-    OPENROUTER_IMAGE_MODEL: str = "openai/gpt-image-1"
+    OPENROUTER_IMAGE_MODEL: str = "openai/gpt-image-2"
     OPENROUTER_SITE_URL: Optional[str] = None   # ترويسة HTTP-Referer (اختياري)
     OPENROUTER_APP_NAME: Optional[str] = None   # ترويسة X-Title (اختياري)
 
