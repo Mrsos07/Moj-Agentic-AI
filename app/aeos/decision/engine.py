@@ -12,6 +12,7 @@ logged). It can be swapped for an LLM/RL policy behind :class:`IDecisionEngine`.
 from __future__ import annotations
 
 import abc
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List
@@ -407,7 +408,11 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         # الحقيقيين (لا يخترع أهدافاً) — يراعي الشخصية والحالة العاطفية
         # وسجل النشاط الأخير لتجنّب التكرار واختيار الأعلى قيمة فعلاً.
         if bool(rules.get("llm_decision_review", True)):
-            chosen = self._llm_review(scored, chosen, context, max_actions)
+            try:
+                chosen = self._llm_review(scored, chosen, context, max_actions)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "decision review failed; retaining weighted selection", exc_info=True)
 
         # مرشّحون بدلاء للحارس: عندما يرفض الحارس القرار الوحيد (شوهد مع
         # liketoday5: max_actions=1 ورُفض الرد لخروجه عن التخصص) كانت الدورة
@@ -417,6 +422,7 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         context.scratch["decision_alternates"] = [
             d for d in scored
             if id(d) not in chosen_ids and d.action.capability != "wait"
+            and d.score > 0.0 and _eligible(d)
         ]
         return chosen
 
@@ -508,7 +514,7 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         max_streak = streak_limit(rules)
         picked: List[Decision] = []
         used_counts: Dict[str, int] = {}
-        for i in idxs:
+        for i in dict.fromkeys(idxs):
             if not (0 <= i < len(top)):
                 continue
             d = top[i]

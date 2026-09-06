@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import EmployeeWizard from './EmployeeWizard'
 import {
@@ -112,6 +112,12 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
   const [skillDraft, setSkillDraft] = useState({})     // label -> {skill, summary} (معاينة قبل التفعيل)
   const [skillBusy, setSkillBusy] = useState({})       // label -> 'gen' | 'save' | 'id:<skill>'
   const [customSkills, setCustomSkills] = useState({}) // label -> [مهارات مخصّصة]
+  const [skillInput, setSkillInput] = useState({})
+  const [skillError, setSkillError] = useState({})
+  const rowsRef = useRef(rows)
+  const skillLocks = useRef({})
+  const refreshSkillsRef = useRef(null)
+  rowsRef.current = rows
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -143,7 +149,9 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
       const labels = new Set(accounts.map(a => a.label))
       agents.forEach(a => labels.add(a.account_username))
 
-      setRows(Array.from(labels).map(label => ({ label, agent: byLabel[label] || null })))
+      const nextRows = Array.from(labels).map(label => ({ label, agent: byLabel[label] || null }))
+      rowsRef.current = nextRows
+      setRows(nextRows)
       setSummary({ running: agentsRes.data?.running || 0, total: agentsRes.data?.total || labels.size })
     } catch (e) {
       setError('تعذّر تحميل الموظفين')
@@ -483,6 +491,9 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
     const f = pForm[label] || {}
     const row = rows.find(r => r.label === label)
     const a = row?.agent || {}
+    const key = skillKeyOf(label, a.employee_id)
+    if (skillLocks.current[key] || savingP[label]) return
+    setSkillDraft(prev => ({ ...prev, [key]: null }))
     setSavingP(prev => ({ ...prev, [label]: true }))
     try {
       const token = localStorage.getItem('token')
@@ -672,87 +683,198 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
     const token = localStorage.getItem('token')
     return token ? { Authorization: `Bearer ${token}` } : {}
   }
-  const employeeIdOf = (label) => rows.find(r => r.label === label)?.agent?.employee_id
-
-  const loadCustomSkills = async (label) => {
-    const empId = employeeIdOf(label)
-    if (!empId) return
+  const employeeIdOf = (label) => rowsRef.current.find(r => r.label === label)?.agent?.employee_id
+  const skillKeyOf = (label, empId) => JSON.stringify([label, empId])
+  const skillText = (value) => {
+    if (value == null) return ''
+    if (typeof value === 'string') {
+      const translated = ({ reply: 'رد', like: 'إعجاب', retweet: 'إعادة نشر', quote: 'اقتباس', follow: 'متابعة', bookmark: 'حفظ مرجع', post: 'نشر', thread: 'سلسلة منشورات', generated: 'إنشاء محلي', text: 'نص خارجي', file: 'ملف نصي', url: 'رابط خارجي' })[value]
+      return typeof translated === 'string' ? translated : value
+    }
+    if (typeof value === 'boolean') return value ? 'نعم' : 'لا'
+    if (Array.isArray(value)) return value.map(skillText).filter(Boolean).join('، ')
+    if (typeof value === 'object') {
+      if (value.msg || value.message || value.detail) return skillText(value.msg || value.message || value.detail)
+      const captions = { type: 'الإجراء', count: 'العدد', source: 'المصدر', every_cycles: 'كل عدد دورات', hours: 'الساعات المحددة', max_per_day: 'الحد اليومي', requires_mentions: 'يشترط وجود منشنات', content_brief: 'توجيه المحتوى', format: 'الصيغة' }
+      return Object.entries(value).map(([key, val]) => `${captions[key] || key}: ${skillText(val) || 'غير محدد'}`).join('؛ ')
+    }
+    return String(value)
+  }
+  const skillErrorText = (e) => skillText(e?.response?.data?.detail || e?.response?.data?.error || e?.message) || 'تعذّرت العملية. أعد المحاولة.'
+  const skillIsCurrent = (label, empId) => !!empId && employeeIdOf(label) === empId
+  const beginSkill = (label, empId, operation) => {
+    const key = skillKeyOf(label, empId)
+    if (!skillIsCurrent(label, empId) || skillLocks.current[key] || savingP[label] || delBusy[label] || busy[label]) return false
+    skillLocks.current[key] = operation
+    setSkillBusy(prev => ({ ...prev, [key]: operation }))
+    setSkillError(prev => ({ ...prev, [key]: '' }))
+    return true
+  }
+  const endSkill = (key) => {
+    delete skillLocks.current[key]
+    setSkillBusy(prev => ({ ...prev, [key]: null }))
+  }
+  const changeSkillInput = (label, empId, patch) => {
+    const key = skillKeyOf(label, empId)
+    if (!skillIsCurrent(label, empId) || skillLocks.current[key]) return
+    setSkillInput(prev => ({ ...prev, [key]: { ...prev[key], ...patch } }))
+    setSkillDraft(prev => ({ ...prev, [key]: null }))
+    setSkillError(prev => ({ ...prev, [key]: '' }))
+  }
+  const fetchCustomSkills = async (label, empId) => {
+    const res = await axios.get(`/api/aeos/employees/${encodeURIComponent(empId)}/skills`,
+      { headers: authHeaders(), timeout: 8000 })
+    if (!skillIsCurrent(label, empId)) return
+    if (res.data?.employee_id != null && res.data.employee_id !== empId) throw new Error('قائمة المهارات لا تخص الموظف الحالي.')
+    setCustomSkills(prev => ({ ...prev, [skillKeyOf(label, empId)]: res.data?.custom_skills || [] }))
+  }
+  const loadCustomSkills = async (label, empId = employeeIdOf(label)) => {
+    if (!beginSkill(label, empId, 'list')) return
+    const key = skillKeyOf(label, empId)
     try {
-      const res = await axios.get(`/api/aeos/employees/${empId}/skills`,
-        { headers: authHeaders(), timeout: 8000 })
-      setCustomSkills(prev => ({ ...prev, [label]: res.data?.custom_skills || [] }))
-    } catch { /* قائمة المهارات ليست حرجة لفتح المحرر */ }
+      await fetchCustomSkills(label, empId)
+    } catch (e) { /* قائمة المهارات ليست حرجة لفتح المحرر */
+      if (skillIsCurrent(label, empId)) setSkillError(prev => ({ ...prev, [key]: skillErrorText(e) }))
+    } finally {
+      endSkill(key)
+    }
   }
 
   // معاينة أولاً: المالك يقرأ بالعربية متى تعمل المهارة وماذا تفعل قبل تفعيلها
-  const generateSkill = async (label) => {
-    const empId = employeeIdOf(label)
-    if (!empId) { onNotify?.('فعّل الموظف أولاً حتى أُنشئ له مهارة.'); return }
-    const prompt = (skillPrompt[label] || '').trim()
-    if (!prompt) { onNotify?.('اكتب وصف المهارة التي تريدها أولاً.'); return }
-    setSkillBusy(prev => ({ ...prev, [label]: 'gen' }))
+  const generateSkill = async (label, empId) => {
+    if (!beginSkill(label, empId, 'preview')) return
+    const key = skillKeyOf(label, empId)
+    const input = skillInput[key] || {}
+    setSkillDraft(prev => ({ ...prev, [key]: null }))
     try {
-      const res = await axios.post(`/api/aeos/employees/${empId}/skills/generate`,
-        { prompt }, { headers: authHeaders(), timeout: 60000 })
-      setSkillDraft(prev => ({ ...prev, [label]: res.data }))
-    } catch (e) {
-      onNotify?.(`❌ تعذّر تصميم المهارة: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
-    } finally {
-      setSkillBusy(prev => ({ ...prev, [label]: null }))
-    }
-  }
-
-  const activateSkill = async (label) => {
-    const empId = employeeIdOf(label)
-    const draft = skillDraft[label]
-    if (!empId || !draft?.skill) return
-    setSkillBusy(prev => ({ ...prev, [label]: 'save' }))
-    try {
-      const res = await axios.post(`/api/aeos/employees/${empId}/skills`,
-        { spec: draft.skill }, { headers: authHeaders(), timeout: 20000 })
-      if (res.data?.ok) {
-        onNotify?.(`🧩 فعّلت مهارة «${res.data.skill?.label}» للموظف @${label}. سيستخدمها من الدورة القادمة.`)
-        setSkillDraft(prev => ({ ...prev, [label]: null }))
-        setSkillPrompt(prev => ({ ...prev, [label]: '' }))
-        loadCustomSkills(label)
+      let payload
+      const importing = input.mode === 'import'
+      if (!importing) {
+        const prompt = (skillPrompt[key] || '').trim()
+        if (!prompt) throw new Error('اكتب وصف المهارة التي تريدها أولاً.')
+        payload = { prompt }
+      } else if (input.source === 'url') {
+        const url = (input.url || '').trim()
+        let parsed
+        try { parsed = new URL(url) } catch { throw new Error('أدخل رابط HTTPS صالحاً لمصدر المهارة.') }
+        if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) throw new Error('يجب استخدام رابط HTTPS خارجي دون بيانات دخول.')
+        payload = { url }
+      } else {
+        const content = input.content || ''
+        if (!content.trim()) throw new Error('ألصق نص المهارة أو اختر ملفاً نصياً أولاً.')
+        if (new TextEncoder().encode(content).byteLength > 32768) throw new Error('حجم النص يجب ألا يتجاوز 32768 بايت بترميز UTF-8.')
+        payload = { content, ...(input.filename ? { filename: input.filename } : {}) }
       }
+      const res = await axios.post(`/api/aeos/employees/${encodeURIComponent(empId)}/skills/${importing ? 'import' : 'generate'}`,
+        payload, { headers: authHeaders(), timeout: 60000 })
+      if (!skillIsCurrent(label, empId)) return
+      if (res.data?.employee_id !== empId || !res.data?.skill || res.data?.saved !== false || res.data?.ok === false) throw new Error('تعذّر تأكيد معاينة غير محفوظة تخص هذا الموظف. أعد المعاينة.')
+      setSkillDraft(prev => ({ ...prev, [key]: res.data }))
     } catch (e) {
-      onNotify?.(`❌ تعذّر حفظ المهارة: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
+      if (skillIsCurrent(label, empId)) setSkillError(prev => ({ ...prev, [key]: skillErrorText(e) }))
     } finally {
-      setSkillBusy(prev => ({ ...prev, [label]: null }))
+      endSkill(key)
     }
   }
 
-  const toggleCustomSkill = async (label, skill) => {
-    const empId = employeeIdOf(label)
-    if (!empId) return
-    setSkillBusy(prev => ({ ...prev, [label]: `id:${skill.id}` }))
+  const readSkillFile = async (label, empId, file) => {
+    if (!file || !beginSkill(label, empId, 'file')) return
+    const key = skillKeyOf(label, empId)
+    setSkillDraft(prev => ({ ...prev, [key]: null }))
+    setSkillInput(prev => ({ ...prev, [key]: { ...prev[key], content: '', filename: '' } }))
     try {
-      await axios.patch(`/api/aeos/employees/${empId}/skills/${skill.id}`,
+      if (!/\.(md|txt|json)$/i.test(file.name)) throw new Error('اختر ملف .md أو .txt أو .json فقط.')
+      if (file.size > 32768) throw new Error('حجم الملف يجب ألا يتجاوز 32768 بايت.')
+      const content = await file.text()
+      if (new TextEncoder().encode(content).byteLength > 32768) throw new Error('حجم النص يجب ألا يتجاوز 32768 بايت بترميز UTF-8.')
+      if (!content.trim()) throw new Error('الملف فارغ. اختر ملفاً يحتوي على وصف المهارة.')
+      if (skillIsCurrent(label, empId)) setSkillInput(prev => ({ ...prev, [key]: { ...prev[key], content, filename: file.name } }))
+    } catch (e) {
+      if (skillIsCurrent(label, empId)) setSkillError(prev => ({ ...prev, [key]: skillErrorText(e) }))
+    } finally {
+      endSkill(key)
+    }
+  }
+
+  const activateSkill = async (label, empId) => {
+    const key = skillKeyOf(label, empId)
+    const draft = skillDraft[key]
+    if (!skillIsCurrent(label, empId) || draft?.employee_id !== empId || !draft?.skill) {
+      setSkillDraft(prev => ({ ...prev, [key]: null }))
+      setSkillError(prev => ({ ...prev, [key]: 'هذه المعاينة لا تخص الموظف الحالي. أنشئ معاينة جديدة.' }))
+      return
+    }
+    if (draft.readiness?.ready === false || !beginSkill(label, empId, 'save')) return
+    try {
+      const res = await axios.post(`/api/aeos/employees/${encodeURIComponent(empId)}/skills`,
+        { spec: draft.skill }, { headers: authHeaders(), timeout: 20000 })
+      if (!skillIsCurrent(label, empId)) return
+      if (res.data?.employee_id !== empId || !res.data?.skill || res.data?.ok === false) throw new Error('تعذّر تأكيد حفظ المهارة لهذا الموظف. حدّث القائمة قبل إعادة المحاولة.')
+      onNotify?.(`تم حفظ مهارة «${res.data.skill?.label}» للموظف @${label} فقط. ستخضع للجاهزية والحدود في الدورات القادمة.`)
+      setSkillDraft(prev => ({ ...prev, [key]: null }))
+      setSkillPrompt(prev => ({ ...prev, [key]: '' }))
+      setSkillInput(prev => ({ ...prev, [key]: { mode: prev[key]?.mode || 'create' } }))
+      await fetchCustomSkills(label, empId)
+    } catch (e) {
+      if (skillIsCurrent(label, empId)) setSkillError(prev => ({ ...prev, [key]: skillErrorText(e) }))
+    } finally {
+      endSkill(key)
+    }
+  }
+
+  const toggleCustomSkill = async (label, empId, skill) => {
+    if (!skill.enabled && skill.readiness?.ready === false) return
+    if (!beginSkill(label, empId, `id:${skill.id}`)) return
+    const key = skillKeyOf(label, empId)
+    try {
+      await axios.patch(`/api/aeos/employees/${encodeURIComponent(empId)}/skills/${encodeURIComponent(skill.id)}`,
         { enabled: !skill.enabled }, { headers: authHeaders(), timeout: 15000 })
-      loadCustomSkills(label)
-    } catch {
-      onNotify?.('❌ تعذّر تغيير حالة المهارة.')
+      if (skillIsCurrent(label, empId)) await fetchCustomSkills(label, empId)
+    } catch (e) {
+      if (skillIsCurrent(label, empId)) setSkillError(prev => ({ ...prev, [key]: skillErrorText(e) }))
     } finally {
-      setSkillBusy(prev => ({ ...prev, [label]: null }))
+      endSkill(key)
     }
   }
 
-  const deleteCustomSkill = async (label, skill) => {
-    const empId = employeeIdOf(label)
-    if (!empId) return
-    if (!window.confirm(`حذف مهارة «${skill.label}» نهائياً؟`)) return
-    setSkillBusy(prev => ({ ...prev, [label]: `id:${skill.id}` }))
+  const deleteCustomSkill = async (label, empId, skill) => {
+    if (!skillIsCurrent(label, empId) || skillLocks.current[skillKeyOf(label, empId)]) return
+    if (!window.confirm(`حذف مهارة «${skill.label}» من الموظف @${label} نهائياً؟`)) return
+    if (!beginSkill(label, empId, `id:${skill.id}`)) return
+    const key = skillKeyOf(label, empId)
     try {
-      await axios.delete(`/api/aeos/employees/${empId}/skills/${skill.id}`,
+      await axios.delete(`/api/aeos/employees/${encodeURIComponent(empId)}/skills/${encodeURIComponent(skill.id)}`,
         { headers: authHeaders(), timeout: 15000 })
-      onNotify?.(`🗑️ حُذفت مهارة «${skill.label}».`)
-      loadCustomSkills(label)
-    } catch {
-      onNotify?.('❌ تعذّر حذف المهارة.')
+      if (!skillIsCurrent(label, empId)) return
+      onNotify?.(`حُذفت مهارة «${skill.label}» من الموظف @${label}.`)
+      await fetchCustomSkills(label, empId)
+    } catch (e) {
+      if (skillIsCurrent(label, empId)) setSkillError(prev => ({ ...prev, [key]: skillErrorText(e) }))
     } finally {
-      setSkillBusy(prev => ({ ...prev, [label]: null }))
+      endSkill(key)
     }
+  }
+
+  refreshSkillsRef.current = loadCustomSkills
+  useEffect(() => {
+    if (!open) return
+    rows.forEach(({ label, agent }) => {
+      if (expanded[label] && agent?.employee_id) refreshSkillsRef.current(label, agent.employee_id)
+    })
+  }, [rows, expanded, open, savingP, busy])
+
+  const skillReadiness = (readiness, warnings = []) => {
+    const messages = [...new Set([...(Array.isArray(warnings) ? warnings : []), ...(readiness?.warnings || [])])]
+    return (
+      <div className="text-[11px] space-y-1 text-text-secondary-light dark:text-text-secondary-dark">
+        <p className={readiness?.ready === false ? 'text-amber-700 dark:text-amber-300' : ''}>
+          الجاهزية: {readiness?.ready === true ? 'جاهزة وفق إعدادات الموظف المحفوظة' : readiness?.ready === false ? 'غير جاهزة للتفعيل' : 'غير متاحة؛ حدّث القائمة للتحقق'}
+        </p>
+        {!!readiness?.missing_mcp?.length && <p>أدوات ناقصة: {readiness.missing_mcp.map(mc => MCP_LABELS[mc] || mc).join('، ')}</p>}
+        {!!readiness?.blocked_capabilities?.length && <p>قدرات غير متاحة: {skillText(readiness.blocked_capabilities)}</p>}
+        {messages.length > 0 && <ul className="list-disc list-inside text-amber-700 dark:text-amber-300">{messages.map((message, index) => <li key={index}>{skillText(message)}</li>)}</ul>}
+      </div>
+    )
   }
 
   // ── فتح شات مخصّص مرتبط بالموظف: يثبّت حسابه ويفتح جلسة نقاش خاصة به ──
@@ -883,6 +1005,13 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
               const hs = agent?.active_hours_start ?? 8
               const he = agent?.active_hours_end ?? 23
               const cycles = agent?.cycles_completed ?? 0
+              const employeeId = agent?.employee_id
+              const skillKey = skillKeyOf(label, employeeId)
+              const skillForm = skillInput[skillKey] || {}
+              const skillMode = skillForm.mode || 'create'
+              const draft = skillDraft[skillKey]?.employee_id === employeeId ? skillDraft[skillKey] : null
+              const skillsDisabled = !employeeId || !!skillBusy[skillKey] || !!savingP[label] || !!delBusy[label] || !!busy[label]
+              const skillInputId = `employee-skill-${encodeURIComponent(label)}-${encodeURIComponent(employeeId || 'none')}`
               return (
                 <div key={label} className="rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark p-4">
                   <div className="flex items-center justify-between gap-3">
@@ -902,7 +1031,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                         type="checkbox"
                         className="sr-only peer"
                         checked={enabled}
-                        disabled={busy[label]}
+                        disabled={busy[label] || !!skillBusy[skillKey]}
                         onChange={(e) => toggle(label, e.target.checked)}
                       />
                       <div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 rounded-full peer peer-checked:bg-primary after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5 rtl:peer-checked:after:-translate-x-5" />
@@ -1116,7 +1245,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                   <div className="flex items-center gap-2 mt-3 pt-3 border-t border-border-light dark:border-border-dark">
                     <button
                       onClick={() => deleteRow(label, agent, false)}
-                      disabled={delBusy[label] || !agent?.employee_id}
+                      disabled={delBusy[label] || !agent?.employee_id || !!skillBusy[skillKey]}
                       title="حذف الموظف الذكي فقط (يبقى الحساب/الكوكيز)"
                       className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-lg border border-red-300 dark:border-red-500/40 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
@@ -1124,7 +1253,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                     </button>
                     <button
                       onClick={() => deleteRow(label, agent, true)}
-                      disabled={delBusy[label]}
+                      disabled={delBusy[label] || !!skillBusy[skillKey]}
                       title="حذف الموظف الذكي والحساب المرتبط (ملف الكوكيز) نهائياً"
                       className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
@@ -1317,7 +1446,19 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                       </div>
 
                       <div>
-                        <label className="block text-[11px] text-text-secondary-light dark:text-text-secondary-dark mb-1">المهارات (Skills)</label>
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                          <h4 className="text-xs font-semibold text-text-primary-light dark:text-text-primary-dark">المهارات (Skills)</h4>
+                          <div className="flex gap-2" role="group" aria-label={`إضافة مهارة للموظف @${label}`}>
+                            {[['create', 'إنشاء مهارة'], ['import', 'جلب مهارة']].map(([mode, caption]) => (
+                              <button key={mode} type="button" aria-pressed={skillMode === mode}
+                                aria-controls={`${skillInputId}-editor`} disabled={skillsDisabled}
+                                onClick={() => changeSkillInput(label, employeeId, { mode })}
+                                className={`px-3 py-1.5 rounded-lg border text-xs font-medium disabled:opacity-50 ${skillMode === mode ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-indigo-400 text-indigo-700 dark:text-indigo-300'}`}>
+                                {caption}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                         <div className="flex flex-wrap gap-1.5">
                           {(catalog.skills.length ? catalog.skills : ['daily_content_creator','community_engager','trend_watcher']).map(sk => {
                             const on = (pForm[label]?.skills || []).includes(sk)
@@ -1333,76 +1474,142 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
 
                       {/* ── مهارة مخصّصة لهذا الموظف من برومبت ── */}
                       {settingsGroup(
-                        '🧩 اصنع مهارة خاصة بهذا الموظف',
-                        'اكتب بلغتك ما تريده أن يتقنه، فيتحوّل وصفك إلى مهارة يستخدمها في دوراته: متى تعمل، من أي مصدر يختار الهدف، وأي إجراء ينفّذ. تبقى المهارة خاضعة لحارس الشخصية وسقوف الدورة والميزانيات اليومية.',
-                        <div className="space-y-2">
-                          <textarea rows={3}
-                            value={skillPrompt[label] || ''}
-                            onChange={(e) => setSkillPrompt(prev => ({ ...prev, [label]: e.target.value }))}
-                            placeholder="مثال: كل صباح اختر أقوى تغريدة في التايم لاين عن الذكاء الاصطناعي واقتبسها بتعليق تحليلي، وردّ على كل من يسألني عن الأدوات."
-                            className="w-full text-sm px-2 py-1.5 rounded-lg border border-border-light dark:border-border-dark bg-transparent text-text-primary-light dark:text-text-primary-dark resize-y" />
-                          <div className="flex gap-2">
-                            <button type="button" onClick={() => generateSkill(label)}
-                              disabled={skillBusy[label] === 'gen'}
+                        'فهم المهارة ومعاينة التنفيذ',
+                        `هذه المهارات محلية للموظف @${label} فقط، ولا تُضاف إلى الكتالوج العام. المعاينة لا تحفظ شيئاً ولا تدرّب النموذج؛ بعد التفعيل تُستخدم في الدورات القادمة وفق حارس الشخصية والأدوات والميزانيات.`,
+                        <div id={`${skillInputId}-editor`} role="group" aria-label={`فهم المهارة ومعاينة التنفيذ للموظف @${label}`} aria-busy={!!skillBusy[skillKey]} className="space-y-2">
+                          {!employeeId && <p className="text-xs text-amber-700 dark:text-amber-300">فعّل الموظف أولاً لإنشاء أو جلب مهارة تخصّه.</p>}
+                          {skillMode === 'create' ? (
+                            <div>
+                              <label htmlFor={`${skillInputId}-prompt`} className={capCls}>وصف المهارة المطلوب إنشاؤها</label>
+                              <textarea id={`${skillInputId}-prompt`} rows={3} disabled={skillsDisabled}
+                                value={skillPrompt[skillKey] || ''}
+                                onChange={(e) => {
+                                  if (skillLocks.current[skillKey] || !skillIsCurrent(label, employeeId)) return
+                                  changeSkillInput(label, employeeId, {})
+                                  setSkillPrompt(prev => ({ ...prev, [skillKey]: e.target.value }))
+                                }}
+                                placeholder="صف متى تعمل المهارة، ومن أين تختار الهدف، وما الإجراء المطلوب."
+                                className={`${inputCls} resize-y disabled:opacity-50`} />
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <div role="group" aria-label="مصدر المهارة الخارجية" className="flex flex-wrap gap-2">
+                                {[['text', 'نص أو ملف'], ['url', 'رابط HTTPS']].map(([source, caption]) => (
+                                  <button key={source} type="button" aria-pressed={(skillForm.source || 'text') === source}
+                                    disabled={skillsDisabled} onClick={() => changeSkillInput(label, employeeId, { source })}
+                                    className={`text-xs px-3 py-1 rounded-lg border disabled:opacity-50 ${(skillForm.source || 'text') === source ? 'bg-primary text-white border-primary' : 'border-border-light dark:border-border-dark text-text-secondary-light dark:text-text-secondary-dark'}`}>
+                                    {caption}
+                                  </button>
+                                ))}
+                              </div>
+                              {skillForm.source === 'url' ? (
+                                <div>
+                                  <label htmlFor={`${skillInputId}-url`} className={capCls}>رابط HTTPS خارجي لملف المهارة</label>
+                                  <input id={`${skillInputId}-url`} type="url" dir="ltr" disabled={skillsDisabled}
+                                    value={skillForm.url || ''} placeholder="https://example.com/SKILL.md"
+                                    onChange={(e) => changeSkillInput(label, employeeId, { url: e.target.value })}
+                                    className={inputCls} />
+                                  <p className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">الخادم يجلب الرابط ويتحقق منه؛ لا يُفتح أو يُنفّذ محتواه في المتصفح.</p>
+                                </div>
+                              ) : (
+                                <div className="space-y-2">
+                                  <div>
+                                    <label htmlFor={`${skillInputId}-file`} className={capCls}>قراءة ملف مهارة (.md أو .txt أو .json، حتى 32768 بايت)</label>
+                                    <input key={skillKey} id={`${skillInputId}-file`} type="file" accept=".md,.txt,.json"
+                                      disabled={skillsDisabled} className={`${inputCls} text-xs`}
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0]
+                                        e.target.value = ''
+                                        readSkillFile(label, employeeId, file)
+                                      }} />
+                                  </div>
+                                  {skillForm.filename && <p className="text-[11px] break-all text-text-secondary-light dark:text-text-secondary-dark">الملف المقروء: {skillForm.filename}</p>}
+                                  <label htmlFor={`${skillInputId}-content`} className={capCls}>محتوى المهارة (JSON أو Markdown أو نص عادي)</label>
+                                  <textarea id={`${skillInputId}-content`} rows={4} disabled={skillsDisabled}
+                                    value={skillForm.content || ''}
+                                    onChange={(e) => changeSkillInput(label, employeeId, { content: e.target.value, filename: '' })}
+                                    className={`${inputCls} resize-y`} />
+                                  <p className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">{new TextEncoder().encode(skillForm.content || '').byteLength} / 32768 بايت UTF-8. يُرسل النص فقط للمعاينة، دون رفع أو تشغيل ملفات تنفيذية.</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <div className="flex flex-wrap gap-2">
+                            <button type="button" onClick={() => generateSkill(label, employeeId)}
+                              disabled={skillsDisabled || (skillMode === 'create' ? !(skillPrompt[skillKey] || '').trim() : skillForm.source === 'url' ? !(skillForm.url || '').trim() : !(skillForm.content || '').trim() || new TextEncoder().encode(skillForm.content || '').byteLength > 32768)}
                               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium disabled:opacity-50">
-                              {skillBusy[label] === 'gen'
-                                ? (<><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> جارٍ التصميم...</>)
-                                : '✨ صمّم المهارة'}
+                              {skillBusy[skillKey] === 'preview' ? 'جارٍ فهم المهارة...' : 'فهم المهارة ومعاينة التنفيذ'}
                             </button>
-                            <button type="button" onClick={() => loadCustomSkills(label)}
-                              className="px-3 py-1.5 rounded-lg border border-border-light dark:border-border-dark text-xs text-text-secondary-light dark:text-text-secondary-dark">
-                              تحديث القائمة
+                            <button type="button" onClick={() => loadCustomSkills(label, employeeId)} disabled={skillsDisabled}
+                              className="px-3 py-1.5 rounded-lg border border-border-light dark:border-border-dark text-xs text-text-secondary-light dark:text-text-secondary-dark disabled:opacity-50">
+                              تحديث القائمة والجاهزية
                             </button>
                           </div>
+                          {skillBusy[skillKey] && <p role="status" className="text-xs text-text-secondary-light dark:text-text-secondary-dark">{skillBusy[skillKey] === 'file' ? 'جارٍ قراءة النص...' : skillBusy[skillKey] === 'list' ? 'جارٍ تحميل مهارات الموظف...' : 'جارٍ تنفيذ الطلب لهذا الموظف...'}</p>}
+                          {skillError[skillKey] && <p role="alert" className="text-xs text-red-600 dark:text-red-400 whitespace-pre-wrap">{skillError[skillKey]}</p>}
 
                           {/* معاينة المهارة قبل التفعيل */}
-                          {skillDraft[label]?.skill && (
-                            <div className="rounded-lg border border-indigo-400/50 bg-indigo-50 dark:bg-indigo-900/20 p-2.5 space-y-2">
+                          {draft?.skill && (
+                            <div role="region" aria-label={`معاينة مهارة للموظف @${label}`} className="rounded-lg border border-indigo-400/50 bg-indigo-50 dark:bg-indigo-900/20 p-2.5 space-y-2">
                               <div className="text-xs font-semibold text-text-primary-light dark:text-text-primary-dark">
-                                {skillDraft[label].skill.label}
+                                {skillText(draft.skill.label)}
                               </div>
+                              <p className="text-[11px] break-all text-text-secondary-light dark:text-text-secondary-dark">معاينة غير محفوظة للموظف @{label} فقط — المعرّف: {draft.employee_id}</p>
                               <pre className="text-[11px] whitespace-pre-wrap leading-relaxed text-text-secondary-light dark:text-text-secondary-dark font-sans">
-                                {skillDraft[label].summary}
+                                {skillText(draft.summary)}
                               </pre>
-                              <div className="flex gap-2">
-                                <button type="button" onClick={() => activateSkill(label)}
-                                  disabled={skillBusy[label] === 'save'}
+                              <dl className="text-[11px] space-y-1 text-text-secondary-light dark:text-text-secondary-dark">
+                                <div><dt className="font-medium">القدرات والإجراءات</dt><dd>{skillText(draft.skill.capabilities || draft.skill.actions) || 'راجع ملخص التنفيذ أعلاه.'}</dd></div>
+                                <div><dt className="font-medium">متى تعمل</dt><dd>{skillText(draft.skill.trigger || draft.skill.triggers) || 'وفق الملخص وجدولة الموظف.'}</dd></div>
+                                <div><dt className="font-medium">المتطلبات والأدوات</dt><dd>{skillText(draft.skill.required_mcp || draft.skill.requirements) || 'تُراجع وفق إعدادات الموظف المحفوظة والجاهزية أدناه.'}</dd></div>
+                              </dl>
+                              {skillReadiness(draft.readiness, draft.warnings)}
+                              {draft.readiness?.ready === false && <p className="text-[11px] text-amber-700 dark:text-amber-300">وفّر الأدوات والصلاحيات المطلوبة واحفظ إعدادات الموظف، ثم أعد المعاينة قبل التفعيل.</p>}
+                              <div className="flex flex-wrap gap-2">
+                                <button type="button" onClick={() => activateSkill(label, employeeId)}
+                                  disabled={skillsDisabled || draft.employee_id !== employeeId || draft.readiness?.ready === false}
                                   className="px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-medium disabled:opacity-50">
-                                  {skillBusy[label] === 'save' ? 'جارٍ التفعيل...' : '✅ تفعيل المهارة'}
+                                  {skillBusy[skillKey] === 'save' ? 'جارٍ التفعيل...' : `تفعيل المهارة لـ @${label} فقط`}
                                 </button>
-                                <button type="button"
-                                  onClick={() => setSkillDraft(prev => ({ ...prev, [label]: null }))}
-                                  className="px-3 py-1.5 rounded-lg border border-border-light dark:border-border-dark text-xs text-text-secondary-light dark:text-text-secondary-dark">
-                                  إلغاء
+                                <button type="button" disabled={skillsDisabled}
+                                  onClick={() => changeSkillInput(label, employeeId, {})}
+                                  className="px-3 py-1.5 rounded-lg border border-border-light dark:border-border-dark text-xs text-text-secondary-light dark:text-text-secondary-dark disabled:opacity-50">
+                                  إلغاء المعاينة
                                 </button>
                               </div>
                             </div>
                           )}
 
                           {/* المهارات المخصّصة الحالية */}
-                          {(customSkills[label] || []).map(sk => (
+                          <h5 className="text-xs font-semibold text-text-primary-light dark:text-text-primary-dark">المهارات الخاصة الحالية لـ @{label}</h5>
+                          {customSkills[skillKey]?.length === 0 && <p className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">لا توجد مهارات خاصة محفوظة لهذا الموظف بعد.</p>}
+                          {(customSkills[skillKey] || []).map(sk => (
                             <div key={sk.id}
                               className="rounded-lg border border-border-light dark:border-border-dark p-2 space-y-1.5">
                               <div className="flex items-center justify-between gap-2">
                                 <span className={`text-xs font-medium ${sk.enabled ? 'text-text-primary-light dark:text-text-primary-dark' : 'text-text-secondary-light dark:text-text-secondary-dark line-through'}`}>
-                                  {sk.label}
+                                  {skillText(sk.label)}
                                 </span>
                                 <div className="flex items-center gap-1.5 shrink-0">
-                                  <button type="button" onClick={() => toggleCustomSkill(label, sk)}
-                                    disabled={skillBusy[label] === `id:${sk.id}`}
-                                    className={`text-[11px] px-2 py-1 rounded-full border ${sk.enabled ? 'bg-primary text-white border-primary' : 'border-border-light dark:border-border-dark text-text-secondary-light dark:text-text-secondary-dark'}`}>
+                                  <button type="button" onClick={() => toggleCustomSkill(label, employeeId, sk)}
+                                    aria-pressed={!!sk.enabled} aria-label={`${sk.enabled ? 'إيقاف' : 'تفعيل'} مهارة ${sk.label} للموظف @${label}`}
+                                    disabled={skillsDisabled || (!sk.enabled && sk.readiness?.ready === false)}
+                                    className={`text-[11px] px-2 py-1 rounded-full border disabled:opacity-50 ${sk.enabled ? 'bg-primary text-white border-primary' : 'border-border-light dark:border-border-dark text-text-secondary-light dark:text-text-secondary-dark'}`}>
                                     {sk.enabled ? 'مفعّلة' : 'موقوفة'}
                                   </button>
-                                  <button type="button" onClick={() => deleteCustomSkill(label, sk)}
-                                    disabled={skillBusy[label] === `id:${sk.id}`}
-                                    className="text-[11px] px-2 py-1 rounded-full border border-red-400/60 text-red-500">
+                                  <button type="button" onClick={() => deleteCustomSkill(label, employeeId, sk)}
+                                    disabled={skillsDisabled} aria-label={`حذف مهارة ${sk.label} من الموظف @${label}`}
+                                    className="text-[11px] px-2 py-1 rounded-full border border-red-400/60 text-red-500 disabled:opacity-50">
                                     حذف
                                   </button>
                                 </div>
                               </div>
                               <pre className="text-[10px] whitespace-pre-wrap leading-relaxed text-text-secondary-light dark:text-text-secondary-dark font-sans">
-                                {sk.summary}
+                                {skillText(sk.summary)}
                               </pre>
+                              <p className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">مرات التنفيذ اليوم: {sk.runs_today ?? 'غير متاحة'}</p>
+                              {sk.source && <p className="text-[11px] break-all text-text-secondary-light dark:text-text-secondary-dark">المصدر: {skillText(sk.source.kind)}{sk.source.name ? ` — ${skillText(sk.source.name)}` : ''}</p>}
+                              {skillReadiness(sk.readiness, sk.warnings)}
                             </div>
                           ))}
                         </div>
@@ -1556,7 +1763,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
 
                       <button
                         onClick={() => savePersona(label)}
-                        disabled={savingP[label]}
+                        disabled={savingP[label] || !!skillBusy[skillKey]}
                         className="w-full flex items-center justify-center gap-2 mt-1 px-3 py-2 rounded-lg bg-primary hover:bg-secondary text-white text-sm font-medium disabled:opacity-50"
                       >
                         <MdSave size={18} /> {savingP[label] ? 'جارِ الحفظ...' : 'حفظ التعليمات والبرسونا'}
