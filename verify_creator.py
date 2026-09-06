@@ -173,9 +173,40 @@ def check_learning_from_performance() -> None:
     check("تقرير الأداء يحسب عدد المنشورات المقيسة", report["samples"] == 6,
           f"samples={report['samples']}")
 
-    fmt_insight_wins, _ = _with(thread_eng=1, insight_eng=250)
-    check("وينقلب الاختيار حين ينقلب الأداء (زبدة 250 مقابل ثريد 1)",
-          fmt_insight_wins == "insight", f"اختار {fmt_insight_wins}")
+    # انقلاب الأداء: الأنجح يجب أن يغلب **على مدى عدة اختيارات** لا في اختيار
+    # واحد. سقف التتابع (max_same_choice_streak) يفرض تنويعاً مقصوداً: بعد
+    # تكرار صيغة مرتين يُجرَّب غيرها مرة، ثم يعود الأنجح. القياس على اختيار
+    # واحد يخفي هذا السلوك ويصادم مطلب «لا تكرار».
+    def _choices_over(n: int, thread_eng: int, insight_eng: int) -> list:
+        cfg = make_config(content_formats=["thread", "insight"])
+        measured = []
+        for i in range(3):
+            url = f"https://x.com/me/status/th{i}"
+            strategy.record_published(cfg, url=url, text="ثريد",
+                                      pillar="الذكاء الاصطناعي",
+                                      format_id="thread", parts=4)
+            measured.append({"url": url, "likes": thread_eng, "reposts": 0,
+                             "replies": 0, "views": thread_eng * 10})
+        strategy.update_metrics(cfg, measured)
+        out = []
+        for i in range(n):
+            fmt = strategy.choose_plan(cfg)["format"]
+            out.append(fmt)
+            url = f"https://x.com/me/status/live{i}"
+            strategy.record_published(cfg, url=url, text="x", pillar="أدوات التعليم",
+                                      format_id=fmt, parts=1)
+            eng = insight_eng if fmt == "insight" else thread_eng
+            strategy.update_metrics(cfg, [{"url": url, "likes": eng, "reposts": 0,
+                                           "replies": 0, "views": eng * 10}])
+        return out
+
+    picks = _choices_over(6, thread_eng=1, insight_eng=250)
+    check("الأنجح يغلب حين ينقلب الأداء (زبدة 250 مقابل ثريد 1)",
+          picks.count("insight") > picks.count("thread"), str(picks))
+    check("ولا يتكرّر أكثر من سقف التتابع مرتين متتاليتين",
+          "insight" in picks and max(
+              (len(list(g)) for _, g in __import__("itertools").groupby(picks)),
+              default=0) <= 2, str(picks))
 
     # الاستكشاف: صيغة لم تُجرَّب يجب أن تُختبر ولو كان لغيرها أداء متوسط
     cfg = make_config(content_formats=["insight", "story"], strategy_exploration=0.9)
@@ -266,8 +297,16 @@ def check_publish_and_engage_together() -> None:
     check("مهارة المحتوى لم تعد تصمت عند وجود فرص تفاعل", bool(content),
           f"{len(content)} اقتراح: {content[0].capability if content else '-'}")
 
-    proposals = content + TimelineEngagerSkill().propose(ctx) \
-        + ContentQuoterSkill().propose(ctx) + SwipeFileSkill().propose(ctx)
+    # الترتيب ليس تفصيلاً: المهارات تحجز أهدافها من حوض واحد، فالأفعال النادرة
+    # (اقتباس/حفظ) يجب أن تسبق الوفيرة (إعجاب) وإلا لم تجد هدفاً أبداً. نستدعيها
+    # بترتيب ``claim_priority`` نفسه الذي يستعمله المُشغّل الحقيقي.
+    engagers = sorted(
+        [TimelineEngagerSkill(), ContentQuoterSkill(), SwipeFileSkill()],
+        key=lambda s: s.claim_priority, reverse=True,
+    )
+    proposals = list(content)
+    for skill in engagers:
+        proposals += skill.propose(ctx)
     caps = {p.capability for p in proposals}
     check("الأدوات الجديدة تُقترح فعلاً (اقتباس + حفظ مرجع)",
           "quote_post" in caps and "bookmark_post" in caps, str(sorted(caps)))

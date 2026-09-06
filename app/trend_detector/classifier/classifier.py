@@ -7,17 +7,16 @@ from typing import List
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
+from app.core.llm_provider import resolve_llm
 from app.trend_detector.models import Candidate, Classification
 from app.trend_detector.config import (
-    OPENAI_API_KEY,
-    OPENAI_MODEL,
     CLASSIFIER_CATEGORIES,
     SENSITIVITY_LEVELS,
 )
 
 
 class Classifier:
-    """Classify candidates using OpenAI LLM"""
+    """Classify candidates using the configured LLM (OpenRouter / OpenAI)"""
 
     SYSTEM_PROMPT = """أنت محلل محتوى متخصص في تصنيف الترندات والمحتوى الرائج.
 مهمتك تصنيف المحتوى التالي وتحليله.
@@ -38,7 +37,7 @@ class Classifier:
 مستويات الحساسية: """ + ", ".join(SENSITIVITY_LEVELS)
 
     def is_configured(self) -> bool:
-        return bool(OPENAI_API_KEY)
+        return resolve_llm().available
 
     def _build_user_prompt(self, candidate: Candidate) -> str:
         """Build the user message for classification"""
@@ -58,16 +57,13 @@ class Classifier:
 
         return "\n".join(parts)
 
-    async def _classify_with_openai(self, prompt: str) -> dict:
-        """Call OpenAI API for classification"""
+    async def _classify_with_llm(self, prompt: str) -> dict:
+        """Call the configured chat-completions API for classification"""
         import aiohttp
 
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
+        llm = resolve_llm()
         payload = {
-            "model": OPENAI_MODEL,
+            "model": llm.model,
             "messages": [
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -78,13 +74,13 @@ class Classifier:
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
+                llm.chat_url,
+                headers=llm.auth_headers(),
                 json=payload,
             ) as resp:
                 if resp.status != 200:
                     error = await resp.text()
-                    print(f"[Classifier] OpenAI error {resp.status}: {error}")
+                    print(f"[Classifier] {llm.provider} error {resp.status}: {error}")
                     return {}
 
                 data = await resp.json()
@@ -93,7 +89,7 @@ class Classifier:
                 try:
                     content = data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError, TypeError):
-                    print(f"[Classifier] Unexpected OpenAI response structure: {str(data)[:300]}")
+                    print(f"[Classifier] Unexpected {llm.provider} response structure: {str(data)[:300]}")
                     return {}
 
                 # Parse JSON from response
@@ -109,7 +105,7 @@ class Classifier:
                     return {}
 
     def _fallback_classify(self, candidate: Candidate) -> dict:
-        """Simple keyword-based fallback when OpenAI is unavailable"""
+        """Simple keyword-based fallback when the LLM is unavailable"""
         title_lower = (candidate.title or "").lower()
         keywords_lower = (candidate.keywords or "").lower()
         combined = f"{title_lower} {keywords_lower}"
@@ -147,7 +143,7 @@ class Classifier:
     async def classify(self, candidates: List[Candidate], db: Session) -> List[Classification]:
         """
         Classify HOT candidates.
-        Uses OpenAI if available, falls back to keyword matching.
+        Uses the configured LLM if available, falls back to keyword matching.
         Returns list of Classification records.
         """
         classifications = []
@@ -165,7 +161,7 @@ class Classifier:
 
             if self.is_configured():
                 prompt = self._build_user_prompt(candidate)
-                result = await self._classify_with_openai(prompt)
+                result = await self._classify_with_llm(prompt)
             else:
                 result = {}
 

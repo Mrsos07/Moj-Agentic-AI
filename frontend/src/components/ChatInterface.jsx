@@ -281,6 +281,14 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     } else if (data.type === 'assistant_message') {
       // تجاهل الرسائل الفارغة أو null
       if (data.message && data.message !== null) {
+        // مع أكثر من موظف فعال: رسائل كل موظف تحمل session_id محادثته
+        // (emp_<account>). نعرضها هنا فقط إذا كانت محادثته هي المفتوحة —
+        // وإلا تبقى محفوظة في محادثتها ويكفي تحديث الشريط الجانبي.
+        const openSession = localStorage.getItem('session_id')
+        if (data.session_id && openSession && data.session_id !== openSession) {
+          refreshSidebarConversations()
+          return
+        }
         setMessages(prev => [...prev, {
           id: Date.now(),
           type: 'assistant',
@@ -486,7 +494,17 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
         setMessages(loadedMessages)
         
         // تحديث session_id للمحادثة المحملة
-        localStorage.setItem('session_id', conv?.session_id || payload?.session_id || `session_${conversationId}`)
+        const loadedSession = conv?.session_id || payload?.session_id || `session_${conversationId}`
+        localStorage.setItem('session_id', loadedSession)
+
+        // محادثة موظف (emp_<account>)؟ ثبّت حسابه تلقائياً — بدون هذا تبقى
+        // أوامر الشات («انشر عن…»، «تفاعل مع…») موجّهة للموظف المثبّت السابق
+        // (الأول عادةً) رغم أنك تحادث موظفاً آخر.
+        if (loadedSession.startsWith('emp_')) {
+          const label = loadedSession.slice(4)
+          setPinnedAccount(label)
+          setEmployeeChat(label)
+        }
         refreshSidebarConversations()
       }
     } catch (error) {

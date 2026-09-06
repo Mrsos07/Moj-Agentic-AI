@@ -36,6 +36,19 @@ class ISkill(abc.ABC):
     name: str
     #: capabilities this skill relies on
     uses_capabilities: List[str] = []
+    #: ترتيب حجز الأهداف: الأعلى يختار هدفه أولاً من حوض التفاعل المشترك.
+    #: ضروري لأن المهارات كلها تقرأ نفس الحوض بنفس الترتيب، فمن يسبق يأخذ
+    #: أفضل الأهداف. الأفعال **النادرة عالية القيمة** (اقتباس: 2 يومياً) يجب
+    #: أن تسبق الوفيرة (إعجاب: 12 يومياً) التي تجد بديلاً دائماً — وإلا صفر
+    #: اقتباس/حفظ في 40 دورة (مُقاس). لا يجوز أن يحدّد هذا الترتيبَ ترتيبُ
+    #: ``installed_skills`` المحفوظ في قاعدة البيانات: إنه عرضي وقديم.
+    claim_priority: int = 0
+
+    #: always resolved regardless of ``installed_skills`` — for skills that only
+    #: react to an explicit owner directive in the event payload (they propose
+    #: nothing otherwise). Without this, an employee created before the skill
+    #: existed would silently ignore the owner's command.
+    always_on: bool = False
 
     @abc.abstractmethod
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:

@@ -90,7 +90,7 @@ class MainAgent:
 
             if confidence < 0.5:
                 print(f"[DEBUG MainAgent] LOW confidence ({confidence}) — falling back to AI")
-                # main.py سيمرر الرسالة لـ OpenAI كـ fallback
+                # main.py سيمرر الرسالة لمزوّد الـ LLM كـ fallback
                 return {
                     "success": False,
                     "message": None,

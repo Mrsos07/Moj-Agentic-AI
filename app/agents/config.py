@@ -23,12 +23,32 @@ def get_llm_config() -> Dict[str, Any]:
         قاموس إعدادات LLM
     """
     load_dotenv(AGENTS_ENV_FILE)
-    
-    api_type = os.getenv("LLM_API_TYPE", "openai")
-    
+
+    # الافتراضي يتبع المفتاح الموجود فعلاً: لو ثبّتنا "openai" هنا لأصبح
+    # LLM_API_TYPE إعداداً ثالثاً يجب على المستخدم تذكّره، فيرسل مفتاح
+    # OpenRouter إلى api.openai.com ويحصل على 401 غامض.
+    default_type = "openrouter" if os.getenv("OPENROUTER_API_KEY") else "openai"
+    api_type = os.getenv("LLM_API_TYPE", default_type)
+
+    if api_type == "openrouter":
+        from app.core.llm_provider import resolve_llm
+
+        llm = resolve_llm()
+        return {
+            "config_list": [
+                {
+                    "model": llm.model,
+                    "api_key": llm.api_key,
+                    "base_url": llm.base_url,
+                }
+            ],
+            "temperature": float(os.getenv("LLM_TEMPERATURE", "0.7")),
+            "timeout": int(os.getenv("LLM_TIMEOUT", "120")),
+        }
+
     if api_type == "openai":
         return {
-            "model": os.getenv("OPENAI_MODEL", "gpt-4"),
+            "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             "api_key": os.getenv("OPENAI_API_KEY"),
             "temperature": float(os.getenv("LLM_TEMPERATURE", "0.7")),
         }

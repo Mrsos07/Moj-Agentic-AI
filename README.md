@@ -49,7 +49,7 @@
 ## 📋 Requirements / المتطلبات
 
 - Python 3.11 or higher
-- OpenAI API Key (Get one at [platform.openai.com](https://platform.openai.com/api-keys))
+- OpenRouter API Key (Get one at [openrouter.ai/keys](https://openrouter.ai/keys))
 - PostgreSQL (optional, for database features)
 - MongoDB (optional, for NoSQL storage)
 - Redis (optional, for caching and task queue)
@@ -57,7 +57,7 @@
 <div dir="rtl">
 
 - Python 3.11 أو أحدث
-- مفتاح OpenAI API (احصل عليه من [platform.openai.com](https://platform.openai.com/api-keys))
+- مفتاح OpenRouter (احصل عليه من [openrouter.ai/keys](https://openrouter.ai/keys))
 - PostgreSQL (اختياري، للميزات القاعدة البيانات)
 - MongoDB (اختياري، للتخزين NoSQL)
 - Redis (اختياري، للتخزين المؤقت وقائمة المهام)
@@ -105,11 +105,16 @@ playwright install
 Create a `.env` file in the root directory:
 
 ```env
-# OpenAI Configuration
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-4
+# OpenRouter Configuration (primary LLM provider)
+# Model names MUST be provider-qualified: "openai/gpt-4o-mini", not "gpt-4"
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_MODEL=openai/gpt-4o-mini
 OPENAI_MAX_TOKENS=2000
 OPENAI_TEMPERATURE=0.7
+
+# Optional fallback — used only when OPENROUTER_API_KEY is empty
+# OPENAI_API_KEY=your_openai_api_key_here
+# OPENAI_MODEL=gpt-4o-mini
 
 # Server Configuration
 HOST=0.0.0.0
@@ -339,8 +344,9 @@ npm run lint     # فحص الكود
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `OPENAI_API_KEY` | OpenAI API key | - | Yes |
-| `OPENAI_MODEL` | GPT model to use | `gpt-4` | No |
+| `OPENROUTER_API_KEY` | OpenRouter API key | - | Yes |
+| `OPENROUTER_MODEL` | Model, provider-qualified | `openai/gpt-4o-mini` | No |
+| `OPENAI_API_KEY` | Fallback only, if no OpenRouter key | - | No |
 | `OPENAI_MAX_TOKENS` | Maximum tokens | `2000` | No |
 | `OPENAI_TEMPERATURE` | Model temperature | `0.7` | No |
 | `HOST` | Server host | `0.0.0.0` | No |
@@ -351,8 +357,9 @@ npm run lint     # فحص الكود
 
 | المتغير | الوصف | القيمة الافتراضية | مطلوب |
 |---------|-------|-------------------|-------|
-| `OPENAI_API_KEY` | مفتاح OpenAI API | - | نعم |
-| `OPENAI_MODEL` | نموذج GPT المستخدم | `gpt-4` | لا |
+| `OPENROUTER_API_KEY` | مفتاح OpenRouter | - | نعم |
+| `OPENROUTER_MODEL` | الموديل، مؤهَّل بالمزوّد | `openai/gpt-4o-mini` | لا |
+| `OPENAI_API_KEY` | احتياط فقط، إن غاب مفتاح OpenRouter | - | لا |
 | `OPENAI_MAX_TOKENS` | الحد الأقصى للتوكنز | `2000` | لا |
 | `OPENAI_TEMPERATURE` | درجة الإبداع | `0.7` | لا |
 | `HOST` | عنوان الخادم | `0.0.0.0` | لا |

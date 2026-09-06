@@ -131,6 +131,29 @@ def enabled_formats(config) -> List[str]:
     return formats or ["insight"]
 
 
+def available_formats(config) -> List[str]:
+    """الصيغ القابلة للتنفيذ **الآن** — بعد استبعاد ما استُنفدت حصته اليوم.
+
+    خلل مُقاس: الثريد له حصة يومية خاصة (``daily_thread_target``، افتراضياً 1)
+    لأنه مكلف. وكانت الخطة تختار «ثريد» بناءً على أدائه، فتقترح المهارة
+    ``publish_thread``، فيرفضها المحرّك لاستنفاد الحصة — ولا تُختار صيغة بديلة.
+    النتيجة في محاكاة 40 دورة: 5 منشورات فقط بدل 10، وكلها ثريد. الخطة يجب أن
+    تعرف الحصص قبل أن تختار، لا أن تكتشفها بالرفض.
+    """
+    rules = getattr(config, "business_rules", None) or {}
+    counters = getattr(config.runtime_state, "counters", None) or {}
+    formats = enabled_formats(config)
+    try:
+        thread_target = int(rules.get("daily_thread_target", 1))
+        threads_today = int(counters.get("threads_today", 0))
+    except (TypeError, ValueError):
+        return formats
+    if threads_today >= thread_target:
+        singles = [f for f in formats if CONTENT_FORMATS[f]["parts"] <= 1]
+        return singles or formats
+    return formats
+
+
 def format_spec(format_id: str) -> Dict[str, Any]:
     return CONTENT_FORMATS.get(format_id) or CONTENT_FORMATS["insight"]
 
@@ -351,25 +374,55 @@ def choose_plan(config, prefer_format: str = "") -> Dict[str, Any]:
     تُعطى دفعة معتبرة لكنها لا تُلغي الأداء ولا عقوبة التكرار (حتى لا يتجمّد
     الحساب على اقتراح واحد لو أخطأ الحارس).
 
-    المعادلة: ``score = أداء منعّم × (1 − عقوبة تكرار قريبة) + مكافأة استكشاف``
-    - **الأداء**: متوسط التفاعل المنعّم للمحور/الصيغة (يُضاعف ما نجح فعلاً).
-    - **عقوبة التكرار**: ما استُخدم في آخر المنشورات يُخفَّض تدريجياً — فيتناوب
-      الحساب بين محاوره وصيغه بدل تكرار نفس النغمة.
-    - **الاستكشاف**: ما لم يُجرَّب (أو جُرِّب مرة) يُدفع للأعلى ليُختبر — بدونه
-      لا يمكن أن يتعلّم شيئاً جديداً أبداً.
+    المعادلة: ``score = أداء نسبي × (1 − عقوبة تكرار) + مكافأة استكشاف``
+
+    - **الأداء نسبي لا مطلق (0..1)**: هذه نقطة حاسمة مُقاسة. كان المتوسط يدخل
+      المعادلة بمقياسه الخام غير المحدود بينما العقوبة والاستكشاف ثابتان
+      صغيران، فثريد واحد حقّق 20 ألف مشاهدة يعطي متوسطاً ≈ 400 مقابل 6 للصيغة
+      غير المجرَّبة: حتى بأقصى عقوبة تكرار (×0.2) يبقى 80 مقابل 8 — أي أن
+      **نجاحاً واحداً مبكّراً يُجمّد الحساب على تلك الصيغة إلى الأبد**. محاكاة
+      40 دورة أعطت 100% ثريد و100% محوراً واحداً. القسمة على الأفضل تُبقي
+      الترجيح للأداء لكنها تجعل العقوبة والاستكشاف قادرين على قلب الاختيار.
+    - **عقوبة التكرار**: ما استُخدم في آخر المنشورات يُخفَّض تدريجياً.
+    - **سقف التتابع الصلب**: لا تتكرر الصيغة/المحور أكثر من
+      ``max_same_choice_streak`` مرات متتالية مهما كان أداؤها — ضمانة تنويع لا
+      تعتمد على معايرة أوزان.
+    - **الاستكشاف**: ما لم يُجرَّب يُدفع للأعلى ليُختبر.
     """
     pillars = content_pillars(config)
-    formats = enabled_formats(config)
+    formats = available_formats(config)
     fmt_perf = _mean_by(config, "format")
     pil_perf = _mean_by(config, "pillar")
     recent = _recent_choices(config, limit=max(len(pillars), len(formats), 4))
     rules = getattr(config, "business_rules", None) or {}
     explore = float(rules.get("strategy_exploration", 0.35))
+    try:
+        max_streak = max(int(rules.get("max_same_choice_streak", 2)), 1)
+    except (TypeError, ValueError):
+        max_streak = 2
+
+    def _streak(field: str, opt: str) -> int:
+        """كم مرة متتالية (الأحدث أولاً) اختير هذا الخيار."""
+        n = 0
+        for choice in recent:
+            if choice.get(field) == opt:
+                n += 1
+            else:
+                break
+        return n
 
     def _pick(options: List[str], perf: Dict[str, Tuple[float, int]], field: str) -> Tuple[str, str]:
-        best, best_score, why = options[0], -math.inf, ""
-        for opt in options:
-            perf_score = _smoothed(perf.get(opt))
+        # استبعاد ما تجاوز سقف التتابع (ما لم يكن الخيار الوحيد المتاح)
+        allowed = [o for o in options if _streak(field, o) < max_streak] or options
+        # الأداء النسبي: الأفضل = 1.0 والبقية كسور منه — مقياس مقيّد يمكن
+        # للعقوبة والاستكشاف أن يؤثّرا فيه فعلاً.
+        smoothed = {o: _smoothed(perf.get(o)) for o in allowed}
+        top = max(smoothed.values()) or 1.0
+
+        best, best_score, why = allowed[0], -math.inf, ""
+        for opt in allowed:
+            perf_score = smoothed[opt]
+            rel = perf_score / top
             samples = perf.get(opt, (0.0, 0))[1]
             # عقوبة تكرار: الأحدث أشد (0.45 ثم 0.22 ثم 0.11 ...)
             penalty = 0.0
@@ -377,11 +430,14 @@ def choose_plan(config, prefer_format: str = "") -> Dict[str, Any]:
                 if choice.get(field) == opt:
                     penalty += 0.45 * (0.5 ** age)
             penalty = min(penalty, 0.8)
-            bonus = explore * _PRIOR_ENGAGEMENT * (1.0 / (1.0 + samples))
+            bonus = explore * (1.0 / (1.0 + samples))
             if field == "format" and prefer_format and opt == prefer_format:
-                bonus += _PRIOR_ENGAGEMENT * float(
-                    rules.get("critique_focus_boost", 0.6))
-            score = perf_score * (1.0 - penalty) + bonus
+                # الدفعة معايَرة على المقياس النسبي (0..1): 0.25 تكفي لترجيح
+                # ترشيح الحارس عند التقارب، ولا تكفي لإلغاء أداءٍ مُثبت —
+                # القيمة القديمة (0.6 على مقياس خام كبير) صارت بعد التطبيع
+                # أكبر من حدّ الأداء نفسه فكانت تفرض ترشيح الحارس دائماً.
+                bonus += float(rules.get("critique_focus_boost", 0.25))
+            score = rel * (1.0 - penalty) + bonus
             if score > best_score:
                 best, best_score = opt, score
                 why = (f"أداء متوقّع {perf_score:.1f}"
@@ -389,6 +445,9 @@ def choose_plan(config, prefer_format: str = "") -> Dict[str, Any]:
                        + (f"، خُفّض {penalty:.0%} لتكراره مؤخراً" if penalty else "")
                        + (" (رشّحها حارس التقييم)"
                           if field == "format" and opt == prefer_format else ""))
+        skipped = [o for o in options if o not in allowed]
+        if skipped:
+            why += f"، واستُبعد {'، '.join(skipped)} لتكراره {max_streak} مرات متتالية"
         return best, why
 
     pillar, pillar_why = _pick(pillars, pil_perf, "pillar")

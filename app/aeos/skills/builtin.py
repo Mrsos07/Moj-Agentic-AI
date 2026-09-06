@@ -214,12 +214,54 @@ def _engagement_pool(context: "ExecutionContext") -> List[dict]:
     # الهاشتاق الترند المطابق للتخصص (مشاركة داخل النقاش الرائج)، ثم ترند X،
     # ثم التايم لاين
     _add(context.scratch.get("top_posts") or [], bonus=3)
+    # نتائج بحث الاهتمامات المباشر — أهداف مضمونة الصلة بالتخصص، تُجلب عندما
+    # يكون التايم لاين/الترند خارج اهتمامات الموظف (وإلا يجوع التفاعل كلياً)
+    _add(context.scratch.get("interest_tweets") or [], bonus=3)
     _add(context.scratch.get("hashtag_tweets") or [], bonus=2)
     _add(context.scratch.get("trend_tweets") or [], bonus=2)
     _add(context.scratch.get("timeline") or [], bonus=0)
 
     pool.sort(key=lambda t: (t.get("_rel", 0), t.get("_score", 0)), reverse=True)
     return pool
+
+
+def claim_targets(context: "ExecutionContext", items: List[dict],
+                  count: int, owner: str = "") -> List[dict]:
+    """احجز أهدافاً **لم تحجزها مهارة أخرى في هذه الدورة**.
+
+    خلل بنيوي مُقاس: كل المهارات تقرأ ``_engagement_pool`` نفسه وترتّبه بنفس
+    المعيار، فتلتقط جميعها التغريدة الأولى ذاتها. ثم يُبقي منعُ تكرار الهدف
+    (``SkillBasedPlanner._limit_per_target``) إجراءً صاخباً واحداً عليها،
+    فتُسقَط دائماً المهارةُ الأدنى أولويةً — قاست المحاكاة **صفر اقتباس في 40
+    دورة** رغم أن القدرة مفعّلة وميزانيتها كاملة تماماً.
+
+    الحجز يجعل كل مهارة تعمل على موضوع مختلف، فيصير تنوّع الدورة تنوّعَ
+    **مواضيع** لا تنوّع أفعال على الموضوع نفسه. الحجز داخل الدورة فقط
+    (``context.scratch``) ولا يترك أثراً دائماً.
+
+    ``owner`` (اسم المهارة/الفعل) يجعل الحجز **ثابت النتيجة**: استدعاء
+    ``propose()`` مرتين في الدورة نفسها يعيد الأهداف ذاتها لا أهدافاً جديدة.
+    بدونه يصير الاقتراح ذا أثر جانبي: أي استدعاء ثانٍ (فحص، إعادة محاولة،
+    مسار بديل عند رفض الحارس) يجد الحوض محجوزاً فيعيد لا شيء.
+    """
+    store: Dict[str, List[str]] = context.scratch.setdefault("_claims", {})
+    claimed: set = context.scratch.setdefault("_claimed_targets", set())
+    pool = {(i.get("url") or "").strip(): i for i in (items or [])}
+    if owner and owner in store:
+        return [pool[u] for u in store[owner] if u in pool]
+
+    out: List[dict] = []
+    for item in items or []:
+        url = (item.get("url") or "").strip()
+        if not url or url in claimed:
+            continue
+        claimed.add(url)
+        out.append(item)
+        if len(out) >= max(count, 0):
+            break
+    if owner:
+        store[owner] = [(i.get("url") or "").strip() for i in out]
+    return out
 
 
 def _has_strong_engagement_candidates(context: "ExecutionContext") -> bool:
@@ -285,8 +327,13 @@ def _is_weak_topic(title: str, summary: str) -> bool:
     return False
 
 
-def _grounded_topic(context: "ExecutionContext") -> "dict | None":
-    """Return the BEST real grounded topic within specialty, preferring media."""
+def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
+    """ALL real grounded topic candidates within specialty, best first.
+
+    الفصل بين «جمع المرشّحين» و«الاختيار» مقصود: الترتيب الحتمي هنا مجرد
+    فرز أولي، والاختيار النهائي يرجع لطبقة «رئيس التحرير» (:func:`_editorial_pick`)
+    التي تزن الأهمية والإثارة لا مجرد تطابق الكلمات.
+    """
     interests = getattr(context.config.persona, "interests", []) or []
     rules = context.config.business_rules or {}
     enforce_scope = bool(rules.get("enforce_interest_scope", True))
@@ -454,20 +501,239 @@ def _grounded_topic(context: "ExecutionContext") -> "dict | None":
         and not _is_weak_topic(c["title"], c["summary"])
     ]
     if not candidates:
-        return None
+        return []
 
     candidates.sort(
         key=lambda c: (c["_rel"], c["_media"], c["_priority"]),
         reverse=True
     )
-    best = candidates[0]
+    return candidates
+
+
+def _format_candidate(c: dict) -> dict:
     return {
-        "source": best["source"],
-        "title": best["title"],
-        "summary": best["summary"],
-        "media_url": best["media_url"],
-        "hashtag": best.get("hashtag", ""),
+        "source": c["source"],
+        "title": c["title"],
+        "summary": c["summary"],
+        "media_url": c["media_url"],
+        "hashtag": c.get("hashtag", ""),
     }
+
+
+def _grounded_topic(context: "ExecutionContext") -> "dict | None":
+    """Return the BEST real grounded topic within specialty, preferring media."""
+    candidates = _grounded_candidates(context)
+    return _format_candidate(candidates[0]) if candidates else None
+
+
+def _editorial_pick(context: "ExecutionContext") -> "dict | None":
+    """طبقة «رئيس التحرير»: اختيار الموضوع الأهم/الأشوق + زاوية معالجة.
+
+    الفرز الحتمي يقيس تطابق الكلمات فقط، فيفوز الموضوع الأكثر تكراراً لكلمات
+    التخصص لا الأكثر أهميةً أو إثارةً للجمهور. هنا يراجع الموظف المرشّحين كمحرر
+    محترف: يختار الأجدر بالنشر الآن، ويحدّد زاوية معالجة مميزة وخُطّافاً
+    مقترحاً قبل الكتابة. بلا LLM أو عند أي فشل: الأفضل حتمياً (لا توقف أبداً).
+
+    يعيد الموضوع المُختار مع مفاتيح إضافية: ``angle``، ``hook``، ``why``.
+    """
+    candidates = _grounded_candidates(context)
+    if not candidates:
+        return None
+    best = _format_candidate(candidates[0])
+    llm = getattr(context, "llm", None)
+    if len(candidates) == 1 or llm is None or not getattr(llm, "available", False):
+        return best
+
+    persona = context.config.persona
+    interests = "، ".join(getattr(persona, "interests", []) or [])
+    role = getattr(persona, "role", "") or ""
+    recent = [p[:90] for p in (context.scratch.get("recent_posts") or [])[:5]]
+    shortlist = candidates[:8]
+    listing = "\n".join(
+        f"{i + 1}. [{c['source']}] {c['title'][:110]}"
+        + (f" — {c['summary'][:150]}" if c["summary"] else "")
+        for i, c in enumerate(shortlist)
+    )
+    prompt = (
+        f"دور الحساب: {role or 'صانع محتوى'} | التخصص: {interests or 'عام'}\n"
+        + (f"آخر منشورات الحساب (لا تكرر مواضيعها): {recent}\n" if recent else "")
+        + "\nالمواضيع المرشّحة الآن (كلها حقيقية من مصادر حيّة):\n" + listing +
+        "\n\nاختر الموضوع الواحد الأجدر بالنشر الآن بمعيار رئيس التحرير: الأهمية "
+        "الفعلية لجمهور التخصص، الجِدّة، قابلية إثارة نقاش — لا مجرد تطابق الكلمات. "
+        "ثم حدّد زاوية معالجة مميزة (لا إعادة سرد الخبر) وخُطّافاً مقترحاً للسطر "
+        "الأول."
+    )
+    try:
+        out = llm.complete_json(
+            system=(
+                "أنت رئيس تحرير محترف لحساب X متخصص. "
+                'أعد JSON فقط: {"choice": رقم, "angle": "زاوية المعالجة", '
+                '"hook": "السطر الأول المقترح", "why": "لماذا هذا الموضوع بجملة"}'
+            ),
+            prompt=prompt,
+        ) or {}
+        idx = int(out.get("choice", 0)) - 1
+        if not (0 <= idx < len(shortlist)):
+            return best
+        picked = _format_candidate(shortlist[idx])
+        picked["angle"] = str(out.get("angle") or "").strip()[:200]
+        picked["hook"] = str(out.get("hook") or "").strip()[:140]
+        picked["why"] = str(out.get("why") or "").strip()[:200]
+        return picked
+    except Exception:  # noqa: BLE001
+        return best
+
+
+# ─────────────────── «في مثل هذا اليوم» — محتوى تاريخي يومي ───────────────────
+def _on_this_day_mode(context: "ExecutionContext") -> bool:
+    """هل هذا حساب «في مثل هذا اليوم»؟ قاعدة عمل صريحة أو تُستنتج من الشخصية.
+
+    الاستنتاج من نصوص الشخصية يجعل الوضع يعمل فور تحسين البرسونا بدون أي
+    إعداد إضافي — وقاعدة ``on_this_day_mode`` تتيح فرضه/تعطيله صراحةً.
+    """
+    rules = context.config.business_rules or {}
+    if "on_this_day_mode" in rules:
+        return bool(rules["on_this_day_mode"])
+    p = context.config.persona
+    hay = " ".join([
+        getattr(p, "display_name", "") or "",
+        getattr(p, "bio", "") or "",
+        getattr(p, "instructions", "") or "",
+    ])
+    return "مثل هذا اليوم" in hay or "on this day" in hay.lower()
+
+
+#: كاش أحداث اليوم لكل يوم (المصدر لا يتغير خلال اليوم فلا نعيد الجلب كل دورة)
+_OTD_CACHE: dict = {"date": "", "events": []}
+
+
+def _fetch_on_this_day_events() -> List[dict]:
+    """أحداث «في مثل هذا اليوم» من ويكيبيديا العربية (fallback إنجليزي).
+
+    مصدر موثوق ومجاني وبلا مفاتيح: Wikimedia REST ``feed/onthisday/events``.
+    يُرجع [{"year": int, "text": str}] مرتبة من الأحدث، مع كاش يومي.
+    """
+    import datetime
+
+    import requests
+
+    today = datetime.date.today()
+    key = f"{today.month:02d}-{today.day:02d}"
+    if _OTD_CACHE["date"] == key and _OTD_CACHE["events"]:
+        return _OTD_CACHE["events"]
+
+    events: List[dict] = []
+    for lang in ("ar", "en"):
+        try:
+            r = requests.get(
+                f"https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/events/"
+                f"{today.month:02d}/{today.day:02d}",
+                timeout=20, headers={"User-Agent": "MojAgenticAI/1.0"},
+            )
+            if r.status_code != 200:
+                continue
+            for e in r.json().get("events", []):
+                text = (e.get("text") or "").strip()
+                year = e.get("year")
+                if text and year:
+                    events.append({"year": int(year), "text": text})
+            if events:
+                break
+        except Exception:  # noqa: BLE001
+            continue
+
+    events.sort(key=lambda e: e["year"], reverse=True)
+    if events:
+        _OTD_CACHE.update({"date": key, "events": events})
+    return events
+
+
+def _today_dates_arabic() -> str:
+    """تاريخ اليوم بالميلادي والهجري بالعربية — عمود أسلوب حساب التوثيق."""
+    import datetime
+
+    months = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+              "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+    t = datetime.date.today()
+    greg = f"{t.day} {months[t.month - 1]} {t.year}م"
+    try:
+        from hijridate import Gregorian
+
+        h = Gregorian(t.year, t.month, t.day).to_hijri()
+        return f"{greg} — {h.day} {h.month_name('ar')} {h.year}هـ"
+    except Exception:  # noqa: BLE001
+        return greg
+
+
+class OnThisDaySkill(ISkill):
+    """ينشر أحداثاً تاريخية وقعت «في مثل هذا اليوم» — جوهر حسابات التوثيق.
+
+    حسابات التوثيق التاريخي لا تجد موضوعها في الترندات أو الأخبار (مصادر
+    ``_grounded_topic`` كلها آنية)، فكان الحساب إما لا ينشر شيئاً أو ينجرف
+    خلف الترندات خارج هويته. هذه المهارة تؤرضن المحتوى بمصدر حقيقي مخصص:
+    أحداث اليوم من ويكيبيديا، مع التاريخين الميلادي والهجري، ونافذة أحداث
+    تتدوّر عبر منشورات اليوم فلا يتكرر الحدث نفسه.
+    """
+
+    name = "on_this_day"
+    claim_priority = 45
+    uses_capabilities = ["publish_content"]
+
+    def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
+        if not _on_this_day_mode(context):
+            return []
+        counters = context.config.runtime_state.counters
+        posts_today = counters.get("posts_today", 0)
+        target = int(context.config.business_rules.get("daily_post_target", 1))
+        if posts_today >= target:
+            return []
+
+        events = _fetch_on_this_day_events()
+        if not events:
+            return []  # لا مصدر حقيقي => لا نُلفّق حدثاً من ذاكرة النموذج
+
+        # قصر الأحداث على تخصص الشخصية (حدث سياسي/ديني يتقدم على خبر رياضي
+        # عابر): النافذة المتدحرجة فوق قائمة مرتّبة فقط كانت تُسقط منشورَ آخر
+        # اليوم على ذيل القائمة (أعاصير/رياضة) فيرفضه الحارس لخروجه عن التخصص
+        # وتضيع الدورة. ثم نافذة متدحرجة داخل المتخصص: كل منشور خلال اليوم
+        # يعرض أحداثاً مختلفة، وذاكرة النشاط تمنع تكرار ما نُشر فعلاً.
+        interests = getattr(context.config.persona, "interests", []) or []
+        if interests:
+            relevant = [e for e in events if relevance_score(e["text"], interests) >= 1]
+            if len(relevant) >= 5:
+                events = relevant
+            else:
+                events = sorted(
+                    events,
+                    key=lambda e: (relevance_score(e["text"], interests), e["year"]),
+                    reverse=True,
+                )
+        window = 5
+        start = (posts_today * window) % max(len(events), 1)
+        batch = events[start:start + window] or events[:window]
+        listing = "\n".join(f"- سنة {e['year']}: {e['text'][:220]}" for e in batch)
+
+        lang = getattr(context.config.persona, "language", "ar") or "ar"
+        # لا تذكر اسم المصدر في الموجز: «(المصدر: ويكيبيديا)» جعل حارس الالتزام
+        # يحكم على المصدر بدل الموضوع، ورفضُه تحوّل عبر تقييم الدورة إلى توجيه
+        # «تجنب ويكيبيديا» يُحقن في برومبته فيرفض كل موجز تالٍ — حلقة صدى.
+        brief = (
+            f"تاريخ اليوم: {_today_dates_arabic()}.\n"
+            f"أحداث حقيقية موثقة وقعت في مثل هذا اليوم:\n"
+            f"{listing}\n\n"
+            f"اختر من القائمة أعلاه حصراً (لا تأتِ بحدث من خارجها) الحدث الأهم "
+            f"الواقع داخل تخصصك وتجاهل ما سواه، واكتب تغريدة توثيقية واحدة "
+            f"باللغة {lang} بأسلوب شخصيتك الرسمي السردي: اذكر سنة الحدث، وصُغ "
+            "الحدث بدقة وحيادية كسطر تاريخ موثوق. لا أسئلة، لا نقاش، لا رأي شخصي."
+        )
+        return [ProposedAction(
+            capability="publish_content",
+            params={"brief": brief, "media_url": "",
+                    "pillar": "في مثل هذا اليوم", "format": "insight"},
+            rationale=(f"on-this-day documentation post from {len(events)} real "
+                       f"Wikipedia events (posts_today={posts_today}<{target})"),
+            expected_impact=0.9, urgency=0.85, risk=0.1,
+        )]
 
 
 class DailyContentCreatorSkill(ISkill):
@@ -479,6 +745,7 @@ class DailyContentCreatorSkill(ISkill):
     """
 
     name = "daily_content_creator"
+    claim_priority = 40
     uses_capabilities = ["publish_content"]
 
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
@@ -505,7 +772,7 @@ class DailyContentCreatorSkill(ISkill):
                 brief += f" مهم: ضمّن الوسم {directed} كما هو حرفياً في المنشور."
             return [ProposedAction(
                 capability="publish_content",
-                params={"brief": brief, "media_url": ""},
+                params={"brief": brief, "media_url": "", "owner_directed": True},
                 rationale="user-directed topic from chat (explicit owner command)",
                 expected_impact=0.95, urgency=0.95, risk=0.1,
             )]
@@ -516,6 +783,11 @@ class DailyContentCreatorSkill(ISkill):
         if posts_today >= target:
             return []
 
+        # حسابات «في مثل هذا اليوم»: النشر حصراً عبر مهارة on_this_day —
+        # الترندات/الأخبار تجرّ الحساب خارج هويته التوثيقية (حدث فعلاً).
+        if _on_this_day_mode(context):
+            return []
+
         rules = context.config.business_rules or {}
         require_grounded_topic = bool(rules.get("require_grounded_topic", True))
         enforce_scope = bool(rules.get("enforce_interest_scope", True))
@@ -523,11 +795,22 @@ class DailyContentCreatorSkill(ISkill):
         # تفضيل التفاعل عند وجود فرص قوية = خفض أولوية النشر، لا إلغاؤه
         damping = _engagement_first_damping(context)
 
-        topic = _grounded_topic(context)
+        # اختيار تحريري لا آلي: الموظف يراجع المرشّحين كرئيس تحرير ويختار
+        # الأهم/الأشوق لجمهور تخصصه مع زاوية معالجة وخُطّاف — لا أول موضوع يطابق الكلمات.
+        topic = _editorial_pick(context)
         if require_grounded_topic and not topic:
             return []  # لا موضوع حقيقي => لا ننشر محتوى عاماً
         if not topic:
             return []
+        if topic.get("why"):
+            context.scratch["editorial_pick"] = {
+                "title": topic["title"][:120], "why": topic["why"],
+                "angle": topic.get("angle", ""),
+            }
+            context.emit_progress(
+                f"🗞️ **اخترت موضوع المنشور كرئيس تحرير:** «{topic['title'][:90]}» — "
+                f"{topic['why']}"
+            )
 
         interests = getattr(context.config.persona, "interests", []) or []
         if enforce_scope and interests:
@@ -544,13 +827,20 @@ class DailyContentCreatorSkill(ISkill):
         brief = (
             f"اكتب منشور X أصلي بصوت إنساني طبيعي باللغة {lang}"
             f"{(' وبلهجة ' + dialect) if dialect else ''} "
-            f"ضمن مجال ({focus}) حول موضوع حقيقي: '{topic['title']}'. "
-            "ابدأ بـHook قوي قصير، ثم فكرة واحدة واضحة وموقف/Insight عملي قابل للنقاش."
+            f"ضمن مجال ({focus}) حول موضوع حقيقي: '{topic['title']}'."
         )
         if topic["summary"]:
             brief += f" الخلفية المختصرة: {topic['summary']}"
+        if topic.get("angle"):
+            brief += f"\nزاوية المعالجة المطلوبة (التزم بها): {topic['angle']}"
+        if topic.get("hook"):
+            brief += (f"\nخُطّاف مقترح للسطر الأول (حسّنه إن استطعت، لا تضعفه): "
+                      f"«{topic['hook']}»")
         brief += (
-            " تجنب الصياغة العامة والإنشائية، واكتب كصانع محتوى محترف. "
+            "\nقواعد الصنعة: السطر الأول خُطّاف ≤ 12 كلمة (رقم/مفارقة/سؤال جريء)؛ "
+            "فكرة واحدة فقط؛ موقف صريح أو معلومة ملموسة لا يعرفها أغلب الجمهور؛ "
+            "خاتمة تفتح نقاشاً (رأي يُختلف عليه أو سؤال محدد)؛ لا مقدمات إنشائية "
+            "ولا إعادة سرد للخبر كما هو. اكتب كصانع محتوى محترف له شخصية ورأي. "
             "إن وُجدت ميديا مرتبطة استخدمها لدعم المنشور."
         )
         # مشاركة في هاشتاق الترند: ضمّن الهاشتاق نصّاً ليظهر المنشور داخل نقاشه
@@ -595,6 +885,7 @@ class CommunityEngagerSkill(ISkill):
     """
 
     name = "community_engager"
+    claim_priority = 90
     uses_capabilities = ["reply_to_user", "like_post", "read_notifications"]
 
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
@@ -661,6 +952,7 @@ class TrendWatcherSkill(ISkill):
     """Proposes researching a source URL provided via a news event."""
 
     name = "trend_watcher"
+    claim_priority = 5
     uses_capabilities = ["research_topic", "store_knowledge"]
 
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
@@ -688,6 +980,7 @@ class TimelineEngagerSkill(ISkill):
     """
 
     name = "timeline_engager"
+    claim_priority = 10
     uses_capabilities = [
         "browse_timeline", "like_post", "retweet_post", "reply_to_user", "follow_user",
     ]
@@ -705,13 +998,10 @@ class TimelineEngagerSkill(ISkill):
 
         actions: List[ProposedAction] = []
         engaged = _engaged_urls(context)
-        queue = list(relevant)  # نوزّع تغريدات مختلفة على أنواع تفاعل مختلفة
 
-        def _take(n: int) -> List[dict]:
-            taken, rest = queue[:n], queue[n:]
-            queue.clear()
-            queue.extend(rest)
-            return taken
+        def _take(n: int, tag: str) -> List[dict]:
+            """أهداف مختلفة لكل نوع تفاعل — ومحجوزة عن بقية المهارات أيضاً."""
+            return claim_targets(context, relevant, n, owner=f"timeline:{tag}")
 
         def _impact(t: dict, base: float) -> float:
             """تأثير ديناميكي حسب جودة الهدف: درجة الصلة بالتخصص + وجود
@@ -723,7 +1013,7 @@ class TimelineEngagerSkill(ISkill):
             return round(min(base + bonus, 0.95), 3)
 
         # رد حسب البرسونا على الأكثر صلة (أعلى قيمة تفاعلية)
-        for t in _take(max_replies):
+        for t in _take(max_replies, "reply"):
             url = t.get("url")
             if not url:
                 continue
@@ -736,7 +1026,7 @@ class TimelineEngagerSkill(ISkill):
             ))
 
         # إعادة نشر (رتويت) لتغريدة مختلفة
-        for t in _take(max_retweets):
+        for t in _take(max_retweets, "retweet"):
             url = t.get("url")
             if not url:
                 continue
@@ -749,7 +1039,7 @@ class TimelineEngagerSkill(ISkill):
             ))
 
         # إعجاب بتغريدات أخرى ذات صلة
-        for t in _take(max_likes):
+        for t in _take(max_likes, "like"):
             url = t.get("url")
             if not url:
                 continue
@@ -791,6 +1081,7 @@ class ViralContentCreatorSkill(ISkill):
     """
 
     name = "viral_content_creator"
+    claim_priority = 35
     uses_capabilities = ["publish_content"]
 
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
@@ -798,6 +1089,10 @@ class ViralContentCreatorSkill(ISkill):
         posts_today = counters.get("posts_today", 0)
         target = int(context.config.business_rules.get("daily_post_target", 1))
         if posts_today >= target:
+            return []
+
+        # حسابات «في مثل هذا اليوم» لا تطارد الترندات — مهارة on_this_day تتولى النشر
+        if _on_this_day_mode(context):
             return []
 
         rules = context.config.business_rules or {}
@@ -869,6 +1164,7 @@ class ContentQuoterSkill(ISkill):
     """
 
     name = "content_quoter"
+    claim_priority = 60
     uses_capabilities = ["quote_post"]
 
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
@@ -881,11 +1177,16 @@ class ContentQuoterSkill(ISkill):
         pool = _engagement_pool(context)
         if not pool:
             return []
-        # اقتبس ما يستحق تعليقاً فعلاً: نص كافٍ وصلة عالية بالتخصص
-        candidates = [
+        # اقتبس ما يستحق تعليقاً فعلاً: نص كافٍ وصلة عالية بالتخصص.
+        # العتبة قاعدة عمل لا رقم مدفون: 80 حرفاً كانت تُلغي الاقتباس عملياً على
+        # المحتوى العربي (تغريدات المجال تقع غالباً في 60-80 حرفاً)، فقيست
+        # المحاكاة صفر اقتباس في 40 دورة رغم أن القدرة مفعّلة وميزانيتها كاملة.
+        min_chars = int(rules.get("min_quote_chars", 60))
+        candidates = claim_targets(context, [
             t for t in pool
-            if len((t.get("text") or "").strip()) >= 80 and int(t.get("_rel", 0) or 0) >= 1
-        ][:per_cycle]
+            if len((t.get("text") or "").strip()) >= min_chars
+            and int(t.get("_rel", 0) or 0) >= 1
+        ], per_cycle, owner="content_quoter")
         plan = _content_plan(context)
         return [ProposedAction(
             capability="quote_post",
@@ -910,6 +1211,7 @@ class SwipeFileSkill(ISkill):
     """
 
     name = "swipe_file"
+    claim_priority = 50
     uses_capabilities = ["bookmark_post"]
 
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
@@ -921,10 +1223,8 @@ class SwipeFileSkill(ISkill):
             return []
         engaged = _engaged_urls(context)
         interests = getattr(context.config.persona, "interests", []) or []
-        actions: List[ProposedAction] = []
+        eligible: List[dict] = []
         for t in (context.scratch.get("top_posts") or [])[:10]:
-            if len(actions) >= per_cycle:
-                break
             url = (t.get("url") or "").strip()
             text = (t.get("text") or "").strip()
             if not url or url in engaged or len(text) < 60:
@@ -934,9 +1234,14 @@ class SwipeFileSkill(ISkill):
             if interests and relevance_score(text, interests) < int(
                     rules.get("min_relevance_score", 1)):
                 continue
+            eligible.append(t)
+
+        actions: List[ProposedAction] = []
+        for t in claim_targets(context, eligible, per_cycle, owner="swipe_file"):
             actions.append(ProposedAction(
                 capability="bookmark_post",
-                params={"tweet_url": url, "original_text": text,
+                params={"tweet_url": (t.get("url") or "").strip(),
+                        "original_text": (t.get("text") or "").strip(),
                         "handle": t.get("handle", "")},
                 rationale="save a high-performing in-field post as future raw material",
                 expected_impact=0.3, urgency=0.25, risk=0.02,
@@ -957,7 +1262,9 @@ class DirectedEngagementSkill(ISkill):
     """
 
     name = "directed_engager"
+    claim_priority = 100
     uses_capabilities = ["reply_to_user", "like_post", "retweet_post"]
+    always_on = True
 
     def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
         eng = (context.event.payload or {}).get("directed_engagement")
@@ -982,21 +1289,24 @@ class DirectedEngagementSkill(ISkill):
         if "reply" in wanted:
             actions.append(ProposedAction(
                 capability="reply_to_user",
-                params={"tweet_url": url, "original_text": original, "handle": handle},
+                params={"tweet_url": url, "original_text": original, "handle": handle,
+                        "owner_directed": True},
                 rationale="owner-directed engagement: reply to a specific post",
                 expected_impact=0.95, urgency=0.95, risk=0.1,
             ))
         if "like" in wanted:
             actions.append(ProposedAction(
                 capability="like_post",
-                params={"tweet_url": url, "original_text": original, "handle": handle},
+                params={"tweet_url": url, "original_text": original, "handle": handle,
+                        "owner_directed": True},
                 rationale="owner-directed engagement: like a specific post",
                 expected_impact=0.6, urgency=0.85, risk=0.05,
             ))
         if "retweet" in wanted:
             actions.append(ProposedAction(
                 capability="retweet_post",
-                params={"tweet_url": url, "original_text": original, "handle": handle},
+                params={"tweet_url": url, "original_text": original, "handle": handle,
+                        "owner_directed": True},
                 rationale="owner-directed engagement: retweet a specific post",
                 expected_impact=0.7, urgency=0.85, risk=0.15,
             ))
@@ -1056,14 +1366,177 @@ class DirectedEngagementSkill(ISkill):
         )
 
 
+#: خرائط المصدر → مفاتيح scratch التي عبّأها طور الرصد
+_MISSION_SOURCES = {
+    "timeline": ("timeline",),
+    "mentions": ("mentions",),
+    "trend": ("hashtag_tweets", "trend_tweets", "top_posts"),
+    "search": ("interest_tweets", "top_posts"),
+    "any": ("top_posts", "interest_tweets", "hashtag_tweets", "trend_tweets",
+            "timeline"),
+}
+
+#: القدرة المنفّذة لكل فعل في المهمّة
+_MISSION_CAPABILITY = {
+    "reply": "reply_to_user", "like": "like_post", "retweet": "retweet_post",
+    "quote": "quote_post", "follow": "follow_user",
+}
+
+
+def _mission_candidates(context: "ExecutionContext",
+                        mission: dict) -> List[dict]:
+    """أهداف المهمّة مرتّبة: الأنسب للقيد الموضوعي ثم للتخصص.
+
+    نبني البركة من المصدر الذي طلبه المستخدم تحديداً (تايم لاين/منشنات/ترند)
+    ولا نخلطها بغيره، وإلا صار «روح للتايم لاين» يتفاعل مع نتائج بحث. الفلاتر
+    الثابتة تبقى دائماً: لا تكرار لهدف سابق، ولا إعلانات/سبام، ولا ما يخالف
+    محظورات الشخصية — حتى في النطاق الحرّ.
+    """
+    source = str(mission.get("source") or "any")
+    keys = _MISSION_SOURCES.get(source, _MISSION_SOURCES["any"])
+    # من خاطبنا يستحق رداً دائماً: فلتر التخصص لا يُطبّق على المنشنات
+    # («شكراً» / «وين المصدر؟» لا تحمل كلمات التخصص فتُقصى زوراً).
+    specialty_only = str(mission.get("scope")) != "free" and source != "mentions"
+    query_words = normalize_topic_words(str(mission.get("query") or ""))
+    engaged = _engaged_urls(context)
+
+    out: List[dict] = []
+    seen: set = set()
+    for key in keys:
+        for t in context.scratch.get(key) or []:
+            if not isinstance(t, dict):
+                continue
+            url = (t.get("url") or "").strip()
+            text = (t.get("text") or "").strip()
+            handle = (t.get("handle") or "").strip()
+            if not url or url in seen or url in engaged:
+                continue
+            hay = f"{text} {handle}".strip()
+            if _is_ad_or_spam_text(hay) or _violates_persona_donts(hay, context):
+                continue
+            if specialty_only and not _is_specialty_match(context, hay):
+                continue
+            match = (topic_overlap_ratio(normalize_topic_words(text), query_words)
+                     if query_words else 0.0)
+            if query_words and match <= 0:
+                continue
+            seen.add(url)
+            out.append({**t, "_match": round(match, 3),
+                        "_rel": relevance_score(hay, getattr(
+                            context.config.persona, "interests", []) or [])})
+
+    out.sort(key=lambda t: (t.get("_match", 0), t.get("_rel", 0)), reverse=True)
+    return out
+
+
+class DirectedMissionSkill(ISkill):
+    """Execute a free-form owner mission where the EMPLOYEE picks the target.
+
+    Triggered by ``directed_mission`` in the event payload — produced from open
+    chat («روح للتايم لاين وشوف تغريدة تناسب تخصصك وردّ عليها»، «تابع حسابين في
+    مجالك»، «اقتبس أقوى تغريدة في الترند»). Unlike ``directed_engager`` (which
+    acts on a post the owner pasted), here the owner names only the *source*,
+    the *actions* and optionally a topic constraint; the employee scans that
+    source, ranks candidates by the constraint then by specialty, and proposes
+    the requested actions on DIFFERENT targets (never the same tweet twice).
+
+    Owner authority: actions carry ``owner_directed`` so the persona guard and
+    the daily engagement budgets do not silently drop an explicit order. The
+    specialty filter still applies unless the owner allowed a free scope.
+    Records an Arabic note when the source has no usable target, so the chat
+    report explains *why* nothing happened instead of going silent.
+    """
+
+    name = "directed_mission"
+    claim_priority = 100
+    uses_capabilities = ["reply_to_user", "like_post", "retweet_post",
+                         "quote_post", "follow_user"]
+    always_on = True
+
+    def propose(self, context: "ExecutionContext") -> List[ProposedAction]:
+        mission = (context.event.payload or {}).get("directed_mission")
+        if not isinstance(mission, dict):
+            return []
+        wanted = [a for a in (mission.get("actions") or [])
+                  if a in _MISSION_CAPABILITY]
+        if not wanted:
+            return []
+
+        pool = _mission_candidates(context, mission)
+        if not pool and str(mission.get("scope")) != "free":
+            # لا هدف داخل التخصص: أعِد المحاولة بلا قيد الموضوع قبل الاستسلام،
+            # فالقيد النصّي قد يكون أضيق من محتوى المصدر الفعلي.
+            pool = _mission_candidates(
+                context, {**mission, "query": ""})
+        if not pool:
+            context.scratch["directed_mission_note"] = (
+                "نفّذت المهمّة لكن لم أجد في المصدر المطلوب هدفاً يصلح للتفاعل "
+                "(إمّا لا شيء ضمن تخصصي، أو تفاعلت مسبقاً مع كل ما ظهر)."
+            )
+            return []
+
+        try:
+            count = max(1, min(int(mission.get("count") or 1), 5))
+        except (TypeError, ValueError):
+            count = 1
+
+        actions: List[ProposedAction] = []
+        queue = list(pool)
+        engaged = _engaged_urls(context)
+        # ترتيب القيمة: رد > اقتباس > إعادة نشر > متابعة > إعجاب (وزن الخوارزمية)
+        order = ["reply", "quote", "retweet", "follow", "like"]
+        for act in [a for a in order if a in wanted]:
+            capability = _MISSION_CAPABILITY[act]
+            taken = 0
+            while queue and taken < count:
+                t = queue.pop(0)
+                url = (t.get("url") or "").strip()
+                params = {"original_text": (t.get("text") or "")[:400],
+                          "handle": t.get("handle", ""),
+                          "owner_directed": True}
+                if act == "follow":
+                    profile = _profile_url_from_handle(t.get("handle", ""))
+                    if not profile or profile in engaged:
+                        continue
+                    params["profile_url"] = profile
+                else:
+                    if not url:
+                        continue
+                    params["tweet_url"] = url
+                if act == "reply" and mission.get("source") == "mentions":
+                    params["brief"] = True
+                    params["is_mention_reply"] = True
+                taken += 1
+                actions.append(ProposedAction(
+                    capability=capability, params=params,
+                    rationale=f"owner mission: {act} a target the employee "
+                              f"picked from {mission.get('source', 'any')}",
+                    expected_impact=0.95, urgency=0.95, risk=0.05,
+                ))
+            # أعِد تعبئة الطابور للفعل التالي كي لا يجوع: الأهداف المختلفة أولاً،
+            # وعند نضوبها يُسمح بإعادة استخدام نفس الهدف لفعل مختلف (إعجاب+رد).
+            if not queue:
+                queue = list(pool)
+        return actions
+
+
 def default_skills() -> List[ISkill]:
+    from .custom import CustomSkillRunner
+
+    # الترتيب مهمّ: المهارات تحجز أهدافها من حوض واحد عبر ``claim_targets``،
+    # فتحجز أولاً الأفعالُ **النادرة عالية القيمة** (اقتباس: 1-2 يومياً) قبل
+    # الأفعال الوفيرة (إعجاب: 12 يومياً) التي تجد بديلاً دائماً. عكس الترتيب
+    # كان يعني أن الإعجاب يلتهم أفضل الأهداف ولا يبقى للاقتباس شيء.
     return [
+        CustomSkillRunner(),
+        OnThisDaySkill(),
         DailyContentCreatorSkill(),
         CommunityEngagerSkill(),
         TrendWatcherSkill(),
-        TimelineEngagerSkill(),
-        ViralContentCreatorSkill(),
         ContentQuoterSkill(),
         SwipeFileSkill(),
+        TimelineEngagerSkill(),
+        ViralContentCreatorSkill(),
         DirectedEngagementSkill(),
+        DirectedMissionSkill(),
     ]

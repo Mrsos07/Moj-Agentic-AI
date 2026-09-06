@@ -329,9 +329,13 @@ def _push(user_id: Optional[int], content: str, cfg=None) -> None:
     try:
         from app.services import realtime_bus
 
+        # session_id/account يوجّهان الواجهة للمحادثة الصحيحة — بدونهما تختلط
+        # رسائل الموظفين المتعددين في المحادثة المفتوحة أياً كانت
         realtime_bus.publish_chat(user_id, {
             "type": "assistant_message",
             "message": content,
+            "account": account or None,
+            "session_id": session_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
     except Exception:  # noqa: BLE001

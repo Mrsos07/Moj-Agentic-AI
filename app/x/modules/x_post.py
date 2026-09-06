@@ -1,5 +1,6 @@
+import re
 import time
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -582,6 +583,44 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
 
+        # تحقق شبكي لا واجهي: التقط استجابات CreateTweet (GraphQL) — إشارات
+        # الواجهة (انغلاق المحرّر/التوست) أنتجت «نجاحاً كاذباً»: دورةٌ أبلغت
+        # «تم نشر الثريد ✅» بلا أي ثريد على المنصة. المعالج لا يقرأ الجسم
+        # (ممنوع الحجب داخل معالجات sync API) — نجمع الاستجابات ونفكّها لاحقاً.
+        create_responses: List = []
+        page.on(
+            "response",
+            lambda resp: create_responses.append(resp)
+            if "CreateTweet" in resp.url else None,
+        )
+
+        def _created_tweet_ids() -> List[str]:
+            ids: List[str] = []
+            for resp in list(create_responses):
+                try:
+                    if resp.status != 200:
+                        continue
+                    rid = ""
+                    try:
+                        data = resp.json()
+                        rid = str(((((data.get("data") or {}).get("create_tweet")
+                                     or {}).get("tweet_results") or {})
+                                   .get("result") or {}).get("rest_id") or "")
+                    except Exception:  # noqa: BLE001 - جسم غير JSON => fallback
+                        rid = ""
+                    if not rid:
+                        # احتياط: أول rest_id في الجسم قد يكون معرّف المستخدم
+                        # (10 أرقام ≈ حسابات 2015) لا التغريدة — معرّفات
+                        # التغريدات الحديثة ≥ 15 رقماً، فخذ الطويلة فقط.
+                        for m in re.finditer(r'"rest_id"\s*:\s*"(\d{15,})"', resp.text()):
+                            rid = m.group(1)
+                            break
+                    if rid and len(rid) >= 15:
+                        ids.append(rid)
+                except Exception:  # noqa: BLE001 - جسم غير متاح => تجاهل
+                    continue
+            return ids
+
         try:
             page.goto("https://x.com/home", wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
@@ -634,10 +673,34 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
                     "لم يتم تأكيد نشر الثريد: بقي المحرّر مفتوحاً ولم يظهر تأكيد الإرسال."
                 )
 
-            try:
-                return _copy_tweet_link(page, timeout_ms=30_000)
-            except Exception:
-                return None
+            # إشارة الواجهة وحدها لا تكفي: انتظر أن يؤكد الخادم فعلاً إنشاء
+            # تغريدة واحدة على الأقل (استجابة CreateTweet ناجحة)، وإلا فهذا هو
+            # «النجاح الكاذب» بعينه — المحرّر انغلق ولم يُنشر شيء. معيار النجاح
+            # هو الاستجابة 200 نفسها؛ استخراج المعرّف للرابط فقط، حتى لا يقلب
+            # تغيّرُ شكل الحمولة ثريداً منشوراً إلى فشل كاذب.
+            ids: List[str] = []
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                ids = _created_tweet_ids()
+                if len(ids) >= len(parts):
+                    break
+                page.wait_for_timeout(500)
+            create_ok = sum(1 for r in list(create_responses)
+                            if getattr(r, "status", 0) == 200)
+            if not create_ok:
+                try:
+                    page.screenshot(path="debug_thread.png", full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "أغلق X المحرّر دون نشر فعلي: لم يصدر أي CreateTweet ناجح "
+                    "من الخادم (الثريد لم يُنشر — لا تُبلغ بالنجاح)."
+                )
+            if len(ids) < len(parts):
+                print(f"[DEBUG] thread: ids={len(ids)}/{len(parts)} "
+                      f"(create_ok={create_ok})")
+            # رابط رأس الثريد من rest_id الحقيقي — أوثق من مطاردة التوست.
+            return f"https://x.com/i/status/{ids[0]}" if ids else None
         except Exception:
             try:
                 page.screenshot(path="debug_thread.png", full_page=True)

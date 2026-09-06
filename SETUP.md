@@ -41,18 +41,31 @@ playwright install
 ## الخطوة 5️⃣: إعداد ملف البيئة
 
 1. انسخ محتوى `.env.example` وأنشئ ملف جديد باسم `.env`
-2. أضف مفتاح OpenAI API الخاص بك:
+2. أضف مفتاح OpenRouter الخاص بك:
 
 ```env
-OPENAI_API_KEY=sk-your-actual-api-key-here
+OPENROUTER_API_KEY=sk-or-v1-your-actual-api-key-here
+OPENROUTER_MODEL=openai/gpt-4o-mini
 ```
 
-### 🔑 كيفية الحصول على OpenAI API Key:
+⚠️ اسم الموديل في OpenRouter **مؤهَّل بالمزوّد** (`openai/gpt-4o-mini`).
+الاسم المجرّد مثل `gpt-4` يُرفض، ويعيد النظام ردوداً فارغة بلا رسالة خطأ.
 
-1. اذهب إلى: https://platform.openai.com/api-keys
+### 🔑 كيفية الحصول على OpenRouter API Key:
+
+1. اذهب إلى: https://openrouter.ai/keys
 2. سجل دخول أو أنشئ حساب
-3. اضغط على "Create new secret key"
+3. اضغط على "Create Key"
 4. انسخ المفتاح وضعه في ملف `.env`
+
+### تحقّق من الإعداد
+
+```bash
+python verify_openrouter.py
+```
+
+يفحص فعلياً: الاستدلال، الشات، الـ embeddings، عملاء ذاكرة الرسم البياني،
+وتوليد الصور. استخدم `--config-only` لفحص بلا نداءات شبكية.
 
 ## الخطوة 6️⃣: تشغيل التطبيق
 
@@ -93,12 +106,14 @@ http://localhost:8000
 pip install -r requirements.txt
 ```
 
-### المشكلة: خطأ في الاتصال بـ OpenAI
+### المشكلة: خطأ في الاتصال بمزوّد الذكاء (OpenRouter)
 
 **الحل:**
-- تأكد من إضافة `OPENAI_API_KEY` في ملف `.env`
-- تأكد من صحة المفتاح
-- تأكد من وجود رصيد في حسابك على OpenAI
+- شغّل `python verify_openrouter.py` — يحدد المشكلة بدقة
+- تأكد من إضافة `OPENROUTER_API_KEY` في ملف `.env`
+- تأكد أن `OPENROUTER_MODEL` اسم مؤهَّل (`openai/gpt-4o-mini` لا `gpt-4`)
+- تأكد من وجود رصيد في حسابك على OpenRouter
+- ‏401 على كل المسارات = المفتاح خاطئ. ردود فارغة فقط = اسم الموديل خاطئ.
 
 ### المشكلة: Port 8000 is already in use
 

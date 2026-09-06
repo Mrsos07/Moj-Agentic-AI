@@ -16,9 +16,26 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
+    # ── المزوّد الأساسي: OpenRouter ─────────────────────────────────────
+    # OPENROUTER_MODEL يجب أن يكون اسماً مؤهَّلاً بالمزوّد (مثل
+    # "openai/gpt-4o-mini"): OpenRouter يرفض "gpt-4" غير المؤهَّل.
+    OPENROUTER_API_KEY: Optional[str] = None
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
+    # نفس موديل الـ embeddings السابق — تغييره يبطل متجهات الرسم البياني كلها
+    OPENROUTER_EMBEDDING_MODEL: str = "openai/text-embedding-3-small"
+    OPENROUTER_IMAGE_MODEL: str = "openai/gpt-image-1"
+    OPENROUTER_SITE_URL: Optional[str] = None   # ترويسة HTTP-Referer (اختياري)
+    OPENROUTER_APP_NAME: Optional[str] = None   # ترويسة X-Title (اختياري)
+
+    # ── احتياط: OpenAI مباشرة (يُستخدم فقط إن غاب مفتاح OpenRouter) ──────
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_BASE_URL: Optional[str] = None
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+
     GEMINI_API_KEY: Optional[str] = None
-    OPENAI_MODEL: str = "gpt-4"
+    # حدود مشتركة بين المزوّدين (أسماء المتغيرات محفوظة للتوافق مع .env القديم)
     OPENAI_MAX_TOKENS: int = 2000
     OPENAI_TEMPERATURE: float = 0.7
 

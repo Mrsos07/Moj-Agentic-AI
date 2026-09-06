@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
@@ -162,8 +163,12 @@ def build_cycle_narrative(config, report: Dict[str, Any]) -> str:
             parts.append(
                 "🕊️ ما لقيت شيئاً مناسباً تماماً ضمن تخصصي هذه الدورة، وهذه المواضيع "
                 "والوسوم التي اطّلعت عليها:\n" + listing +
-                "\n\n👉 وجّهني إن أردت: اكتب مثلاً «انشر عن 2» أو «تكلم عن موضوع معيّن» "
-                "وسأنفّذ فوراً بأسلوب شخصيتي."
+                "\n\n👉 وجّهني بحرّية وأنفّذ فوراً، مثلاً:\n"
+                "- «انشر عن 2» أو «تكلم عن موضوع معيّن»\n"
+                "- «روح للتايم لاين وشوف تغريدة تناسب تخصصي وردّ عليها»\n"
+                "- «شوف المنشنات وردّ على اللي يهمّني»\n"
+                "- «اقتبس أقوى تغريدة في الترند» أو «تابع حسابين في مجالي»\n"
+                "أو ناقشني في أي شيء وأنا أشرح لك رأيي وأسبابي."
             )
         else:
             parts.append(
@@ -212,9 +217,42 @@ class RuntimeManager(IRuntimeManager):
         self._cycle_factory = cycle_factory
         self._llm = llm
         self._bus = event_bus
+        # دورة واحدة لكل موظف في اللحظة الواحدة: مجمّع العمال فيه 4 خيوط،
+        # فدورة مجدولة + «ابدأ دورة» يدوية لنفس الموظف كانتا تعملان معاً —
+        # كلتاهما تحمّل config وتحفظه في النهاية، وآخر حفظ يمسح تعلّم الأخرى.
+        # موظفون مختلفون يعملون بتوازٍ طبيعي (يتناوبون على قفل المتصفح فقط).
+        self._cycle_guards: Dict[str, threading.Lock] = {}
+        self._guards_lock = threading.Lock()
+
+    def _cycle_guard(self, employee_id: str) -> threading.Lock:
+        with self._guards_lock:
+            return self._cycle_guards.setdefault(employee_id, threading.Lock())
 
     # ---- IRuntimeManager ------------------------------------------------
     def run_cycle(self, employee_id: str, event: Event) -> Dict[str, Any]:
+        guard = self._cycle_guard(employee_id)
+        if not guard.acquire(blocking=False):
+            logger.info("cycle already running for %s; skipping duplicate", employee_id)
+            # طلب يدوي أثناء دورة جارية: أخبر المستخدم بدل الصمت — التجاهل
+            # الصامت يبدو كأن «الزر لا يعمل» لهذا الموظف.
+            if getattr(getattr(event, "type", None), "value", "") == "manual":
+                cfg = self._repo.get(employee_id)
+                if cfg is not None and getattr(cfg, "user_id", None) is not None:
+                    account = getattr(cfg, "account_username", "") or ""
+                    self._emit_progress(
+                        cfg.user_id,
+                        f"⏳ الموظف @{account or 'الذكي'} في منتصف دورة الآن — "
+                        "سينهيها أولاً، وطلبك الجديد يمكن إرساله بعدها مباشرة.",
+                        "aeos_cycle_busy", account,
+                    )
+            return {"skipped": True, "reason": "cycle_already_running",
+                    "employee_id": employee_id}
+        try:
+            return self._run_cycle_locked(employee_id, event)
+        finally:
+            guard.release()
+
+    def _run_cycle_locked(self, employee_id: str, event: Event) -> Dict[str, Any]:
         cycle_id = uuid.uuid4().hex
 
         # 1) LOAD
@@ -367,7 +405,7 @@ class RuntimeManager(IRuntimeManager):
                 db=db, conversation_id=conversation.id, role="assistant",
                 content=narrative, intent="aeos_cycle_update", agent="AEOS",
             )
-            self._push_chat(user_id, narrative)
+            self._push_chat(user_id, narrative, account)
 
         # 2) support request when the employee is blocked and needs the user
         help_request = report.get("help_request")
@@ -377,7 +415,7 @@ class RuntimeManager(IRuntimeManager):
                 db=db, conversation_id=conversation.id, role="assistant",
                 content=help_msg, intent="aeos_help_request", agent="AEOS",
             )
-            self._push_chat(user_id, help_msg)
+            self._push_chat(user_id, help_msg, account)
 
         db.commit()
 
@@ -421,17 +459,24 @@ class RuntimeManager(IRuntimeManager):
                 db.close()
         except Exception:  # noqa: BLE001
             logger.debug("progress persist skipped", exc_info=True)
-        self._push_chat(user_id, text)
+        self._push_chat(user_id, text, account)
 
     @staticmethod
-    def _push_chat(user_id, content: str) -> None:
-        """Best-effort real-time delivery to the chat WebSocket clients."""
+    def _push_chat(user_id, content: str, account: str = "") -> None:
+        """Best-effort real-time delivery to the chat WebSocket clients.
+
+        ``session_id``/``account`` إلزاميان مع تعدد الموظفين الفعالين: بدونهما
+        تلصق الواجهة رسائل كل الموظفين في المحادثة المفتوحة أياً كانت، فتختلط
+        دورات @A مع @B على الشاشة رغم أن التخزين منفصل وصحيح.
+        """
         try:
             from app.services import realtime_bus
 
             realtime_bus.publish_chat(user_id, {
                 "type": "assistant_message",
                 "message": content,
+                "account": account or None,
+                "session_id": (f"emp_{account}" if account else None),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
         except Exception:  # noqa: BLE001

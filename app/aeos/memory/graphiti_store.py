@@ -6,7 +6,12 @@ GraphitiStore — Zep/Graphiti temporal knowledge-graph memory (self-hosted).
 والسلوك) في رسم معرفي مخزَّن محلياً عبر Kuzu (قاعدة مضمّنة، بلا سيرفر خارجي).
 
 - كل موظف معزول بـ ``group_id = employee_id``.
-- الاستخراج يستخدم OpenAI (نفس ``OPENAI_API_KEY`` المستعمل في المنصة).
+- الاستخراج والـ embeddings يمرّان بنفس مزوّد المنصة (OpenRouter افتراضياً،
+  OpenAI احتياطاً) عبر ``app.core.llm_provider.resolve_llm``. **لا نكتفي
+  بتغيير المفتاح**: ``Graphiti()`` بلا وسائط يبني عملاءه الداخليين الثلاثة
+  (LLM + Embedder + Reranker) على ``https://api.openai.com`` ويقرأ
+  ``OPENAI_API_KEY`` من البيئة — فمفتاح OpenRouter وحده يعني 401 صامتاً
+  وذاكرة رسم بياني فارغة. لذلك نبنيهم صريحين في ``_build_ai_clients``.
 - Graphiti غير متزامن (asyncio) بينما الدورة المعرفية متزامنة، لذا نشغّل
   حلقة asyncio في خيط خلفي واحد ونمرّر إليها المهام:
   * ``ingest``  — إرسال حلقة (episode) بدون انتظار (fire-and-forget)، نصاً أو
@@ -24,8 +29,11 @@ GraphitiStore — Zep/Graphiti temporal knowledge-graph memory (self-hosted).
 متغيرات البيئة (اختيارية):
 - ``GRAPHITI_ENABLED``    — "0" لتعطيل الميزة (الافتراضي مفعّلة).
 - ``GRAPHITI_KUZU_DB``    — مسار قاعدة Kuzu (الافتراضي data/graphiti_kuzu،
-  وعلى ويندوز داخل OneDrive يصبح ``%LOCALAPPDATA%\Moj-Agentic-AI\graphiti_kuzu``
+  وداخل OneDrive يصبح ``%LOCALAPPDATA%/Moj-Agentic-AI/graphiti_kuzu``
   لأن مزامنة OneDrive تُتلف قاعدة Kuzu الحيّة — انظر ``_default_db_path``).
+- ``GRAPHITI_ISOLATED``   — "0" لتشغيل Kuzu داخل العملية (الافتراضي: عملية
+  فرعية معزولة عبر ``GraphitiStoreProxy`` لأن انهيار Kuzu الأصلي كان يقتل
+  الباك إند كاملاً).
 - ``GRAPHITI_MIN_SCORE``  — أدنى تشابه دلالي مقبول (الافتراضي 0.3؛ افتراضي
   Graphiti 0.6 صارم جداً على الاستعلامات العربية الفضفاضة فيعيد صفر نتائج).
 """
@@ -37,6 +45,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import warnings
@@ -94,7 +103,12 @@ class GraphitiStore:
 
     def __init__(self, db_path: Optional[str] = None,
                  min_score: Optional[float] = None,
-                 auto_repair: Optional[bool] = None) -> None:
+                 auto_repair: Optional[bool] = None,
+                 provider: Optional[str] = None) -> None:
+        # neo4j هو الافتراضي بعد هجرة 2026-08-05: محرك Kuzu المدمج ينهار
+        # أصلياً (0xC0000005) أثناء كتابات Graphiti وهو مؤرشف بلا إصلاح قادم.
+        # ``GRAPHITI_DRIVER=kuzu`` يعيد المحرك القديم (تشخيص/بيانات قديمة).
+        self._provider = (provider or os.getenv("GRAPHITI_DRIVER", "neo4j")).strip().lower()
         self._db_path = str(db_path or os.getenv("GRAPHITI_KUZU_DB") or _DEFAULT_DB)
         self._enabled = os.getenv("GRAPHITI_ENABLED", "1").strip() not in ("0", "false", "no")
         # التعافي الذاتي (نقل قاعدة تالفة وبناء جديدة) — تُعطّله الأدوات التي
@@ -116,10 +130,19 @@ class GraphitiStore:
         self._failed = False          # تعطيل نهائي (مكتبة/مفتاح مفقود)
         self._retry_at = 0.0          # تهدئة بعد فشل عابر
         self._ingest_lock: Optional[asyncio.Lock] = None
-        self._last_digest: Dict[str, str] = {}
+        self._last_digest: Dict[str, str] = self._load_digests()
+        # كاش البحث: المفتاح → (الوقت، حقبة التغذية، الحقائق). يُبطَل فوراً عند
+        # أي كتابة (``_ingest_epoch``) وبعد TTL قصير، فلا يعيد أبداً صورة قديمة.
+        self._search_cache: Dict[str, Any] = {}
+        self._ingest_epoch = 0
+        try:
+            self._cache_ttl = float(os.getenv("GRAPHITI_SEARCH_TTL", "300"))
+        except (TypeError, ValueError):
+            self._cache_ttl = 300.0
         self.counters: Dict[str, int] = {
             "ingested": 0, "ingest_failed": 0, "ingest_duplicate": 0,
             "searches": 0, "search_empty": 0, "recent_fallbacks": 0,
+            "search_cache_hits": 0,
         }
 
     # ---- lifecycle -------------------------------------------------------
@@ -134,24 +157,83 @@ class GraphitiStore:
             return False
         return self._initialize()
 
+    @staticmethod
+    def _build_ai_clients(endpoint: Any) -> Dict[str, Any]:
+        """عملاء Graphiti الثلاثة موجَّهين إلى مزوّدنا لا إلى OpenAI مباشرة.
+
+        الثلاثة إلزامية وليست تزيّناً: ``Graphiti()`` يبني أي عميل غير ممرَّر
+        بنفسه على ``api.openai.com`` قارئاً ``OPENAI_API_KEY`` من البيئة. أي
+        واحد منسي يعني إما 401 أو — أسوأ — فاتورة على حساب OpenAI بينما بقية
+        النظام على OpenRouter.
+
+        * ``llm_client``   — استخراج الكيانات/الحقائق. نُبقي ``OpenAIClient``
+          (واجهة ``/responses`` عبر ``responses.parse``) لأن OpenRouter تدعمها
+          كواجهة موحّدة، والـ SDK هو من يبني المخطط الصارم فيصحّ.
+          **لا تستخدم ``OpenAIGenericClient`` بوضعه الافتراضي هنا**: هو يبني
+          ``response_format=json_schema`` من ``model_json_schema()`` الخام،
+          وهذا المخطط يفتقد ``additionalProperties: false`` فترفضه واجهة
+          OpenAI الصارمة — مُقاس فعلياً، 400 ‏``invalid_json_schema`` على
+          ``ExtractedEntities`` من OpenAI و Azure كليهما عبر OpenRouter،
+          فتفشل كل عملية تغذية (``ingest_failed``) ويبقى الرسم فارغاً بلا أي
+          خطأ ظاهر في الواجهة. ``GRAPHITI_STRUCTURED_OUTPUT=json_object``
+          يحوّل إلى العميل العام بوضع يضع المخطط في الـ prompt بدل فرضه
+          (مُختبَر وناجح أيضاً) — لموديل لا تعمل معه ``/responses``.
+        * ``embedder``     — نُبقي ``text-embedding-3-small`` بعينه: أي موديل
+          آخر يغيّر أبعاد المتجهات، فتصبح كل عقد الرسم البياني المخزّنة غير
+          قابلة للبحث الدلالي وتحتاج إعادة بناء كاملة.
+        * ``cross_encoder`` — لا يُستدعى فعلياً (مسار البحث عندنا
+          ``COMBINED_HYBRID_SEARCH_RRF``، وهو دمج مرتّب بلا reranker) لكن
+          المُنشئ يبنيه على أي حال، فيجب أن يحمل مفتاحنا لا مفتاح OpenAI.
+        """
+        from openai import AsyncOpenAI
+
+        from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+        from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+        from graphiti_core.llm_client.config import LLMConfig
+        from graphiti_core.llm_client.openai_client import OpenAIClient
+        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+
+        config = LLMConfig(
+            api_key=endpoint.api_key,
+            base_url=endpoint.base_url,
+            model=endpoint.model,
+            small_model=endpoint.model,
+        )
+        # عميل واحد مشترك: ``client_kwargs`` يحمل أيضاً ترويسات OpenRouter
+        # (HTTP-Referer / X-Title) التي لا يعرفها ``LLMConfig``، فبناء العملاء
+        # من الـ config وحده يفقدها ويضيع تمييز الاستخدام في لوحة المزوّد.
+        http_client = AsyncOpenAI(**endpoint.client_kwargs())
+        mode = (os.getenv("GRAPHITI_STRUCTURED_OUTPUT") or "responses").strip()
+        if mode in ("json_object", "json_schema"):
+            llm_client: Any = OpenAIGenericClient(
+                config=config, client=http_client, structured_output_mode=mode
+            )
+        else:
+            llm_client = OpenAIClient(config=config, client=http_client)
+        return {
+            "llm_client": llm_client,
+            "embedder": OpenAIEmbedder(
+                config=OpenAIEmbedderConfig(
+                    api_key=endpoint.api_key,
+                    base_url=endpoint.base_url,
+                    embedding_model=endpoint.embedding_model,
+                ),
+                client=http_client,
+            ),
+            "cross_encoder": OpenAIRerankerClient(config=config, client=http_client),
+        }
+
     def _initialize(self) -> bool:
         with self._init_lock:
             if self._graphiti is not None:
                 return True
             if self._failed or time.monotonic() < self._retry_at:
                 return False
-            if not os.getenv("OPENAI_API_KEY"):
-                # المفتاح يُقرأ عادة عبر app.core.config.settings (pydantic .env)
-                # دون تصديره إلى os.environ، بينما عملاء Graphiti الداخليون
-                # (LLM + Embedder) يقرؤونه من متغير البيئة — فنجسّره هنا.
-                try:
-                    from app.core.config import settings
-                    if getattr(settings, "OPENAI_API_KEY", ""):
-                        os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
-                except Exception:  # noqa: BLE001
-                    pass
-            if not os.getenv("OPENAI_API_KEY"):
-                logger.info("GraphitiStore disabled: OPENAI_API_KEY not set")
+            from app.core.llm_provider import resolve_llm
+
+            endpoint = resolve_llm()
+            if not endpoint.available:
+                logger.info("GraphitiStore disabled: no OPENROUTER_API_KEY / OPENAI_API_KEY")
                 self._failed = True
                 return False
             try:
@@ -161,18 +243,39 @@ class GraphitiStore:
                 self._failed = True
                 return False
             try:
-                Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-                self._recover_from_hard_crash()
-                driver = self._open_driver()
-                self._setup_fts_indexes(driver)
+                ai_clients = self._build_ai_clients(endpoint)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GraphitiStore disabled: cannot build %s clients (%s)",
+                               endpoint.provider, exc)
+                self._failed = True
+                return False
+            try:
+                if self._provider == "neo4j":
+                    # إشعارات «الخاصية غير موجودة» على قاعدة فارغة ضوضاء
+                    # متوقعة من استعلامات graphiti — لا تستحق سطراً في اللوق
+                    logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+                    driver = self._open_neo4j_driver()
+                else:
+                    Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+                    self._recover_from_hard_crash()
+                    driver = self._open_driver()
+                    self._setup_fts_indexes(driver)
                 self._loop = asyncio.new_event_loop()
                 self._thread = threading.Thread(
                     target=self._loop.run_forever, name="graphiti-loop", daemon=True
                 )
                 self._thread.start()
-                self._graphiti = Graphiti(graph_driver=driver)
-                logger.info("GraphitiStore ready (kuzu db=%s, min_score=%.2f)",
-                            self._db_path, self._min_score)
+                self._graphiti = Graphiti(graph_driver=driver, **ai_clients)
+                if self._provider == "neo4j":
+                    # على Neo4j هذه تنشئ الفهارس (النصية والدلالية) فعلياً —
+                    # بعكس سائق Kuzu حيث كانت no-op واضطررنا لإنشائها يدوياً.
+                    asyncio.run_coroutine_threadsafe(
+                        self._graphiti.build_indices_and_constraints(), self._loop
+                    ).result(timeout=120)
+                logger.info("GraphitiStore ready (driver=%s, db=%s, min_score=%.2f, llm=%s/%s)",
+                            self._provider,
+                            "bolt" if self._provider == "neo4j" else self._db_path,
+                            self._min_score, endpoint.provider, endpoint.model)
                 return True
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GraphitiStore init failed (retry in %ds): %s",
@@ -231,6 +334,19 @@ class GraphitiStore:
             self._writing_marker.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001
             pass
+
+    def _open_neo4j_driver(self):
+        """شغّل خادم Neo4j المحلي إن لزم وافتح سائق graphiti الأساسي."""
+        from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+        from .neo4j_service import (
+            DEFAULT_PASSWORD, DEFAULT_URI, DEFAULT_USER, ensure_neo4j,
+        )
+
+        if not ensure_neo4j():
+            raise RuntimeError(
+                f"Neo4j not reachable on {DEFAULT_URI} and could not be started")
+        return Neo4jDriver(uri=DEFAULT_URI, user=DEFAULT_USER, password=DEFAULT_PASSWORD)
 
     def _open_driver(self):
         """افتح سائق Kuzu؛ وإن كانت القاعدة غير قابلة للفتح انقلها للحجر وأعد البناء.
@@ -370,6 +486,33 @@ class GraphitiStore:
         words = _WS_RE.sub(" ", text).strip().split(" ")
         return " ".join(w for w in words if w)[:400] if words else ""
 
+    @property
+    def _digest_file(self) -> Path:
+        """ملف بصمات آخر حلقة لكل موظف — يعيش بجوار القاعدة/بيانات التطبيق."""
+        return Path(self._db_path).parent / "graphiti_last_digests.json"
+
+    def _load_digests(self) -> Dict[str, str]:
+        """بصمات آخر تغذية — **دائمة عبر إعادة التشغيل**.
+
+        كانت في الذاكرة فقط، فكل إقلاع (أو إعادة تشغيل عامل الرسم بعد انهيار)
+        يفقدها فتُعاد تغذية الحلقة نفسها ويستخرج Graphiti منها الحقائق مرة
+        أخرى — تضخّم في الرسم وكلفة LLM بلا أي معلومة جديدة.
+        """
+        try:
+            raw = self._digest_file.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001 - ملف مساعد: غيابه/تلفه لا يعني شيئاً
+            return {}
+
+    def _save_digests(self) -> None:
+        try:
+            self._digest_file.parent.mkdir(parents=True, exist_ok=True)
+            self._digest_file.write_text(
+                json.dumps(self._last_digest, ensure_ascii=False), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
     @staticmethod
     def _episode_body(payload: Union[str, Dict[str, Any]]):
         """حوّل الحمولة إلى (نص، نوع الحلقة)؛ القواميس تُرسل كـ JSON."""
@@ -401,12 +544,19 @@ class GraphitiStore:
             logger.debug("Graphiti ingest skipped (duplicate) for %s", employee_id)
             return None
         self._last_digest[employee_id] = digest
+        self._save_digests()
+        # الرسم على وشك التغيّر ⇒ كل نتيجة بحث محفوظة صارت قديمة
+        self._ingest_epoch += 1
+        self._search_cache.clear()
+
+        kuzu = self._provider != "neo4j"
 
         async def _add() -> None:
             async with self._lock():
-                # علامة «كتابة جارية»: إن مات Kuzu أصلياً في المنتصف نكتشفه
-                # عند البدء التالي فنحجر الملف بدل الدخول في حلقة موت
-                self._mark_write_start(f"{name}/{employee_id}")
+                # علامة «كتابة جارية» (Kuzu فقط): إن مات المحرك أصلياً في
+                # المنتصف نكتشفه عند البدء التالي فنحجر الملف بدل حلقة موت
+                if kuzu:
+                    self._mark_write_start(f"{name}/{employee_id}")
                 try:
                     await self._graphiti.add_episode(
                         name=name,
@@ -422,7 +572,8 @@ class GraphitiStore:
                     logger.warning("Graphiti ingest failed: %s", exc)
                 finally:
                     # الوصول إلى هنا يعني أن العملية نجت من الكتابة
-                    self._mark_write_end()
+                    if kuzu:
+                        self._mark_write_end()
 
         return self._submit(_add())
 
@@ -430,6 +581,30 @@ class GraphitiStore:
                timeout: float = 25.0) -> List[str]:
         """بحث هجين في حقائق الموظف؛ يعيد قائمة نصوص الحقائق (قد تكون فارغة)."""
         return self.search_facts(employee_id, [query], limit=limit, timeout=timeout)
+
+    # ---- كاش البحث ----
+    def _cache_get(self, key: str):
+        """نتيجة بحث سابقة ما دامت الحقائق لم تتغيّر (لا تغذية جديدة).
+
+        كل دورة كانت تُطلق 5 استعلامات هجينة تحت قفل عام بمهلة 30 ثانية بينما
+        الرسم لا يتغيّر إلا عند التغذية (مرّة في نهاية الدورة). النتيجة: انتظار
+        متكرّر بلا أي معلومة جديدة. الكاش يُبطَل فوراً عند أي ``ingest``.
+        """
+        hit = self._search_cache.get(key)
+        if not hit:
+            return None
+        ts, epoch, facts = hit
+        if epoch != self._ingest_epoch:
+            return None
+        if time.monotonic() - ts > self._cache_ttl:
+            return None
+        self.counters["search_cache_hits"] += 1
+        return list(facts)
+
+    def _cache_put(self, key: str, facts: List[str]) -> None:
+        if len(self._search_cache) > 64:
+            self._search_cache.clear()
+        self._search_cache[key] = (time.monotonic(), self._ingest_epoch, list(facts))
 
     def search_facts(self, employee_id: str, queries: Sequence[str], limit: int = 10,
                      timeout: float = 30.0, include_recent: bool = True) -> List[str]:
@@ -444,51 +619,21 @@ class GraphitiStore:
         if not cleaned or not self.available:
             return []
 
-        from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF
-
-        config = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
-        config.limit = max(1, min(int(limit), 25))
-        config.edge_config.sim_min_score = self._min_score
-        config.node_config.sim_min_score = self._min_score
+        cache_key = f"f|{employee_id}|{limit}|{int(include_recent)}|" + "|".join(cleaned)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
 
         async def _run() -> List[str]:
             # القفل إلزامي هنا: بحثٌ يتزامن مع كتابة يُسقط العملية كلها
             async with self._lock():
-                return await _search_all()
-
-        async def _search_all() -> List[str]:
-            facts: List[str] = []
-            for q in cleaned:
-                words = q.split(" ")
-                if len(words) > _MAX_QUERY_WORDS:
-                    q = " ".join(words[:_MAX_QUERY_WORDS])
-                try:
-                    res = await self._graphiti.search_(
-                        query=q, config=config, group_ids=[employee_id]
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Graphiti search failed (%s): %s", q[:60], exc)
-                    continue
-                for edge in getattr(res, "edges", []) or []:
-                    fact = (getattr(edge, "fact", "") or "").strip()
-                    if fact:
-                        facts.append(fact)
-                for node in getattr(res, "nodes", []) or []:
-                    nm = (getattr(node, "name", "") or "").strip()
-                    summary = (getattr(node, "summary", "") or "").strip()
-                    if nm and summary:
-                        facts.append(f"{nm}: {summary}")
-                if len(_drop_near_duplicates(_dedup(facts))) >= limit:
-                    break
-            # إزالة التكرار الحرفي ثم المتقارب معنى — وإلا احتلّ حدثٌ واحد
-            # مكرّر الصياغة كل النتائج وأُقصيت بقية التجارب.
-            merged = _drop_near_duplicates(_dedup(facts))[:limit]
-            if merged or not include_recent:
-                return merged
-            recent = await self._recent_facts_async(employee_id, limit)
-            if recent:
-                self.counters["recent_fallbacks"] += 1
-            return recent
+                facts = await self._collect_facts(employee_id, cleaned, limit)
+                if facts or not include_recent:
+                    return facts
+                recent = await self._recent_facts_async(employee_id, limit)
+                if recent:
+                    self.counters["recent_fallbacks"] += 1
+                return recent
 
         self.counters["searches"] += 1
         fut = self._submit(_run())
@@ -501,15 +646,112 @@ class GraphitiStore:
             return []
         if not facts:
             self.counters["search_empty"] += 1
+        self._cache_put(cache_key, facts)
         return facts
 
+    def facts_about(self, employee_id: str, entities: Sequence[str],
+                    limit: int = 3, timeout: float = 30.0) -> Dict[str, List[str]]:
+        """ما يعرفه الرسم المعرفي عن **كيانات محدّدة** (حسابات/مواضيع).
+
+        هذه هي الواجهة التي كانت غائبة تماماً: الرسم كان يُستجوَب باستعلامات
+        عامة («تفاعل الجمهور...») وتُستخدم النتيجة لتوليد «مزاج» فقط، فلم
+        تُسأل الذاكرة قطّ عن الهدف الذي نوشك على التفاعل معه. الآن يمكن لقرار
+        التفاعل أن يستند إلى تاريخ العلاقة مع الحساب نفسه.
+
+        كل الاستعلامات تجري داخل **قفل واحد** (لا قفل لكل كيان) فلا تتضاعف
+        كلفة التسلسل، وتُنسب الحقيقة لكيان بذكره الصريح فيها.
+        """
+        names = [str(e).strip() for e in (entities or []) if str(e).strip()][:5]
+        if not names or not self.available:
+            return {}
+
+        cache_key = f"e|{employee_id}|{limit}|" + "|".join(sorted(n.lower() for n in names))
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return json.loads(cached[0]) if cached else {}
+
+        async def _run() -> Dict[str, List[str]]:
+            out: Dict[str, List[str]] = {}
+            async with self._lock():
+                for name in names:
+                    query = self._clean_query(f"{name} سلوك وتفاعل وآراء")
+                    facts = await self._collect_facts(
+                        employee_id, [query], max(limit * 2, 4))
+                    key = name.lstrip("@").strip().lower()
+                    # لا تنسب لكيان حقيقةً لا تذكره: البحث الهجين يعيد جيراناً
+                    # دلاليين، ونسبتُهم إليه تصنع «تاريخ علاقة» لم يحدث.
+                    owned = [f for f in facts if key in f.lower()]
+                    if owned:
+                        out[key] = owned[:limit]
+            return out
+
+        fut = self._submit(_run())
+        if fut is None:
+            return {}
+        try:
+            result = fut.result(timeout=timeout) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Graphiti facts_about failed: %s", exc)
+            return {}
+        self._cache_put(cache_key, [json.dumps(result, ensure_ascii=False)])
+        return result
+
+    async def _collect_facts(self, employee_id: str, queries: Sequence[str],
+                             limit: int) -> List[str]:
+        """نفّذ الاستعلامات واجمع حقائقها — **يُستدعى داخل القفل دائماً**."""
+        from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF
+
+        config = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
+        config.limit = max(1, min(int(limit), 25))
+        config.edge_config.sim_min_score = self._min_score
+        config.node_config.sim_min_score = self._min_score
+
+        facts: List[str] = []
+        for q in queries:
+            words = q.split(" ")
+            if len(words) > _MAX_QUERY_WORDS:
+                q = " ".join(words[:_MAX_QUERY_WORDS])
+            try:
+                res = await self._graphiti.search_(
+                    query=q, config=config, group_ids=[employee_id]
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Graphiti search failed (%s): %s", q[:60], exc)
+                continue
+            for edge in getattr(res, "edges", []) or []:
+                fact = (getattr(edge, "fact", "") or "").strip()
+                if fact:
+                    facts.append(fact)
+            for node in getattr(res, "nodes", []) or []:
+                nm = (getattr(node, "name", "") or "").strip()
+                summary = (getattr(node, "summary", "") or "").strip()
+                if nm and summary:
+                    facts.append(f"{nm}: {summary}")
+            if len(_drop_near_duplicates(_dedup(facts))) >= limit:
+                break
+        # إزالة التكرار الحرفي ثم المتقارب معنى — وإلا احتلّ حدثٌ واحد
+        # مكرّر الصياغة كل النتائج وأُقصيت بقية التجارب.
+        return _drop_near_duplicates(_dedup(facts))[:limit]
+
     async def _recent_facts_async(self, employee_id: str, limit: int) -> List[str]:
-        """أحدث الحقائق الصالحة زمنياً — استعلام مباشر بلا embeddings."""
-        query = (
-            "MATCH (e:RelatesToNode_) WHERE e.group_id = $group_id "
-            "AND e.expired_at IS NULL AND e.invalid_at IS NULL "
-            "RETURN e.fact AS fact ORDER BY e.created_at DESC LIMIT $limit"
-        )
+        """أحدث الحقائق الصالحة زمنياً — استعلام مباشر بلا embeddings.
+
+        مخطط الحقائق يختلف بين المزوّدَين: Kuzu لا يدعم فهرسة خصائص العلاقات
+        فيمثّلها graphiti كعقد وسيطة ``RelatesToNode_``، بينما في Neo4j هي
+        علاقات ``RELATES_TO`` حقيقية.
+        """
+        if self._provider == "neo4j":
+            query = (
+                "MATCH ()-[e:RELATES_TO]->() WHERE e.group_id = $group_id "
+                "AND e.expired_at IS NULL AND e.invalid_at IS NULL "
+                "RETURN e.fact AS fact ORDER BY e.created_at DESC LIMIT $limit"
+            )
+        else:
+            query = (
+                "MATCH (e:RelatesToNode_) WHERE e.group_id = $group_id "
+                "AND e.expired_at IS NULL AND e.invalid_at IS NULL "
+                "RETURN e.fact AS fact ORDER BY e.created_at DESC LIMIT $limit"
+            )
         try:
             records, _, _ = await self._graphiti.driver.execute_query(
                 query, group_id=employee_id, limit=max(1, min(int(limit), 50))
@@ -544,7 +786,8 @@ class GraphitiStore:
         info: Dict[str, Any] = {
             "enabled": self._enabled,
             "available": self.available,
-            "db_path": self._db_path,
+            "driver": self._provider,
+            "db_path": self._db_path if self._provider != "neo4j" else None,
             "min_score": self._min_score,
             "counters": dict(self.counters),
         }
@@ -554,17 +797,22 @@ class GraphitiStore:
         async def _counts() -> Dict[str, int]:
             out: Dict[str, int] = {}
             where = " WHERE n.group_id = $group_id" if employee_id else ""
-            async with self._lock():  # عدّ متزامن مع كتابة = انهيار العملية
-                for label, key in (("Episodic", "episodes"), ("Entity", "entities"),
-                                   ("RelatesToNode_", "facts")):
+            # في Neo4j الحقائق علاقات RELATES_TO؛ في Kuzu عقد RelatesToNode_
+            fact_match = ("MATCH ()-[n:RELATES_TO]->()"
+                          if self._provider == "neo4j" else "MATCH (n:RelatesToNode_)")
+            queries = (("MATCH (n:Episodic)", "episodes"),
+                       ("MATCH (n:Entity)", "entities"),
+                       (fact_match, "facts"))
+            async with self._lock():  # عدّ متزامن مع كتابة = انهيار العملية (Kuzu)
+                for match, key in queries:
                     try:
                         records, _, _ = await self._graphiti.driver.execute_query(
-                            f"MATCH (n:{label}){where} RETURN count(n) AS c",
+                            f"{match}{where} RETURN count(n) AS c",
                             **({"group_id": employee_id} if employee_id else {}),
                         )
                         out[key] = int((records or [{}])[0].get("c") or 0)
                     except Exception as exc:  # noqa: BLE001
-                        logger.debug("Graphiti stats %s failed: %s", label, exc)
+                        logger.debug("Graphiti stats %s failed: %s", key, exc)
                         out[key] = -1
             return out
 
@@ -696,15 +944,187 @@ def _drop_near_duplicates(items: Sequence[str],
     return kept
 
 
+class GraphitiStoreProxy:
+    """واجهة GraphitiStore نفسها، لكن العمل كله في **عملية فرعية معزولة**.
+
+    لماذا: Kuzu ينهار أصلياً (0xC0000005) أثناء كتابات Graphiti حتى على قاعدة
+    جديدة خارج OneDrive وبوصولٍ متسلسل بالكامل — أي علة داخلية في محرك ميت
+    (المشروع مؤرشف، 0.11.3 آخر إصدار، وgraphiti تعلن سائقه مهجوراً). داخل
+    العملية الأم كان كل انهيار يقتل الباك إند كاملاً («يختفي الموظف وسجل
+    المحادثة»). هنا الانهيار يقتل العامل وحده: النداء الجاري يعيد قيمة آمنة،
+    والعامل يُعاد تشغيله عند النداء التالي، والمنصة لا تشعر بشيء.
+
+    البروتوكول أسطر JSON متزامنة (طلب واحد في كل لحظة — الوصول إلى Kuzu
+    متسلسل أصلاً بالتصميم، فلا نخسر تفاوتاً حقيقياً). ``GRAPHITI_ISOLATED=0``
+    يعيد الوضع القديم داخل العملية (للتشخيص).
+    """
+
+    _SPAWN_COOLDOWN = 15.0  # لا نعيد إطلاق عامل ينهار عند إقلاعه في حلقة محمومة
+
+    def __init__(self) -> None:
+        self._proc = None
+        self._io_lock = threading.Lock()
+        self._next_id = 0
+        self._spawn_failed_at = 0.0
+
+    # ---- lifecycle ----
+    def _spawn(self) -> bool:
+        import subprocess
+
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        if time.monotonic() - self._spawn_failed_at < self._SPAWN_COOLDOWN:
+            return False
+        root = Path(__file__).resolve().parents[3]
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, "-m", "app.aeos.memory.graphiti_worker"],
+                cwd=str(root),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graphiti worker spawn failed: %s", exc)
+            self._spawn_failed_at = time.monotonic()
+            return False
+        logger.info("graphiti worker started (pid=%s)", self._proc.pid)
+        return True
+
+    def _call(self, op: str, rpc_timeout: float = 30.0, default: Any = None,
+              **kwargs: Any) -> Any:
+        """طلب/ردّ واحد. موت العامل (انهيار Kuzu) يعيد القيمة الآمنة فوراً."""
+        with self._io_lock:
+            if not self._spawn():
+                return default
+            proc = self._proc
+            self._next_id += 1
+            rid = self._next_id
+            try:
+                proc.stdin.write(json.dumps(
+                    {"id": rid, "op": op, "kwargs": kwargs}, ensure_ascii=False
+                ) + "\n")
+                proc.stdin.flush()
+                # readline يعود بسطر فارغ إذا مات العامل (أنبوب مقطوع) — وهذا
+                # بالضبط ما يحدث عند انهيار Kuzu الأصلي: نسجّل ونكمل حيّين.
+                line = self._read_line(proc, rpc_timeout)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("graphiti worker died mid-call (%s op=%s) — "
+                             "will respawn on next use", exc, op)
+                self._reap()
+                return default
+            if not line:
+                code = proc.poll()
+                logger.error(
+                    "graphiti worker exited (code=%s) during op=%s — the native "
+                    "kuzu crash is contained; respawning on next use", code, op)
+                self._reap()
+                return default
+            try:
+                resp = json.loads(line)
+            except ValueError:
+                logger.warning("graphiti worker garbled reply for op=%s", op)
+                return default
+            if not resp.get("ok"):
+                logger.warning("graphiti worker op=%s failed: %s", op, resp.get("error"))
+                return default
+            return resp.get("result", default)
+
+    def _read_line(self, proc, timeout: float) -> str:
+        """اقرأ سطر الردّ بمهلة (القراءة المقفلة إلى الأبد تجمّد الدورة كلها)."""
+        result: List[str] = []
+
+        def _read() -> None:
+            try:
+                result.append(proc.stdout.readline())
+            except Exception:  # noqa: BLE001
+                result.append("")
+
+        t = threading.Thread(target=_read, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise TimeoutError(f"no reply within {timeout:.0f}s")
+        return result[0] if result else ""
+
+    def _reap(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ---- نفس الواجهة العامة للمخزن ----
+    @property
+    def available(self) -> bool:
+        return bool(self._call("available", rpc_timeout=120.0, default=False))
+
+    def ingest(self, employee_id: str, payload: Union[str, Dict[str, Any]],
+               name: str = "cycle",
+               source_description: str = "aeos cognitive cycle") -> None:
+        self._call("ingest", rpc_timeout=30.0, employee_id=employee_id,
+                   payload=payload, name=name, source_description=source_description)
+
+    def search(self, employee_id: str, query: str, limit: int = 10,
+               timeout: float = 25.0) -> List[str]:
+        return self._call("search", rpc_timeout=timeout + 10.0, default=[],
+                          employee_id=employee_id, query=query,
+                          limit=limit, timeout=timeout) or []
+
+    def search_facts(self, employee_id: str, queries: Sequence[str], limit: int = 10,
+                     timeout: float = 30.0, include_recent: bool = True) -> List[str]:
+        return self._call("search_facts", rpc_timeout=timeout + 10.0, default=[],
+                          employee_id=employee_id, queries=list(queries), limit=limit,
+                          timeout=timeout, include_recent=include_recent) or []
+
+    def facts_about(self, employee_id: str, entities: Sequence[str],
+                    limit: int = 3, timeout: float = 30.0) -> Dict[str, List[str]]:
+        return self._call("facts_about", rpc_timeout=timeout + 10.0, default={},
+                          employee_id=employee_id, entities=list(entities),
+                          limit=limit, timeout=timeout) or {}
+
+    def recent_facts(self, employee_id: str, limit: int = 10,
+                     timeout: float = 15.0) -> List[str]:
+        return self._call("recent_facts", rpc_timeout=timeout + 10.0, default=[],
+                          employee_id=employee_id, limit=limit, timeout=timeout) or []
+
+    def stats(self, employee_id: Optional[str] = None,
+              timeout: float = 15.0) -> Dict[str, Any]:
+        return self._call("stats", rpc_timeout=timeout + 10.0,
+                          default={"enabled": True, "available": False,
+                                   "error": "graph worker unavailable"},
+                          employee_id=employee_id, timeout=timeout)
+
+    def clear(self, employee_id: str) -> None:
+        self._call("clear", rpc_timeout=60.0, employee_id=employee_id)
+
+    def shutdown(self) -> None:
+        """أغلق العامل بلطف (EOF يمهله لإكمال كتابة جارية ثم يخرج)."""
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()
+            proc.wait(timeout=100)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 # ---- process-wide singleton ---------------------------------------------
-_store: Optional[GraphitiStore] = None
+_store: Optional[Union[GraphitiStore, GraphitiStoreProxy]] = None
 _store_lock = threading.Lock()
 
 
-def get_graphiti_store() -> GraphitiStore:
+def get_graphiti_store() -> Union[GraphitiStore, GraphitiStoreProxy]:
     global _store
     if _store is None:
         with _store_lock:
             if _store is None:
-                _store = GraphitiStore()
+                isolated = os.getenv("GRAPHITI_ISOLATED", "1").strip().lower() \
+                    not in ("0", "false", "no")
+                _store = GraphitiStoreProxy() if isolated else GraphitiStore()
     return _store

@@ -1,7 +1,10 @@
 """
 LLM provider implementations behind :class:`ILLMProvider`.
 
-- ``OpenAILLMProvider`` wraps the OpenAI SDK already present in requirements.
+- ``OpenAICompatibleLLMProvider`` wraps the OpenAI SDK, pointed at whatever
+  OpenAI-compatible endpoint :func:`app.core.llm_provider.resolve_llm` picks
+  (OpenRouter by default, OpenAI as fallback). Only ``base_url`` + model name
+  differ between them, so one client class covers both.
 - ``NullLLMProvider`` is a deterministic fallback used when no API key is
   configured, so the whole platform still runs (and is testable) offline.
 """
@@ -9,9 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
 from .interfaces import ILLMProvider
+
+if TYPE_CHECKING:  # pragma: no cover
+    from app.core.llm_provider import LLMEndpoint
 
 logger = logging.getLogger("aeos.llm")
 
@@ -32,21 +38,22 @@ class NullLLMProvider(ILLMProvider):
         return {}
 
 
-class OpenAILLMProvider(ILLMProvider):
-    """OpenAI-backed reasoning provider."""
+class OpenAICompatibleLLMProvider(ILLMProvider):
+    """مزوّد استدلال عبر أي واجهة متوافقة مع OpenAI (OpenRouter افتراضياً)."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4",
-                 max_tokens: int = 1500, temperature: float = 0.7) -> None:
-        self._model = model
-        self._max_tokens = max_tokens
-        self._temperature = temperature
+    def __init__(self, endpoint: "LLMEndpoint") -> None:
+        self._model = endpoint.model
+        self._max_tokens = endpoint.max_tokens
+        self._temperature = endpoint.temperature
+        self._provider = endpoint.provider
         self._client = None
         try:
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=api_key)
+            self._client = OpenAI(**endpoint.client_kwargs())
         except Exception:  # noqa: BLE001
-            logger.exception("Failed to init OpenAI client; falling back to null")
+            logger.exception("Failed to init %s client; falling back to null",
+                             endpoint.provider)
 
     @property
     def available(self) -> bool:
@@ -105,15 +112,12 @@ def _safe_json(raw: str) -> Dict[str, Any]:
 def build_llm_provider() -> ILLMProvider:
     """Factory: pick a provider from environment configuration."""
     try:
-        from app.core.config import settings
+        from app.core.llm_provider import resolve_llm
 
-        if settings.OPENAI_API_KEY:
-            return OpenAILLMProvider(
-                api_key=settings.OPENAI_API_KEY,
-                model=settings.OPENAI_MODEL,
-                max_tokens=settings.OPENAI_MAX_TOKENS,
-                temperature=settings.OPENAI_TEMPERATURE,
-            )
+        endpoint = resolve_llm()
+        if endpoint.available:
+            logger.info("LLM provider: %s (model=%s)", endpoint.provider, endpoint.model)
+            return OpenAICompatibleLLMProvider(endpoint)
     except Exception:  # noqa: BLE001
         logger.exception("LLM provider config failed")
     return NullLLMProvider()

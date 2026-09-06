@@ -29,14 +29,14 @@ _FILE = "files/signals_snapshot.json"
 SNAPSHOT_SCRATCH_KEYS = (
     "timeline", "x_trends", "trend_tweets", "trend_hashtags",
     "matched_hashtag", "hashtag_tweets", "top_posts",
-    "specialty_news", "news", "mentions", "trends",
+    "specialty_news", "news", "mentions", "trends", "interest_tweets",
 )
 
 # حقول الملاحظات الخاصة بالمصادر (تُستعاد مع اللقطة؛ أخطاء المسح لا تُخزَّن)
 _OBS_PREFIXES = (
     "timeline_", "x_trends_", "x_top_trend", "trend_", "matched_hashtag",
     "hashtag_", "top_posts_", "specialty_news_", "mentions_", "trends_",
-    "news_",
+    "news_", "interest_tweets_",
 )
 
 

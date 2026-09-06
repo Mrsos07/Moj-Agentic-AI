@@ -926,8 +926,8 @@ def x_list_accounts_by_category(category: str, user_id: Optional[int] = None) ->
 
 def _rewrite_content_for_account(content: str, account: Any) -> str:
     """
-    يعيد صياغة المحتوى ليناسب أسلوب حساب معيّن (باستخدام OpenAI).
-    يرجع النص الأصلي لو OpenAI مو متوفر.
+    يعيد صياغة المحتوى ليناسب أسلوب حساب معيّن (عبر مزوّد الـ LLM).
+    يرجع النص الأصلي لو المزوّد مو متوفر.
     """
     try:
         from app.services.ai_service import ai_service
@@ -981,7 +981,7 @@ def _rewrite_content_for_account(content: str, account: Any) -> str:
 def x_post_to_category(category: str, content: str, user_id: Optional[int] = None, rewrite: bool = True) -> Dict[str, Any]:
     """
     ينشر محتوى موحّد على جميع حسابات المستخدم اللي في تصنيف معيّن.
-    كل حساب يحصل على نسخة معاد صياغتها بأسلوبه (اختياري عبر OpenAI).
+    كل حساب يحصل على نسخة معاد صياغتها بأسلوبه (اختياري عبر مزوّد الـ LLM).
     """
     try:
         if not user_id:

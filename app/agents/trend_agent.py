@@ -3,7 +3,8 @@
 """
 وكيل الترندات - Trend Agent
 يتعامل مع استفسارات المستخدم عن الترندات من خلال الشات
-يستخدم OpenAI لتحليل البيانات وتقديمها بشكل محادثة طبيعية
+يستخدم مزوّد الـ LLM المُعَدّ (OpenRouter افتراضياً) لتحليل البيانات
+وتقديمها بشكل محادثة طبيعية
 """
 
 import re
@@ -15,7 +16,7 @@ from sqlalchemy import func
 from datetime import datetime, timezone, timedelta
 
 from app.trend_detector.models import Signal, Candidate, Classification, Watchlist, XValidation
-from app.core.config import settings
+from app.core.llm_provider import resolve_llm
 
 # Farsi-specific characters not used in Arabic
 _FARSI_CHARS = re.compile(r'[\u06AF\u0686\u067E\u0698\u06A9]')  # گ چ پ ژ ک
@@ -49,8 +50,7 @@ class TrendAgent:
 
     def __init__(self, llm_config: Dict[str, Any] = None):
         self.llm_config = llm_config
-        self.openai_key = settings.OPENAI_API_KEY
-        self.openai_model = settings.OPENAI_MODEL or "gpt-4"
+        self.llm = resolve_llm()
 
     def process_request(self, message: str, context: Dict[str, Any], db: Session = None) -> Optional[str]:
         """معالجة طلب المستخدم المتعلق بالترندات"""
@@ -62,8 +62,8 @@ class TrendAgent:
         # Gather data based on intent
         trend_data = self._gather_data(intent, message, context, db)
 
-        # Try to use OpenAI for natural response
-        if self.openai_key:
+        # Try to use the LLM for a natural response
+        if self.llm.available:
             try:
                 result = self._ask_llm(message, trend_data)
                 if result:
@@ -351,7 +351,7 @@ class TrendAgent:
             "source_signals": source_signals,
         }
 
-    # ── OpenAI integration ─────────────────────────────────────
+    # ── LLM integration (OpenRouter / OpenAI) ──────────────────
 
     def _ask_llm(self, user_message: str, trend_data: Dict[str, Any]) -> Optional[str]:
         """إرسال البيانات للذكاء الاصطناعي ليحللها ويرد بشكل طبيعي"""
@@ -366,13 +366,10 @@ class TrendAgent:
 
         try:
             resp = http_requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.openai_key}",
-                    "Content-Type": "application/json",
-                },
+                self.llm.chat_url,
+                headers=self.llm.auth_headers(),
                 json={
-                    "model": self.openai_model,
+                    "model": self.llm.model,
                     "messages": messages,
                     "max_tokens": 1000,
                     "temperature": 0.7,
@@ -380,15 +377,15 @@ class TrendAgent:
                 timeout=30,
             )
             if resp.status_code != 200:
-                print(f"[TrendAgent] OpenAI error {resp.status_code}: {resp.text[:200]}")
+                print(f"[TrendAgent] {self.llm.provider} error {resp.status_code}: {resp.text[:200]}")
                 return None
             result = resp.json()
             return result["choices"][0]["message"]["content"]
         except Exception as e:
-            print(f"[TrendAgent] OpenAI request failed: {e}")
+            print(f"[TrendAgent] {self.llm.provider} request failed: {e}")
             return None
 
-    # ── Conversational formatters (fallback when OpenAI unavailable) ─────
+    # ── Conversational formatters (fallback when the LLM is unavailable) ─
 
     def _generate_context(self, t: Dict) -> str:
         """Generate a brief contextual analysis line for a trend based on its data"""

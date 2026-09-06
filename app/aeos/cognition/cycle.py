@@ -65,7 +65,8 @@ class CognitiveCycle:
             "decisions": context.scratch.get("decision_log"),
             "guard_report": context.scratch.get("guard_report"),
             "results": context.scratch.get("execution_results"),
-            "directed_note": context.scratch.get("directed_engagement_note"),
+            "directed_note": (context.scratch.get("directed_engagement_note")
+                              or context.scratch.get("directed_mission_note")),
             "evaluation": context.scratch.get("evaluation"),
             "lesson": context.scratch.get("lesson"),
             "help_request": context.scratch.get("help_request"),
