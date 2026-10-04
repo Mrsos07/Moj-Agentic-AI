@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import axios from 'axios'
 import EmployeeWizard from './EmployeeWizard'
+import ToolsPanel from './ToolsPanel'
 import {
   MdSmartToy,
   MdClose,
@@ -566,7 +567,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         goals,
         business_rules,
         installed_skills: f.skills || [],
-        mcp_servers: f.mcps || [],
+        // mcp_servers لا يُرسَل: الأدوات تُدار فوراً من ToolsPanel، وقائمة قديمة من
+        // النموذج كانت ستفصل بصمت خادماً رُبط من اللوحة بعد فتح المحرر.
       }, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       if (res.data?.ok) {
         onNotify?.(`🧠 تم حفظ برسونا وتعليمات الموظف @${label}. سيلتزم بها في كل دورة قادمة.`)
@@ -1408,22 +1410,12 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                         </div>
                       )}
 
-                      <div>
-                        <label className="block text-[11px] text-text-secondary-light dark:text-text-secondary-dark mb-1">الأدوات (MCPs)</label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {(catalog.mcp_servers.length ? catalog.mcp_servers : ['x','content','memory','browser','news','search']).map(mc => {
-                            const on = (pForm[label]?.mcps || []).includes(mc)
-                            const locked = mc === 'x'
-                            return (
-                              <button key={mc} type="button" disabled={locked} onClick={() => toggleInList(label, 'mcps', mc)}
-                                title={locked ? 'إلزامي للتنفيذ على المنصة' : ''}
-                                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${on || locked ? 'bg-primary text-white border-primary' : 'border-border-light dark:border-border-dark text-text-secondary-light dark:text-text-secondary-dark'} ${locked ? 'opacity-70 cursor-not-allowed' : ''}`}>
-                                {MCP_LABELS[mc] || mc}{locked ? ' 🔒' : ''}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      </div>
+                      {/* ── الأدوات: بحث الويب + خوادم MCP خارجية (تُحفظ فوراً) ── */}
+                      {settingsGroup(
+                        '🔌 الأدوات والربط الخارجي',
+                        'بحث الويب قبل الكتابة، والأخبار والصور، وخوادم MCP خارجية تضيفها وتربطها بهذا الموظف. التغييرات هنا تُحفظ فوراً.',
+                        <ToolsPanel employeeId={agent?.employee_id} onNotify={onNotify} />
+                      )}
 
                       <div className="grid grid-cols-2 gap-2">
                         <div>

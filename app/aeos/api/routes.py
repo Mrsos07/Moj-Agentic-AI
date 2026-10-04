@@ -559,6 +559,14 @@ def agents_overview() -> Dict[str, Any]:
     return {"ok": True, **get_platform().agents_overview()}
 
 
+@router.get("/team")
+def team_roster(user_id: Optional[int] = None) -> Dict[str, Any]:
+    """فريق المستخدم كما يراه المنسّق العام في الشات الرئيسي."""
+    from ..services import orchestrator
+
+    return {"ok": True, "employees": orchestrator.roster(user_id)}
+
+
 # ─────────────────── employee insights (chat Q&A) ───────────────────
 class AskIn(BaseModel):
     question: str
@@ -743,6 +751,88 @@ def delete_employee_skill(employee_id: str, skill_id: str) -> Dict[str, Any]:
         raise HTTPException(404, "skill not found")
     get_platform().repository.save(cfg)
     return {"ok": True, "deleted": skill_id}
+
+
+# ─────────────────── أدوات الموظف (بحث + MCP خارجي) ───────────────────
+class ExternalMCPIn(BaseModel):
+    name: str
+    label: str = ""
+    transport: str = "stdio"            # stdio | http
+    command: str = ""
+    args: List[str] = []
+    env: Dict[str, str] = {}
+    url: str = ""
+    headers: Dict[str, str] = {}
+    allowed_tools: Optional[List[str]] = None   # None = كل ما يعرضه الخادم
+    research_tool: str = ""
+    research_arg: str = ""
+
+
+class ToolAttachIn(BaseModel):
+    server: str
+    attach: bool = True
+
+
+class ToolCallIn(BaseModel):
+    server: str
+    tool: str
+    arguments: Dict[str, Any] = {}
+
+
+@router.get("/tools")
+def tools_overview(employee_id: str = "") -> Dict[str, Any]:
+    """مزوّد البحث + الخوادم الخارجية، وحالة ربط كلٍّ منها بالموظف إن حُدّد."""
+    from ..services import tools_service as TS
+
+    cfg = _employee_or_404(employee_id) if employee_id else None
+    return {"ok": True, **TS.overview(cfg)}
+
+
+@router.post("/tools/external")
+def add_external_tool(body: ExternalMCPIn) -> Dict[str, Any]:
+    """يتصل بالخادم فعلاً ويكتشف أدواته قبل الحفظ — لا يُحفظ خادم لا يعمل."""
+    from ..services import tools_service as TS
+
+    try:
+        return {"ok": True, "server": TS.add_external(body.model_dump())}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - فشل الاتصال/البروتوكول
+        raise HTTPException(502, f"تعذّر الاتصال بالخادم: {exc}") from exc
+
+
+@router.delete("/tools/external/{name}")
+def delete_external_tool(name: str) -> Dict[str, Any]:
+    from ..services import tools_service as TS
+
+    if not TS.remove_external(name):
+        raise HTTPException(404, "server not found")
+    return {"ok": True, "deleted": name}
+
+
+@router.post("/employees/{employee_id}/tools")
+def attach_employee_tool(employee_id: str, body: ToolAttachIn) -> Dict[str, Any]:
+    from ..services import tools_service as TS
+
+    cfg = _employee_or_404(employee_id)
+    try:
+        return {"ok": True, **TS.set_attached(cfg, body.server, body.attach)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/employees/{employee_id}/tools/call")
+def call_employee_tool(employee_id: str, body: ToolCallIn) -> Dict[str, Any]:
+    """استدعاء يطلبه المالك لأداة مربوطة بالموظف (للتجربة أو لمهمة مباشرة)."""
+    from ..services import tools_service as TS
+
+    cfg = _employee_or_404(employee_id)
+    try:
+        return {"ok": True, "result": TS.call_tool(cfg, body.server, body.tool, body.arguments)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @router.get("/employees/{employee_id}/interactions")

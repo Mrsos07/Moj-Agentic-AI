@@ -29,6 +29,15 @@ class MCPRegistry:
             self._tool_index[tool] = server.name
         logger.info("MCP server registered: %s (tools: %s)", server.name, server.tools)
 
+    def unregister(self, name: str) -> None:
+        server = self._servers.pop(name, None)
+        if server is None:
+            return
+        self._tool_index = {t: s for t, s in self._tool_index.items() if s != name}
+        close = getattr(getattr(server, "client", None), "close", None)
+        if callable(close):
+            close()
+
     def get(self, name: str) -> IMCPServer:
         if name not in self._servers:
             raise MCPNotFoundError(f"MCP server '{name}' not registered")

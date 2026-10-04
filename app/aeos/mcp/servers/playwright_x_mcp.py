@@ -86,7 +86,21 @@ _EXTRACT_JS = r"""
     let media = '';
     const photo = a.querySelector('div[data-testid="tweetPhoto"] img, img[src*="pbs.twimg.com/media"]');
     if (photo && photo.src) { media = photo.src; }
-    return { author, handle, text, url, media };
+    // العدّادات والتوقيت — نفس محدّدات _MY_POSTS_JS المتحقَّق منها حيّاً. بدونها
+    // لا يعرف الموظف أي تغريدة «مهمّة» (منتشرة/حديثة) فيُرتّب بالكلمات فقط.
+    const timeEl = a.querySelector('time');
+    const created_at = timeEl ? (timeEl.getAttribute('datetime') || '') : '';
+    const group = a.querySelector('div[role="group"]');
+    const group_label = group ? (group.getAttribute('aria-label') || '') : '';
+    const counts_text = group ? (group.innerText || '').replace(/\n/g, ' ') : '';
+    const per = {};
+    for (const tid of ['reply', 'retweet', 'like']) {
+      const b = a.querySelector(`button[data-testid="${tid}"], div[data-testid="${tid}"]`);
+      if (b) { per[tid] = b.getAttribute('aria-label') || ''; }
+    }
+    const viewsLink = a.querySelector('a[href*="/analytics"]');
+    if (viewsLink) { per['views'] = viewsLink.getAttribute('aria-label') || viewsLink.innerText || ''; }
+    return { author, handle, text, url, media, created_at, group_label, counts_text, per_button: per };
   }).filter(t => t.url && t.text);
 }
 """
@@ -243,6 +257,15 @@ def _parse_metrics(item: Dict[str, Any]) -> Dict[str, int]:
     return out
 
 
+def _with_metrics(item: Dict[str, Any]) -> Dict[str, Any]:
+    """حوّل الحقول الخام (aria-label/نص العدّادات) إلى أرقام وأزلها من العنصر."""
+    t = dict(item)
+    raw = {k: t.pop(k, None) for k in ("group_label", "counts_text", "per_button")}
+    if any(raw.values()):
+        t.update(_parse_metrics(raw))
+    return t
+
+
 class PlaywrightXMCP(IMCPServer):
     """Authenticated (cookie-based) X timeline reader via Playwright."""
 
@@ -396,7 +419,7 @@ class PlaywrightXMCP(IMCPServer):
                     for t in batch:
                         u = t.get("url")
                         if u and u not in seen:
-                            seen[u] = t
+                            seen[u] = _with_metrics(t)
                     if len(seen) >= limit:
                         break
                     page.mouse.wheel(0, 2400)
@@ -447,7 +470,7 @@ class PlaywrightXMCP(IMCPServer):
                     for t in batch:
                         u = t.get("url")
                         if u and u not in seen:
-                            seen[u] = t
+                            seen[u] = _with_metrics(t)
                     if len(seen) >= limit:
                         break
                     page.mouse.wheel(0, 2400)
@@ -594,7 +617,8 @@ class PlaywrightXMCP(IMCPServer):
                     # فقط ما كتبه الحساب الهدف نفسه (نستبعد بطاقات الاقتباس/الرتويت)
                     if (u and u not in seen and u not in skip
                             and (t.get("handle") or "").lower() == target):
-                        seen[u] = t
+                        seen[u] = {k: v for k, v in t.items()
+                                   if k not in ("group_label", "counts_text", "per_button")}
                 if len(seen) >= cap:
                     break
                 # توقّف مبكر: ثلاث تمريرات بلا أي جديد = نهاية المحتوى المتاح

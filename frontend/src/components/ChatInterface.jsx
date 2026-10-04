@@ -6,20 +6,34 @@ import MessageList from './MessageList'
 import MessageInput from './MessageInput'
 import AccountsDrawer from './AccountsDrawer'
 import AgentsDrawer from './AgentsDrawer'
+import TeamBar from './TeamBar'
 import usePinnedAccount from '../hooks/usePinnedAccount'
 import logoLight from '../assets/logos/logo-light.png'
 import logoDark from '../assets/logos/logo-dark.png'
 
+// نتائج أوامر المنسّق تصل في محادثة الموظف (emp_<handle>)؛ نعرضها أيضاً في
+// شات المنسّق خلال هذه المدة بعد الإسناد، وإلا بدا الأمر وكأنه لم يُنفّذ.
+const AWAIT_RESULTS_MS = 30 * 60 * 1000
+
+const coordinatorWelcome = () => ({
+  id: Date.now(),
+  type: 'assistant',
+  content:
+    '👋 أهلاً! أنا **موج — المنسّق العام** لفريقك من الموظفين الأذكياء.\n\n' +
+    'أرى كل موظفيك وأوجّههم نيابةً عنك. جرّب مثلاً:\n\n' +
+    '• «وش حالة فريقي اليوم؟»\n' +
+    '• «خل كل الموظفين ينشرون عن اليوم الوطني كل واحد حسب تخصصه»\n' +
+    '• «@اليوزر روح للتايم لاين وردّ على تغريدة تناسب تخصصك»\n' +
+    '• «خل عماد يشتغل كل 45 دقيقة وركّز اهتماماته على الاقتصاد»\n\n' +
+    'اذكر موظفاً بـ **@** لتخاطبه مباشرة، أو افتح محادثته الخاصة من شريط الفريق.',
+  timestamp: new Date().toISOString()
+})
+
 const ChatInterface = ({ darkMode, setDarkMode, user }) => {
   const logo = darkMode ? logoLight : logoDark
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      type: 'assistant',
-      content: 'مرحباً! أنا مساعدك الذكي في Mwj AI. يمكنني مساعدتك في إدارة وسائل التواصل الاجتماعي، التحليلات، والأتمتة. كيف يمكنني مساعدتك اليوم؟',
-      timestamp: new Date().toISOString()
-    }
-  ])
+  const [messages, setMessages] = useState([coordinatorWelcome()])
+  const [team, setTeam] = useState([])
+  const awaitingRef = useRef({})
   const [inputValue, setInputValue] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const [ws, setWs] = useState(null)
@@ -60,10 +74,36 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       id: Date.now(),
       type: 'assistant',
       content: label
-        ? `📌 تم تثبيت الحساب @${label}. كل الإجراءات القادمة ستُنفّذ على هذا الحساب.`
-        : '📍 تم إلغاء تثبيت الحساب.',
+        ? `📌 تم تثبيت الحساب @${label}. الطلبات التي لا تحدّد موظفاً ستُوجَّه إليه، ويبقى المنسّق يرى الفريق كله.`
+        : '📍 تم إلغاء تثبيت الحساب — المنسّق العام يوجّه الفريق كله.',
       timestamp: new Date().toISOString()
     }])
+  }
+
+  // فريق المستخدم كما يراه المنسّق (يُحدَّث دورياً لتظهر الحالة الحيّة)
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const res = await axios.get('/api/aeos/team', { params: user?.id ? { user_id: user.id } : {} })
+        if (alive) setTeam(res.data?.employees || [])
+      } catch { /* الخادم يُعاد تشغيله — نحاول لاحقاً */ }
+    }
+    load()
+    const timer = setInterval(load, 60000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [user?.id, agentsOpen])
+
+  const insertMention = (handle) => {
+    setInputValue(prev => {
+      const tag = `@${handle} `
+      return prev.includes(tag) ? prev : (prev && !prev.endsWith(' ') ? `${prev} ${tag}` : `${prev}${tag}`)
+    })
+    if (typeof inputFocusRef.current === 'function') inputFocusRef.current()
+  }
+
+  const openEmployeeChat = (handle) => {
+    window.dispatchEvent(new CustomEvent('mwj:open_employee_chat', { detail: { label: handle } }))
   }
 
   const refreshSidebarConversations = () => {
@@ -116,12 +156,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       const newSessionId = e?.detail?.session_id || `session_${Date.now()}`
       localStorage.setItem('session_id', newSessionId)
       setEmployeeChat(null)
-      setMessages([{
-        id: Date.now(),
-        type: 'assistant',
-        content: 'مرحباً! أنا مساعدك الذكي في Mwj AI. يمكنني مساعدتك في إدارة وسائل التواصل الاجتماعي، التحليلات، والأتمتة. كيف يمكنني مساعدتك اليوم؟',
-        timestamp: new Date().toISOString()
-      }])
+      setMessages([coordinatorWelcome()])
       setShowSuggestions(true)
       refreshSidebarConversations()
     }
@@ -285,14 +320,22 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
         // (emp_<account>). نعرضها هنا فقط إذا كانت محادثته هي المفتوحة —
         // وإلا تبقى محفوظة في محادثتها ويكفي تحديث الشريط الجانبي.
         const openSession = localStorage.getItem('session_id')
+        let content = data.message
         if (data.session_id && openSession && data.session_id !== openSession) {
-          refreshSidebarConversations()
-          return
+          // استثناء: موظف أسند إليه المنسّق مهمة من هذه المحادثة للتو
+          const handle = data.session_id.startsWith('emp_') ? data.session_id.slice(4) : null
+          const since = handle ? awaitingRef.current[handle] : null
+          if (!since || Date.now() - since > AWAIT_RESULTS_MS || openSession.startsWith('emp_')) {
+            refreshSidebarConversations()
+            return
+          }
+          content = `📨 **من @${handle}:**\n\n${data.message}`
         }
+        for (const h of data.metadata?.dispatched || []) awaitingRef.current[h] = Date.now()
         setMessages(prev => [...prev, {
-          id: Date.now(),
+          id: Date.now() + Math.random(),
           type: 'assistant',
-          content: data.message,
+          content,
           attachment: data.attachment || null,
           timestamp: data.timestamp
         }])
@@ -444,12 +487,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
 
   const handleNewChat = () => {
     if (window.confirm('هل تريد بدء محادثة جديدة؟ سيتم حذف المحادثة الحالية.')) {
-      setMessages([{
-        id: Date.now(),
-        type: 'assistant',
-        content: 'مرحباً! أنا مساعدك الذكي في Mwj AI. يمكنني مساعدتك في إدارة وسائل التواصل الاجتماعي، التحليلات، والأتمتة. كيف يمكنني مساعدتك اليوم؟',
-        timestamp: new Date().toISOString()
-      }])
+      setMessages([coordinatorWelcome()])
       // إنشاء session_id جديد
       localStorage.setItem('session_id', `session_${Date.now()}`)
       setShowSuggestions(true)
@@ -531,6 +569,9 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
               </button>
             </div>
             <div className="flex items-center gap-2 text-text-primary-light dark:text-text-primary-dark">
+              <span className="hidden md:inline text-sm font-bold">
+                {employeeChat ? `🤖 الموظف @${employeeChat}` : '🧭 المنسّق العام'}
+              </span>
               {pinnedAccount && (
                 <div
                   className="flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full bg-primary/10 text-primary border border-primary/20"
@@ -579,6 +620,18 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
           onSuggestionClick={handleSuggestionClick}
         />
 
+        {/* شريط الفريق — الشات الرئيسي هو المنسّق العام لكل الموظفين */}
+        {!employeeChat && (
+          <TeamBar
+            team={team}
+            pinned={pinnedAccount}
+            disabled={!isConnected}
+            onMention={insertMention}
+            onOpenChat={openEmployeeChat}
+            onQuick={(text, send) => (send ? sendMessageText(text) : handleSuggestionClick(text))}
+          />
+        )}
+
         {/* شريط الإجراءات السريعة — يظهر في وضع الدردشة مع الموظف الذكي */}
         {employeeChat && (
           <div className="px-4 pt-2">
@@ -586,11 +639,11 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
               <MdSmartToy size={16} className="text-primary" />
               <span className="text-xs font-bold text-primary">دردشة مع الموظف @{employeeChat}</span>
               <button
-                onClick={() => setEmployeeChat(null)}
-                className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark hover:text-red-500 transition-colors"
-                title="إنهاء وضع دردشة الموظف"
+                onClick={() => window.dispatchEvent(new CustomEvent('mwj:new_chat'))}
+                className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark hover:text-primary transition-colors"
+                title="العودة لشات المنسّق العام"
               >
-                إنهاء
+                ↩ المنسّق العام
               </button>
             </div>
             <div className="flex items-center gap-2 overflow-x-auto pb-1">
@@ -630,6 +683,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
           onAttachFile={sendAttachmentMessage}
           onAttachCookies={sendCookiesFile}
           onFocusRef={inputFocusRef}
+          mentionOptions={team}
         />
 
         {/* درج حساباتي — تثبيت الحساب المُنفَّذ عليه */}
