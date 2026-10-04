@@ -109,7 +109,9 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
     reviewed = int(guard.get("reviewed", 0) or 0)
     rejected = len(guard.get("rejected") or [])
     successes = sum(1 for r in results if r.get("success"))
-    failures = len(results) - successes
+    skipped = sum(1 for r in results if r.get("status") == "skipped")
+    attempted = len(results) - skipped
+    failures = attempted - successes
     texts = _published_texts(context)
     joined = " ".join(texts)
 
@@ -138,7 +140,8 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
         "actions": len(results),
         "successes": successes,
         "failures": failures,
-        "failure_rate": round(failures / len(results), 2) if results else 0.0,
+        "skipped": skipped,
+        "failure_rate": round(failures / attempted, 2) if attempted else 0.0,
         "guard_reviewed": reviewed,
         "guard_rejected": rejected,
         "guard_rejection_rate": round(rejected / reviewed, 2) if reviewed else 0.0,
@@ -154,7 +157,8 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
         "topic_repetition": round(repetition, 2),
         "mentions_seen": mentions,
         "mention_replies": mention_replies,
-        "idle": not results or all(r.get("capability") == "wait" for r in results),
+        "idle": not results or all(r.get("capability") == "wait" or r.get("status") == "skipped"
+                                   for r in results),
         "plan_pillar": plan.get("pillar", ""),
         "plan_format": plan.get("format", ""),
         "plan_followed": (not plan or not published_caps

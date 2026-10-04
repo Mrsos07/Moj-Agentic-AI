@@ -981,6 +981,182 @@ def run_live(cookie_label: str, handle: str) -> None:
           str(res.data.get("tweet_url") if res.success else res.error)[:200])
 
 
+def check_execution_plan_consistency() -> None:
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.aeos.capabilities.base import CapabilityResult
+    from app.aeos.cognition.phases import DecidePhase, ExecutePhase, PersonaGuardPhase
+    from app.aeos.decision.engine import Decision
+    from app.aeos.skills.base import ProposedAction
+
+    def decision(cap, suffix):
+        return Decision(ProposedAction(
+            capability=cap, params={"tweet_url": f"https://x.com/edu/status/{suffix}",
+                                    "handle": "@edu", "original_text": "أدوات التعليم"},
+            rationale="فرصة مفيدة للجمهور"), score=0.8, explanation="اختيار الاختبار")
+
+    def fixture(chosen, alternates=(), fail=False):
+        ctx = make_context(make_config(), with_signals=False)
+        events, calls = [], []
+        ctx.progress_cb = lambda text, intent: events.append((intent, text))
+        ctx.scratch["decision_alternates"] = list(alternates)
+
+        def execute(request, context):
+            calls.append(deepcopy(request))
+            if fail:
+                return CapabilityResult.fail("تعذّر تأكيد التنفيذ", request.name)
+            return CapabilityResult.ok(request.name)
+
+        ctx.capabilities = SimpleNamespace(execute=execute)
+        DecidePhase(SimpleNamespace(decide=lambda proposals, context: chosen)).run(ctx)
+        return ctx, events, calls
+
+    reply, repost, like = (decision("reply_to_user", "1"),
+                           decision("retweet_post", "2"), decision("like_post", "3"))
+    ctx, events, calls = fixture([reply, repost], [like])
+    check("لا إعلان نهائي قبل مراجعة الحارس",
+          not any(intent == "aeos_cycle_deciding" for intent, _ in events))
+
+    def reject_public(context, decisions, indices, reasons):
+        rejected = {i for i in indices if decisions[i].action.capability != "like_post"}
+        reasons.update({i: "خارج مجال الشخصية" for i in rejected})
+        return rejected
+
+    with patch.object(PersonaGuardPhase, "_deterministic_screen", side_effect=reject_public):
+        PersonaGuardPhase().run(ctx)
+    ExecutePhase().run(ctx)
+    announcements = [text for intent, text in events if intent == "aeos_cycle_deciding"]
+    check("الخطة المعلنة هي البديل الذي نُفّذ لا القرار المرفوض",
+          len(announcements) == 1 and "إعجاب" in announcements[0]
+          and "الرد على تغريدة" not in announcements[0]
+          and [c.name for c in calls] == ["like_post"])
+    check("سبب تعديل الاختيار ظاهر للمستخدم",
+          any("خارج مجال الشخصية" in text for _, text in events))
+    plan = ctx.scratch.get("execution_plan") or []
+    results = ctx.scratch.get("execution_results") or []
+    check("كل نتيجة مرتبطة بإجراء معتمد وهدفه",
+          len(plan) == len(results) == 1
+          and bool(plan[0].get("action_id"))
+          and plan[0]["action_id"] == results[0].get("action_id")
+          and results[0].get("target") == like.action.params["tweet_url"])
+    check("حفظ القرار الأولي مستقلاً عن الخطة المعتمدة",
+          [d["capability"] for d in ctx.scratch.get("initial_decisions", [])]
+          == ["reply_to_user", "retweet_post"])
+
+    ctx, events, calls = fixture([reply])
+    with patch.object(PersonaGuardPhase, "_deterministic_screen", side_effect=reject_public):
+        PersonaGuardPhase().run(ctx)
+    ExecutePhase().run(ctx)
+    check("الرفض الكامل يعلن عدم التنفيذ ولا يَعِد برد",
+          not calls and any("لا يوجد إجراء" in text for _, text in events)
+          and not any("الرد على تغريدة" in text for intent, text in events
+                      if intent == "aeos_cycle_deciding"))
+
+    ctx, events, calls = fixture([reply], fail=True)
+    ExecutePhase().run(ctx)
+    check("فشل الأداة لا يُحسب نجاحاً ولا يولّد إجراء بديلاً",
+          len(calls) == 1 and not ctx.scratch["execution_results"][0]["success"]
+          and not ctx.config.runtime_state.counters.get("replies_today")
+          and any("تعذّر تأكيد التنفيذ" in text for _, text in events))
+
+    ctx, events, calls = fixture([reply])
+    ctx.scratch["phase_errors"] = ["guard"]
+    ExecutePhase().run(ctx)
+    check("تعطل المراجعة يمنع تنفيذ خطة غير معتمدة", not calls)
+
+    ctx, events, calls = fixture([decision("like_post", "4"), decision("like_post", "5")])
+    ctx.config.business_rules["daily_likes_target"] = 1
+    ExecutePhase().run(ctx)
+    check("إعادة فحص الميزانية بين الأدوات تمنع تجاوز الحد اليومي",
+          len(calls) == 1 and ctx.config.runtime_state.counters.get("likes_today") == 1
+          and len(ctx.scratch["execution_results"]) == 2
+          and ctx.scratch["execution_results"][1].get("status") == "skipped")
+
+    from app.aeos.cognition import critique
+    from app.aeos.cognition.phases import EvaluatePhase, GraphMemoryPhase, SupportPhase
+
+    EvaluatePhase().run(ctx)
+    SupportPhase().run(ctx)
+    findings = critique.deterministic_findings(ctx)
+    graph_actions = GraphMemoryPhase._actions(ctx)
+    check("عدم التنفيذ بسبب الحصة ليس فشلاً للأداة في التقييم أو الذاكرة",
+          ctx.scratch["evaluation"]["failures"] == 0
+          and ctx.scratch["evaluation"]["skipped"] == 1
+          and findings["failures"] == 0 and findings["skipped"] == 1
+          and graph_actions[1]["النتيجة"] == "لم يُنفّذ"
+          and "سبب_عدم_التنفيذ" in graph_actions[1]
+          and not ctx.scratch.get("help_request"))
+
+    ctx, events, calls = fixture([reply, repost])
+
+    def mutate_request(request, context):
+        calls.append(deepcopy(request))
+        request.params["tweet_url"] = "changed-by-handler"
+        context.scratch["decisions"].clear()
+        return CapabilityResult.ok(request.name)
+
+    ctx.capabilities.execute = mutate_request
+    ExecutePhase().run(ctx)
+    check("التنفيذ يستخدم نسخة مستقلة ولا يغيّر القرار المحفوظ",
+          [c.name for c in calls] == ["reply_to_user", "retweet_post"]
+          and ctx.scratch["execution_plan"][0]["params"]["tweet_url"] == reply.action.params["tweet_url"]
+          and ctx.scratch["initial_decisions"][0]["params"]["tweet_url"] == reply.action.params["tweet_url"]
+          and "active_action" not in ctx.scratch)
+
+    from app.aeos.cognition.cycle import CognitiveCycle
+
+    ctx, events, calls = fixture([reply])
+
+    def broken_guard(context):
+        raise RuntimeError("guard test failure")
+
+    report = CognitiveCycle([SimpleNamespace(name="guard", run=broken_guard), ExecutePhase()]).run(ctx)
+    check("تقرير الدورة يحفظ القرار والخطة والنتيجة حتى عند تعطل الحارس",
+          not calls and report["phase_errors"] == ["guard"]
+          and bool(report.get("initial_decisions")) and bool(report.get("execution_plan"))
+          and report["results"][0].get("status") == "skipped")
+
+
+def check_decision_review_consistency() -> None:
+    from types import SimpleNamespace
+
+    from app.aeos.decision.engine import WeightedUtilityDecisionEngine
+    from app.aeos.skills.base import ProposedAction
+
+    ctx = make_context(make_config(llm_decision_review=True, max_actions_per_cycle=2,
+                                   pace_weight=0, repeat_penalty=0), with_signals=False)
+    proposals = [ProposedAction(capability="like_post", expected_impact=0.8,
+                                params={"tweet_url": f"https://x.com/a/status/{i}"})
+                 for i in (1, 2)]
+    ctx.llm = SimpleNamespace(available=True, complete_json=lambda **kwargs: {"selected": [0, 0]})
+    engine = WeightedUtilityDecisionEngine()
+    decisions = engine.decide(proposals, ctx)
+    check("مراجعة النموذج لا تكرر تنفيذ المرشح نفسه",
+          len({d.action.params["tweet_url"] for d in decisions}) == len(decisions))
+
+    def unavailable(**kwargs):
+        raise RuntimeError("model unavailable")
+
+    ctx.llm.complete_json = unavailable
+    try:
+        decisions = engine.decide(proposals, ctx)
+        survived = bool(decisions)
+    except RuntimeError:
+        survived = False
+    check("تعطل مراجعة النموذج يحافظ على الاختيار الحتمي", survived)
+
+    ctx.llm = None
+    ctx.config.runtime_state.flags["action_type_history"] = [["like_post"]] * 3
+    proposals.append(ProposedAction(capability="retweet_post", expected_impact=0.9,
+                                    params={"tweet_url": "https://x.com/b/status/3"}))
+    engine.decide(proposals, ctx)
+    check("بدائل الحارس لا تعيد نوعاً استُبعد بسبب التكرار المتتالي",
+          all(d.action.capability != "like_post"
+              for d in ctx.scratch.get("decision_alternates", [])))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", default="", help="cookie_label للنشر الحقيقي")
@@ -1025,6 +1201,9 @@ def main() -> int:
     check_image_policy()
     print("\n=== 10) حماية الحذف ===")
     check_delete_guard()
+    print("\n=== 11) اتساق القرار المعتمد والتنفيذ ===")
+    check_execution_plan_consistency()
+    check_decision_review_consistency()
 
     if args.live:
         run_live(args.live, args.handle or args.live)

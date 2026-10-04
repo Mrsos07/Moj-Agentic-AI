@@ -34,8 +34,8 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_EMBEDDING_MODEL_OPENROUTER = "openai/text-embedding-3-small"
 DEFAULT_EMBEDDING_MODEL_OPENAI = "text-embedding-3-small"
 
-DEFAULT_IMAGE_MODEL_OPENROUTER = "openai/gpt-image-1"
-DEFAULT_IMAGE_MODEL_OPENAI = "gpt-image-1"
+DEFAULT_IMAGE_MODEL_OPENROUTER = "openai/gpt-image-2"
+DEFAULT_IMAGE_MODEL_OPENAI = "gpt-image-2"
 
 
 def _setting(name: str) -> str:

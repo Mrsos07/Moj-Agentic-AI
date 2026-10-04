@@ -332,7 +332,7 @@ _REPLY_MODES = (
     "اختلف بلطف وبيّن سببك في جملة واحدة محدّدة.",
     "أضف زاوية غائبة عن النقاش بجملة قصيرة حاسمة.",
     "علّق بملاحظة عملية واحدة: ماذا يعني هذا فعلياً.",
-    "اكتب ملاحظة شخصية عفوية قصيرة (مشاهدة أو تجربة)، بلا مبالغة.",
+    "اكتب ملاحظة عفوية قصيرة مستندة للنص أو الدليل المتاح، بلا اختلاق تجربة شخصية.",
     "لخّص الفكرة بجملة واحدة أدقّ من الأصل.",
     "اطرح سؤالاً واحداً محدّداً جداً (لا سؤالاً عاماً) وانتهِ عنده.",
     "صحّح تفصيلة أو مفهوماً بلطف مع دليل مختصر.",
@@ -688,7 +688,7 @@ class ReplyToUserCapability(ICapability):
             )
             prompt = (
                 f"هذه تغريدة رأيتها الآن:\n«{original}»\n\n"
-                f"اكتب رداً قصيراً طبيعياً باللغة ({lang}) كأنك شخص حقيقي يتفاعل بصدق:\n"
+                f"اكتب رداً قصيراً طبيعياً باللغة ({lang}) بصوت الشخصية دون ادعاء هوية بشرية:\n"
                 f"{dialect_line}"
                 f"{recent_line}"
                 "- أضف قيمة فعلية: معلومة، رأي محدد، أو ملاحظة دقيقة — لا مجاملات عامة.\n"
@@ -705,7 +705,8 @@ class ReplyToUserCapability(ICapability):
             )
             gen = context.mcp.call(MCPRequest(
                 employee_id=context.config.id, tool="generate",
-                params={"prompt": prompt, "system": context.persona_prompt(),
+                params={"prompt": prompt,
+                        "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
                         "temperature": 0.9, "max_tokens": 60 if brief else 150},
                 context={"server": "content"},
             ))
@@ -1543,7 +1544,7 @@ class QuotePostCapability(ICapability):
                         "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر.\n"
                         + x_algorithm.algo_prompt_block("quote")
                     ),
-                    "system": context.persona_prompt(),
+                    "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
                     "temperature": 0.85, "max_tokens": 160,
                 },
                 context={"server": "content"},

@@ -160,6 +160,38 @@ def verify_graphiti() -> None:
         check("استخراج مهيكل فعلي (ExtractedEntities)", False, str(exc)[:220])
 
 
+def verify_image_defaults() -> None:
+    from unittest.mock import patch
+    from app.core import llm_provider as provider
+    from app.core.config import Settings
+    from app.aeos.mcp.base import MCPRequest
+    from app.aeos.mcp.servers.image_mcp import ImageMCP
+
+    check("إعدادات الصور الافتراضية تستخدم GPT Image 2",
+          Settings.model_fields["OPENROUTER_IMAGE_MODEL"].default == "openai/gpt-image-2")
+    for name, key, expected, method in (
+        ("openrouter", "OPENROUTER_API_KEY", "openai/gpt-image-2", "_generate_openrouter"),
+        ("openai", "OPENAI_API_KEY", "gpt-image-2", "_generate_openai"),
+    ):
+        values = {key: "test-placeholder"}
+        with patch.object(provider, "_setting", side_effect=lambda setting: values.get(setting, "")):
+            endpoint = provider.resolve_llm()
+            check(f"نموذج الصور الافتراضي على {name}", endpoint.image_model == expected, endpoint.image_model)
+            check(f"نماذج المحادثة والذاكرة لم تتغير على {name}",
+                  endpoint.model == (provider.DEFAULT_OPENROUTER_MODEL if name == "openrouter" else provider.DEFAULT_OPENAI_MODEL)
+                  and endpoint.embedding_model == (provider.DEFAULT_EMBEDDING_MODEL_OPENROUTER if name == "openrouter" else provider.DEFAULT_EMBEDDING_MODEL_OPENAI))
+            with patch.object(ImageMCP, "_enabled", return_value=True), patch.object(
+                    ImageMCP, method, return_value=("https://example.org/test-image.png", "")) as generate:
+                result = ImageMCP().call(MCPRequest(employee_id="test", tool="generate_image",
+                                                  params={"prompt": "Test illustration"}))
+                check(f"خدمة الصور تمرر GPT Image 2 فعلياً إلى {name}",
+                      result.success and generate.call_args.args[1] == expected
+                      and result.data.get("model") == expected)
+            values["OPENROUTER_IMAGE_MODEL" if name == "openrouter" else "AEOS_IMAGE_MODEL"] = "custom-image-model"
+            check(f"يبقى إعداد نموذج الصور الصريح محترماً على {name}",
+                  provider.resolve_llm().image_model == "custom-image-model")
+
+
 def verify_image() -> None:
     """‏POST /api/v1/images — المسار الوحيد غير المتوافق مع SDK."""
     print("\n=== 6) توليد الصور ===")
@@ -185,6 +217,7 @@ def main() -> int:
                         help="تجاوز توليد الصورة (الفحص الأغلى)")
     args = parser.parse_args()
 
+    verify_image_defaults()
     if not verify_config():
         print("\nالإعدادات غير صالحة — أضف OPENROUTER_API_KEY في .env ثم أعد المحاولة.")
         return 1
