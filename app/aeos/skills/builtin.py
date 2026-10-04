@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, List
 
+from ..employee import topic_intel
 from ..employee.persona_templates import (
     normalize_topic_words,
     relevance_score,
@@ -20,6 +21,12 @@ from .base import ISkill, ProposedAction
 
 if TYPE_CHECKING:
     from ..cognition.context import ExecutionContext
+
+
+def _rel(context: "ExecutionContext", text: str, interests: List[str],
+         item: "dict | None" = None) -> int:
+    """صلة بالتخصص: الكلمات + الهامش الدلالي من ``TopicIntelPhase`` إن توفّر."""
+    return topic_intel.relevance(context, text, interests, item)
 
 
 def _profile_url_from_handle(handle: str) -> str:
@@ -55,9 +62,9 @@ def _relevant_timeline(context: "ExecutionContext") -> List[dict]:
         return list(tweets)
     scored = []
     for t in tweets:
-        score = relevance_score(f"{t.get('text', '')} {t.get('handle', '')}", interests)
+        score = _rel(context, f"{t.get('text', '')} {t.get('handle', '')}", interests, t)
         if score > 0:
-            scored.append((score, t))
+            scored.append((topic_intel.blended_score(score, topic_intel.importance(t)), t))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [t for _, t in scored]
 
@@ -161,7 +168,7 @@ def _is_specialty_match(context: "ExecutionContext", text: str) -> bool:
     cleaned = (text or "").strip()
     if not cleaned:
         return False
-    return relevance_score(cleaned, interests) >= min_rel
+    return _rel(context, cleaned, interests) >= min_rel
 
 
 def _engagement_pool(context: "ExecutionContext") -> List[dict]:
@@ -199,15 +206,15 @@ def _engagement_pool(context: "ExecutionContext") -> List[dict]:
             if _topic_recently_engaged(context, text):
                 continue
 
-            rel = relevance_score(hay, interests) if interests else 0
+            rel = _rel(context, hay, interests, t) if interests else 0
 
             # specialty gate: if interests are set and scope enforced, require strict match
             if interests and enforce_scope and rel < min_rel:
                 continue
 
             seen.add(url)
-            # ranking: relevance first, then source priority bonus
-            score = (rel * 10) + bonus
+            # الترتيب: الصلة (مسقوفة) + الأهمية (انتشار × حداثة) + أولوية المصدر
+            score = topic_intel.blended_score(rel, topic_intel.importance(t), bonus)
             pool.append({**t, "_score": score, "_rel": rel})
 
     # أهم البوستات (Top Posts) أولاً — الأكثر أداءً في المجال، ثم تغريدات
@@ -221,7 +228,7 @@ def _engagement_pool(context: "ExecutionContext") -> List[dict]:
     _add(context.scratch.get("trend_tweets") or [], bonus=2)
     _add(context.scratch.get("timeline") or [], bonus=0)
 
-    pool.sort(key=lambda t: (t.get("_rel", 0), t.get("_score", 0)), reverse=True)
+    pool.sort(key=lambda t: t.get("_score", 0), reverse=True)
     return pool
 
 
@@ -346,7 +353,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
         text = (t.get("text") or "").strip().replace("\n", " ")
         if not text or _is_ad_or_spam_text(text):
             continue
-        rel = relevance_score(text, interests) if interests else 1
+        rel = _rel(context, text, interests, t) if interests else 1
         if interests and enforce_scope and rel < min_rel:
             continue
         media = _best_tweet_media((t.get("media") or "").strip())
@@ -356,6 +363,8 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
             "summary": text[:280],
             "media_url": media,
             "_rel": rel,
+            "_imp": topic_intel.importance(t),
+            "_metrics": topic_intel.describe_metrics(t),
             "_media": 1 if media else 0,
             "_priority": 5,
         })
@@ -378,7 +387,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
         ]
         summary = " | ".join(s for s in samples if s)
         hay = f"{ht_name} {matched_ht.get('category', '')} {summary}".strip()
-        rel = relevance_score(hay, interests) if interests else 1
+        rel = _rel(context, hay, interests) if interests else 1
         if not _is_ad_or_spam_text(hay) and (not interests or not enforce_scope or rel >= min_rel):
             candidates.append({
                 "source": "x_hashtag",
@@ -387,6 +396,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
                 "media_url": ht_media,
                 "hashtag": ht_name,
                 "_rel": rel,
+                "_imp": max([topic_intel.importance(t) for t in ht_tweets[:4]] or [0.0]),
                 "_media": 1 if ht_media else 0,
                 "_priority": 5,
             })
@@ -412,7 +422,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
             ]
             summary = " | ".join(s for s in samples if s)
             hay = f"{name} {cat} {summary}".strip()
-            rel = relevance_score(hay, interests) if interests else 1
+            rel = _rel(context, hay, interests, tr) if interests else 1
             if _is_ad_or_spam_text(hay):
                 continue
             if interests and enforce_scope and rel < min_rel:
@@ -425,6 +435,8 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
                 "summary": summary[:400],
                 "media_url": media,
                 "_rel": rel,
+                "_imp": topic_intel.importance(tr),
+                "_metrics": (tr.get("posts") or "").strip(),
                 "_media": 1 if media else 0,
                 "_priority": 4,
             })
@@ -436,7 +448,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
         if not (title or summary):
             continue
         hay = f"{title} {summary} {t.get('keywords','')} {t.get('category','')}".strip()
-        rel = relevance_score(hay, interests) if interests else 1
+        rel = _rel(context, hay, interests, t) if interests else 1
         if _is_ad_or_spam_text(hay):
             continue
         if interests and enforce_scope and rel < min_rel:
@@ -447,6 +459,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
             "summary": summary[:400],
             "media_url": media,
             "_rel": rel,
+            "_imp": topic_intel.importance(t),
             "_media": 1 if media else 0,
             "_priority": 3,
         })
@@ -458,7 +471,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
         if not (title or summary):
             continue
         hay = f"{title} {summary}".strip()
-        rel = relevance_score(hay, interests) if interests else 1
+        rel = _rel(context, hay, interests, n) if interests else 1
         if _is_ad_or_spam_text(hay):
             continue
         if interests and enforce_scope and rel < min_rel:
@@ -469,6 +482,8 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
             "summary": summary[:400],
             "media_url": media,
             "_rel": rel,
+            "_imp": topic_intel.importance(n),
+            "_metrics": topic_intel.describe_metrics(n),
             "_media": 1 if media else 0,
             "_priority": 2,
         })
@@ -478,7 +493,7 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
         text = (t.get("text") or "").strip().replace("\n", " ")
         if not text or _is_ad_or_spam_text(text):
             continue
-        rel = relevance_score(text, interests) if interests else 1
+        rel = _rel(context, text, interests, t) if interests else 1
         if interests and enforce_scope and rel < min_rel:
             continue
         # صورة حقيقية من التغريدة نفسها إن وُجدت
@@ -489,6 +504,8 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
             "summary": text[:280],
             "media_url": media,
             "_rel": rel,
+            "_imp": topic_intel.importance(t),
+            "_metrics": topic_intel.describe_metrics(t),
             "_media": 1 if media else 0,
             "_priority": 1,
         })
@@ -503,8 +520,11 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
     if not candidates:
         return []
 
+    # الصلة + الأهمية + أولوية المصدر، والوسائط ترجيح خفيف (كانت الترتيب الثاني
+    # بعد الكلمات مباشرة فتغلب صورةٌ على خبر أهم بلا صورة)
     candidates.sort(
-        key=lambda c: (c["_rel"], c["_media"], c["_priority"]),
+        key=lambda c: topic_intel.blended_score(
+            c["_rel"], c.get("_imp", 0.0), c["_priority"]) + 0.03 * c["_media"],
         reverse=True
     )
     return candidates
@@ -549,9 +569,13 @@ def _editorial_pick(context: "ExecutionContext") -> "dict | None":
     role = getattr(persona, "role", "") or ""
     recent = [p[:90] for p in (context.scratch.get("recent_posts") or [])[:5]]
     shortlist = candidates[:8]
+    # المرشّحون مرتّبون بالصلة+الأهمية، ورئيس التحرير يرى مؤشرات الانتشار والحداثة
+    # نفسها — كان يرى العناوين فقط فيختار «الأشوق» بلا أي دليل على ما يهمّ الجمهور.
     listing = "\n".join(
         f"{i + 1}. [{c['source']}] {c['title'][:110]}"
         + (f" — {c['summary'][:150]}" if c["summary"] else "")
+        + (f" ({c['_metrics']})" if c.get("_metrics") else "")
+        + f" [أهمية {c.get('_imp', 0):.0%}]"
         for i, c in enumerate(shortlist)
     )
     prompt = (
@@ -772,7 +796,8 @@ class DailyContentCreatorSkill(ISkill):
                 brief += f" مهم: ضمّن الوسم {directed} كما هو حرفياً في المنشور."
             return [ProposedAction(
                 capability="publish_content",
-                params={"brief": brief, "media_url": "", "owner_directed": True},
+                params={"brief": brief, "media_url": "", "owner_directed": True,
+                        "research_query": directed[:200]},
                 rationale="user-directed topic from chat (explicit owner command)",
                 expected_impact=0.95, urgency=0.95, risk=0.1,
             )]
@@ -816,7 +841,7 @@ class DailyContentCreatorSkill(ISkill):
         if enforce_scope and interests:
             hay = f"{topic.get('title','')} {topic.get('summary','')}"
             min_rel = int(rules.get("min_relevance_score", 1))
-            if relevance_score(hay, interests) < min_rel:
+            if _rel(context, hay, interests) < min_rel:
                 return []
         focus = "، ".join(interests) if interests else (
             context.top_goal_description() or "مجال اهتمام الجمهور")
@@ -859,6 +884,7 @@ class DailyContentCreatorSkill(ISkill):
             "media_url": topic["media_url"],
             "pillar": plan.get("pillar", ""),
             "format": plan.get("format", ""),
+            "research_query": topic["title"][:200],
         }
         if parts > 1:
             params["parts"] = parts
@@ -1112,7 +1138,7 @@ class ViralContentCreatorSkill(ISkill):
         if enforce_scope and interests:
             hay = f"{topic.get('title','')} {topic.get('summary','')}"
             min_rel = int(rules.get("min_relevance_score", 1))
-            if relevance_score(hay, interests) < min_rel:
+            if _rel(context, hay, interests) < min_rel:
                 return []
 
         lang = getattr(context.config.persona, "language", "ar") or "ar"
@@ -1231,7 +1257,7 @@ class SwipeFileSkill(ISkill):
                 continue
             if _is_ad_or_spam_text(text) or _violates_persona_donts(text, context):
                 continue
-            if interests and relevance_score(text, interests) < int(
+            if interests and _rel(context, text, interests, t) < int(
                     rules.get("min_relevance_score", 1)):
                 continue
             eligible.append(t)
@@ -1422,8 +1448,8 @@ def _mission_candidates(context: "ExecutionContext",
                 continue
             seen.add(url)
             out.append({**t, "_match": round(match, 3),
-                        "_rel": relevance_score(hay, getattr(
-                            context.config.persona, "interests", []) or [])})
+                        "_rel": _rel(context, hay, getattr(
+                            context.config.persona, "interests", []) or [], t)})
 
     out.sort(key=lambda t: (t.get("_match", 0), t.get("_rel", 0)), reverse=True)
     return out

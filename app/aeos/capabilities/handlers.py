@@ -569,6 +569,9 @@ class PublishContentCapability(ICapability):
         if not text:
             # ask the content MCP to generate it from a brief/goal
             brief = request.params.get("brief") or "Write one engaging original post."
+            from ..employee import research
+
+            brief = research.augment_brief(brief, request.params.get("research_query", ""), context)
             text, issues = _generate_quality_post(brief, context)
         if not text:
             return CapabilityResult.fail("no content to publish", self.name)
@@ -1419,6 +1422,9 @@ class PublishThreadCapability(ICapability):
         brief = request.params.get("brief") or "اكتب ثريداً مفيداً في مجال تخصصك."
         if not (context.llm and context.llm.available):
             return []
+        from ..employee import research
+
+        brief = research.augment_brief(brief, request.params.get("research_query", ""), context)
         data = context.llm.complete_json(
             system=(
                 "أنت صانع محتوى محترف على X يكتب ثريدات عربية عالية الجودة. "

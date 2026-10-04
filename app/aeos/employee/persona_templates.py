@@ -221,12 +221,77 @@ def keywords_for(interests: List[str]) -> List[str]:
     return list(dict.fromkeys(k.lower() for k in out))
 
 
+# ── مطابقة الكلمات المفتاحية على حدود الكلمة ──
+# كانت المطابقة «جزء من نص» (``kw in text``) فتطابق جذوراً قصيرة داخل كلمات لا
+# علاقة لها: «دين» داخل «المدينة»، «حج» داخل «حجم»، و ai/app داخل said/happy.
+# قيس: نص عن مطعم في المدينة سجّل 2 (أعلى من خبر اقتصادي حقيقي سجّل 1)، وخبر
+# تقني بلا كلمة من القاموس سجّل 0 — والحوض يُرتَّب بهذه الدرجة أولاً، فكان
+# الضجيج يتقدّم على المواضيع الحقيقية.
+_AR_PREFIXES = ("وبال", "وال", "فال", "بال", "كال", "لل", "ال", "و", "ف", "ب", "ل", "ك")
+#: لواحق مسموحة بعد الجذر القصير (≤3 أحرف) — بعد التطبيع (ة→ه)
+_AR_SHORT_SUFFIXES = ("", "ي", "يه", "ه", "ات", "ون", "ين", "ان", "ها", "هم", "نا",
+                      "يا", "يات", "يين", "يون", "انين", "انون", "انات", "انه")
+_TOKEN_RE = re.compile(r"[\w\u0600-\u06FF]+", re.UNICODE)
+_AR_DIACRITICS_RE = re.compile(r"[\u064B-\u0652\u0640]")
+_IS_ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
+
+
+def _norm_ar(s: str) -> str:
+    s = _AR_DIACRITICS_RE.sub("", (s or "").lower())
+    return (s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+            .replace("ى", "ي").replace("ة", "ه"))
+
+
+def _token_variants(token: str) -> List[str]:
+    """الكلمة نفسها + صورها بعد نزع سوابق العطف/الجر/التعريف."""
+    out = [token]
+    if _IS_ARABIC_RE.search(token):
+        for p in _AR_PREFIXES:
+            if token.startswith(p) and len(token) - len(p) >= 2:
+                out.append(token[len(p):])
+    return out
+
+
+def _stem_match(kw: str, variants: List[str]) -> bool:
+    arabic = bool(_IS_ARABIC_RE.search(kw))
+    if len(kw) <= 3:
+        # جذر قصير: يجب أن يكون الكلمة كاملة (مع لاحقة مألوفة) لا بدايتها فقط
+        tails = _AR_SHORT_SUFFIXES if arabic else ("", "s")
+        return any(v[len(kw):] in tails for v in variants if v.startswith(kw))
+    return any(v.startswith(kw) for v in variants)
+
+
+def _compile_keywords(interests: List[str]):
+    singles, phrases = [], []
+    for kw in keywords_for(interests):
+        parts = [_norm_ar(p) for p in kw.split() if p]
+        if len(parts) > 1:
+            phrases.append(parts)
+        elif parts:
+            singles.append(parts[0])
+    return singles, phrases
+
+
 def relevance_score(text: str, interests: List[str]) -> int:
-    """Count how many interest keywords appear in the text (case-insensitive)."""
+    """عدد كلمات الاهتمامات المختلفة الموجودة في النص، على حدود الكلمة."""
     if not interests:
         return 0
-    hay = (text or "").lower()
-    return sum(1 for kw in keywords_for(interests) if kw and kw in hay)
+    tokens = [_norm_ar(t) for t in _TOKEN_RE.findall(text or "")]
+    if not tokens:
+        return 0
+    variants = [_token_variants(t) for t in tokens]
+    singles, phrases = _compile_keywords(list(interests))
+    score = 0
+    for kw in singles:
+        if any(_stem_match(kw, v) for v in variants):
+            score += 1
+    for parts in phrases:
+        n = len(parts)
+        for i in range(len(tokens) - n + 1):
+            if all(_stem_match(parts[j], variants[i + j]) for j in range(n)):
+                score += 1
+                break
+    return score
 
 
 # ───────────────────── topic-signature helpers ─────────────────────

@@ -21,7 +21,7 @@ from .cognition.phases import (
     AnalyzePhase, CritiquePhase, DecidePhase, EmotionPhase, EvaluatePhase,
     ExecutePhase, GraphMemoryPhase, LearnPhase, ObservePhase, PerformancePhase,
     PersonaGuardPhase, PlanPhase, PrioritizePhase, SavePhase, StrategyPhase,
-    SupportPhase, ThinkPhase,
+    SupportPhase, ThinkPhase, TopicIntelPhase,
 )
 from .core.container import Container
 from .core.events import Event, EventType, InMemoryEventBus
@@ -96,6 +96,13 @@ class AEOSPlatform:
         mcp.register(NewsMCP())
         mcp.register(SearchMCP())
         mcp.register(ImageMCP())      # صور أصلية مولّدة للمحتوى البصري
+        # خوادم MCP خارجية أضافها المالك (data/external_mcp.json) — اتصال كسول
+        try:
+            from .mcp.servers.external_mcp import register_all
+
+            register_all(mcp)
+        except Exception:  # noqa: BLE001
+            logger.exception("external MCP servers failed to load")
         c.register_singleton(MCPRegistry, mcp)
 
         # --- capabilities ---
@@ -117,7 +124,8 @@ class AEOSPlatform:
         # --- cognitive cycle factory (fresh instance per runtime) ---
         def cycle_factory() -> CognitiveCycle:
             phases = [
-                ObservePhase(), PerformancePhase(), EmotionPhase(graph_memory),
+                ObservePhase(), TopicIntelPhase(), PerformancePhase(),
+                EmotionPhase(graph_memory),
                 AnalyzePhase(), ThinkPhase(), StrategyPhase(), PrioritizePhase(),
                 PlanPhase(planner), DecidePhase(decision_engine),
                 PersonaGuardPhase(), ExecutePhase(),
@@ -312,8 +320,14 @@ class AEOSPlatform:
         _baseline_servers = ["x", "playwright_x", "content", "memory", "browser",
                              "news", "image"]
         cfg.mcp_servers = list(dict.fromkeys(list(cfg.mcp_servers or []) + _baseline_servers))
-        # أزل خادم البحث القديم فقط (search = stub غير مُهيّأ)؛ ونُبقي news فعّالاً.
-        cfg.mcp_servers = [s for s in cfg.mcp_servers if s not in ("search",)]
+        # البحث: يُربط تلقائياً متى وُجد مفتاح مزوّد (كان stub فكان يُنزع دائماً).
+        from .mcp.servers.core_mcp import search_provider
+
+        if search_provider()[0]:
+            if "search" not in cfg.mcp_servers:
+                cfg.mcp_servers.append("search")
+        else:
+            cfg.mcp_servers = [s for s in cfg.mcp_servers if s != "search"]
         _baseline_skills = [
             "on_this_day", "daily_content_creator", "community_engager",
             "timeline_engager", "viral_content_creator",

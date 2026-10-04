@@ -1,3 +1,4 @@
+aiohttp==3.13.5  # كاشف الترندات (app/trend_detector) — كان مستخدماً وغير مُدرج
 alembic==1.18.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
@@ -57,6 +58,7 @@ opentelemetry-api==1.39.1
 passlib==1.7.4
 pillow==12.1.0
 playwright==1.46.0
+psutil==7.2.2  # app/x/loginx — كان مستخدماً وغير مُدرج
 proto-plus==1.27.0
 protobuf==5.29.5
 pyasn1==0.6.1
@@ -105,6 +107,12 @@ tzdata==2025.3
 #   - SQLAlchemy       : تخزين الموظفين/الذاكرة/الوظائف/السجلات
 #   - redis            : (اختياري) طابور وظائف دائم للتوسّع متعدد العمليات
 #   - tzdata           : مطلوب لـ zoneinfo على Windows (منطق ساعات عمل الموظفين)
+#   - openai (embeddings) : التحليل الدلالي للمواضيع (employee/topic_intel.py)
+#   - requests         : بحث الويب Tavily/Brave/SerpAPI (SearchMCP) + MCP عبر HTTP
+#   - neo4j            : يأتي تبعيةً لـ graphiti-core (المحرّك الافتراضي للذاكرة)
+# عميل MCP الخارجي (mcp/servers/external_mcp.py) مكتوب داخلياً عن قصد: حزمة
+# ``mcp`` الرسمية ترقّي python-multipart و idna وغيرهما. لا تضفها هنا؛ تُثبَّت فقط
+# في بيئة منفصلة لاختبار verify_tools.py (انظر رأس الملف).
 # بقية مكوّنات AEOS تعتمد على المكتبة القياسية فقط (abc, dataclasses,
 # zoneinfo, heapq, threading, hashlib, ...).
 # ══════════════════════════════════════════════════════════════════════════

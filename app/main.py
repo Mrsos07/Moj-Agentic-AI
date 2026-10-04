@@ -44,6 +44,7 @@ from app.trend_detector.scheduler.scheduler import trend_scheduler
 from app.scheduler.tick import scheduler_tick
 from app.aeos.api.routes import router as aeos_router
 from app.aeos.bootstrap import get_platform
+from app.aeos.services import orchestrator
 
 app = FastAPI(title="كنق الاتمته - Chatbot API", version="1.0.0")
 
@@ -629,6 +630,42 @@ def _maybe_handle_employee_command(message: str, pinned_account: Optional[str],
     return None
 
 
+async def _run_coordinator(message: str, user_id, pinned: Optional[str], db,
+                           session_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """المنسّق العام في خيط منفصل: حلقة الأدوات تأخذ عدة نداءات LLM، وتشغيلها
+    داخل حلقة الأحداث كان سيجمّد كل اتصالات الشات الأخرى حتى تنتهي."""
+    try:
+        return await asyncio.to_thread(
+            orchestrator.handle, message, _norm_uid(user_id),
+            pinned=pinned, db=db, session_id=session_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: coordinator failed: {e}")
+        return None
+
+
+async def _send_employee_reply(websocket: WebSocket, db, user_id, session_id,
+                               user_message: str, reply: str, intent: str, agent: str,
+                               metadata: Optional[Dict[str, Any]] = None) -> None:
+    """احفظ رسالة المستخدم والرد في المحادثة ثم أرسل الرد للواجهة."""
+    try:
+        conv = memory_service.get_or_create_conversation(
+            db=db, user_id=user_id, session_id=session_id)
+        memory_service.add_message(
+            db=db, conversation_id=conv.id, role="user", content=user_message)
+        memory_service.add_message(
+            db=db, conversation_id=conv.id, role="assistant",
+            content=reply, intent=intent, agent=agent)
+    except Exception as _e:  # noqa: BLE001
+        print(f"Warning: persist {intent} failed: {_e}")
+    await manager.send_message({"type": "typing", "status": False}, websocket)
+    await manager.send_message({
+        "type": "assistant_message",
+        "message": reply,
+        "metadata": metadata or {"agent": agent},
+        "timestamp": datetime.now().isoformat(),
+    }, websocket)
+
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -970,167 +1007,71 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # الحصول على جلسة قاعدة البيانات
                 db = next(get_db())
-                
+
+                # ── المنسّق العام: رسالة للفريق كله (≥2 موظف مذكور أو «كل الموظفين») ──
+                team_mentions = orchestrator.mentioned_employees(user_message, user_id)
+                if orchestrator.is_fleet_message(user_message, team_mentions):
+                    coord = await _run_coordinator(user_message, user_id, pinned_account,
+                                                   db, session_id)
+                    if coord:
+                        await _send_employee_reply(
+                            websocket, db, user_id, session_id, user_message,
+                            coord["message"], "aeos_coordinator", "Coordinator",
+                            {"agent": "Coordinator", "dispatched": coord["dispatched"]})
+                        continue
+
+                # موظف واحد مذكور بـ@ يعمل كتثبيت لهذه الرسالة فقط، ويُزال من نص
+                # الأمر لأن الأنماط الحتمية مثبّتة على بداية النص («^انشر عن …»).
+                effective_pin = pinned_account
+                route_message = user_message
+                if len(team_mentions) == 1:
+                    effective_pin = team_mentions[0].account_username
+                    route_message = orchestrator.strip_mentions(user_message, team_mentions) or user_message
+
                 # بناء الـ metadata: المرفق + الحساب المثبّت من الشات
                 agent_metadata = {}
                 if attachment:
                     agent_metadata["attachment"] = attachment
-                if pinned_account:
-                    agent_metadata["pinned_account"] = pinned_account
+                if effective_pin:
+                    agent_metadata["pinned_account"] = effective_pin
 
-                # ── مهمّة حرّة موجّهة («روح للتايم لاين وشوف تغريدة وردّ عليها») ──
-                mission_reply = _maybe_mission_employee(
-                    user_message, pinned_account, user_id)
-                if mission_reply:
-                    try:
-                        conv = memory_service.get_or_create_conversation(
-                            db=db, user_id=user_id, session_id=session_id)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="user", content=user_message)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="assistant",
-                            content=mission_reply, intent="aeos_employee_mission",
-                            agent="AEOS")
-                    except Exception as _e:
-                        print(f"Warning: persist employee mission failed: {_e}")
-                    await manager.send_message({"type": "typing", "status": False}, websocket)
-                    await manager.send_message({
-                        "type": "assistant_message",
-                        "message": mission_reply,
-                        "timestamp": datetime.now().isoformat(),
-                    }, websocket)
-                    continue
-
-                # ── توجيه الموظف للتفاعل مع محتوى محدّد («تفاعل مع هذا المحتوى …») ──
-                engage_reply = _maybe_engage_employee(user_message, pinned_account)
-                if engage_reply:
-                    try:
-                        conv = memory_service.get_or_create_conversation(
-                            db=db, user_id=user_id, session_id=session_id)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="user", content=user_message)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="assistant",
-                            content=engage_reply, intent="aeos_employee_engage", agent="AEOS")
-                    except Exception as _e:
-                        print(f"Warning: persist employee engage failed: {_e}")
-                    await manager.send_message({"type": "typing", "status": False}, websocket)
-                    await manager.send_message({
-                        "type": "assistant_message",
-                        "message": engage_reply,
-                        "timestamp": datetime.now().isoformat(),
-                    }, websocket)
-                    continue
-
-                # ── توجيه مباشر للموظف الذكي («انشر عن 2» / «تكلم عن …») ──
-                directive_reply = _maybe_direct_employee(user_message, pinned_account)
-                if directive_reply:
-                    try:
-                        conv = memory_service.get_or_create_conversation(
-                            db=db, user_id=user_id, session_id=session_id)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="user", content=user_message)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="assistant",
-                            content=directive_reply, intent="aeos_employee_directive", agent="AEOS")
-                    except Exception as _e:
-                        print(f"Warning: persist employee directive failed: {_e}")
-                    await manager.send_message({"type": "typing", "status": False}, websocket)
-                    await manager.send_message({
-                        "type": "assistant_message",
-                        "message": directive_reply,
-                        "timestamp": datetime.now().isoformat(),
-                    }, websocket)
-                    continue
-
-                # ── بحث وتحليل عبر كل المصادر واستنتاج المواضيع المرتبطة بالاهتمام ──
-                employee_analysis_reply = _maybe_analyze_employee(
-                    user_message, pinned_account, user_id)
-                if employee_analysis_reply:
-                    try:
-                        conv = memory_service.get_or_create_conversation(
-                            db=db, user_id=user_id, session_id=session_id)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="user", content=user_message)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="assistant",
-                            content=employee_analysis_reply,
-                            intent="aeos_employee_analyze", agent="AEOS")
-                    except Exception as _e:
-                        print(f"Warning: persist employee analyze ack failed: {_e}")
-                    await manager.send_message({"type": "typing", "status": False}, websocket)
-                    await manager.send_message({
-                        "type": "assistant_message",
-                        "message": employee_analysis_reply,
-                        "timestamp": datetime.now().isoformat(),
-                    }, websocket)
-                    continue
-
-                # ── عرض بيانات الموظف الحيّة (أخبار/ترند/تايم لاين/أهم البوستات) ──
-                employee_data_reply = _maybe_show_employee_data(
-                    user_message, pinned_account, user_id)
-                if employee_data_reply:
-                    try:
-                        conv = memory_service.get_or_create_conversation(
-                            db=db, user_id=user_id, session_id=session_id)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="user", content=user_message)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="assistant",
-                            content=employee_data_reply,
-                            intent="aeos_employee_data", agent="AEOS")
-                    except Exception as _e:
-                        print(f"Warning: persist employee data ack failed: {_e}")
-                    await manager.send_message({"type": "typing", "status": False}, websocket)
-                    await manager.send_message({
-                        "type": "assistant_message",
-                        "message": employee_data_reply,
-                        "timestamp": datetime.now().isoformat(),
-                    }, websocket)
-                    continue
-
-                # ── أوامر التحكم بالموظف الذكي (تنفيذ قبل النقاش/الاستعلام) ──
-                employee_command_reply = _maybe_handle_employee_command(
-                    user_message, pinned_account, user_id)
-                if employee_command_reply:
-                    try:
-                        conv = memory_service.get_or_create_conversation(
-                            db=db, user_id=user_id, session_id=session_id)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="user", content=user_message)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="assistant",
-                            content=employee_command_reply,
-                            intent="aeos_employee_command", agent="AEOS")
-                    except Exception as _e:
-                        print(f"Warning: persist employee command failed: {_e}")
-                    await manager.send_message({"type": "typing", "status": False}, websocket)
-                    await manager.send_message({
-                        "type": "assistant_message",
-                        "message": employee_command_reply,
-                        "timestamp": datetime.now().isoformat(),
-                    }, websocket)
-                    continue
-
-                # ── نقاش/استعلام عن الموظف الذكي المثبّت (قبل الوكلاء العامة) ──
-                employee_answer = _maybe_answer_employee_query(user_message, pinned_account)
-                if employee_answer:
-                    try:
-                        conv = memory_service.get_or_create_conversation(
-                            db=db, user_id=user_id, session_id=session_id)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="user", content=user_message)
-                        memory_service.add_message(
-                            db=db, conversation_id=conv.id, role="assistant",
-                            content=employee_answer, intent="aeos_employee_query", agent="AEOS")
-                    except Exception as _e:
-                        print(f"Warning: persist employee query failed: {_e}")
-                    await manager.send_message({"type": "typing", "status": False}, websocket)
-                    await manager.send_message({
-                        "type": "assistant_message",
-                        "message": employee_answer,
-                        "timestamp": datetime.now().isoformat(),
-                    }, websocket)
+                # ── المسارات الحتمية للموظف (الترتيب مقصود: التنفيذ قبل النقاش) ──
+                employee_routes = (
+                    # مهمّة حرّة موجّهة («روح للتايم لاين وشوف تغريدة وردّ عليها»)
+                    (lambda: _maybe_mission_employee(route_message, effective_pin, user_id),
+                     "aeos_employee_mission"),
+                    # التفاعل مع محتوى محدّد («تفاعل مع هذا المحتوى …»)
+                    (lambda: _maybe_engage_employee(route_message, effective_pin),
+                     "aeos_employee_engage"),
+                    # توجيه مباشر («انشر عن 2» / «تكلم عن …»)
+                    (lambda: _maybe_direct_employee(route_message, effective_pin),
+                     "aeos_employee_directive"),
+                    # بحث وتحليل عبر كل المصادر واستنتاج المواضيع المرتبطة بالاهتمام
+                    (lambda: _maybe_analyze_employee(route_message, effective_pin, user_id),
+                     "aeos_employee_analyze"),
+                    # عرض بيانات الموظف الحيّة (أخبار/ترند/تايم لاين/أهم البوستات)
+                    (lambda: _maybe_show_employee_data(route_message, effective_pin, user_id),
+                     "aeos_employee_data"),
+                    # أوامر التحكم بالموظف الذكي (تنفيذ قبل النقاش/الاستعلام)
+                    (lambda: _maybe_handle_employee_command(route_message, effective_pin, user_id),
+                     "aeos_employee_command"),
+                    # نقاش/استعلام عن الموظف الذكي المثبّت (قبل الوكلاء العامة)
+                    (lambda: _maybe_answer_employee_query(route_message, effective_pin),
+                     "aeos_employee_query"),
+                )
+                handled = False
+                for route, intent_name in employee_routes:
+                    reply = route()
+                    if reply:
+                        await _send_employee_reply(
+                            websocket, db, user_id, session_id, user_message, reply,
+                            intent_name, "AEOS",
+                            {"agent": "AEOS",
+                             "dispatched": [effective_pin] if effective_pin
+                             and intent_name != "aeos_employee_query" else []})
+                        handled = True
+                        break
+                if handled:
                     continue
 
                 # استخدام نظام الوكلاء الذكية مع الذاكرة
@@ -1183,7 +1124,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     # موظف ذكي مثبّت؟ المالك يخاطبه هو، فافتح النقاش معه بدل
                     # رسالة «خارج النطاق» — هذا ما يجعل التوجيه حواراً مفتوحاً.
-                    open_reply = _employee_open_discussion(user_message, pinned_account)
+                    open_reply = _employee_open_discussion(route_message, effective_pin)
                     if open_reply:
                         conversation_id = agent_result.get("conversation_id")
                         if db and conversation_id:
@@ -1202,6 +1143,30 @@ async def websocket_endpoint(websocket: WebSocket):
                             "timestamp": datetime.now().isoformat(),
                         }, websocket)
                         continue
+
+                    # لا موظف مثبّت ولا نية مطابقة ⇒ المنسّق العام يتولّى الطلب.
+                    await manager.send_message({"type": "typing", "status": True}, websocket)
+                    coord = await _run_coordinator(user_message, user_id, None, db, session_id)
+                    if coord:
+                        conversation_id = agent_result.get("conversation_id")
+                        if db and conversation_id:
+                            try:
+                                memory_service.add_message(
+                                    db=db, conversation_id=conversation_id,
+                                    role="assistant", content=coord["message"],
+                                    intent="aeos_coordinator", agent="Coordinator",
+                                )
+                            except Exception as _e:  # noqa: BLE001
+                                print(f"Warning: persist coordinator reply failed: {_e}")
+                        await manager.send_message({"type": "typing", "status": False}, websocket)
+                        await manager.send_message({
+                            "type": "assistant_message",
+                            "message": coord["message"],
+                            "metadata": {"agent": "Coordinator", "dispatched": coord["dispatched"]},
+                            "timestamp": datetime.now().isoformat(),
+                        }, websocket)
+                        continue
+                    await manager.send_message({"type": "typing", "status": False}, websocket)
 
                     # الوكيل ما لقى نية مطابقة → النظام بوت خدمات، مو شات عام
                     out_of_scope_message = (

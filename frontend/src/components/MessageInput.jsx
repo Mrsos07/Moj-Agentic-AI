@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { FiSend, FiPlus, FiImage, FiFile } from 'react-icons/fi'
 import { FiUserPlus } from 'react-icons/fi'
 
-const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnected, onAttachImage, onAttachFile, onAttachCookies, onFocusRef }) => {
+const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnected, onAttachImage, onAttachFile, onAttachCookies, onFocusRef, mentionOptions = [] }) => {
   const [isAttachOpen, setIsAttachOpen] = useState(false)
   const imageInputRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -16,7 +16,24 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
     }
   }, [onFocusRef])
 
+  // اقتراح الموظفين عند كتابة @ في آخر النص
+  const mentionQuery = (inputValue.match(/(?:^|\s)@([\w\u0600-\u06FF]*)$/) || [])[1]
+  const mentionMatches = mentionQuery === undefined ? [] : mentionOptions.filter((e) => {
+    const q = mentionQuery.toLowerCase()
+    return e.handle.toLowerCase().includes(q) || (e.name || '').toLowerCase().includes(q)
+  }).slice(0, 6)
+
+  const pickMention = (handle) => {
+    setInputValue(inputValue.replace(/@([\w\u0600-\u06FF]*)$/, `@${handle} `))
+    textareaRef.current?.focus()
+  }
+
   const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && mentionMatches.length > 0) {
+      e.preventDefault()
+      pickMention(mentionMatches[0].handle)
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSendMessage()
@@ -62,6 +79,23 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
   return (
     <div className="w-full bg-background-light dark:bg-background-dark pt-3 pb-4 px-4 md:px-8">
       <div className="w-full max-w-[840px] mx-auto">
+        {mentionMatches.length > 0 && (
+          <div className="mb-2 rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark shadow-lg overflow-hidden">
+            {mentionMatches.map((e, i) => (
+              <button
+                key={e.handle}
+                type="button"
+                onClick={() => pickMention(e.handle)}
+                className={`w-full flex items-center gap-2 px-4 py-2 text-right text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${i === 0 ? 'bg-primary/5' : ''}`}
+              >
+                <span className={`size-2 rounded-full ${e.enabled ? 'bg-green-500' : 'bg-gray-400'}`} />
+                <span className="font-semibold text-text-primary-light dark:text-text-primary-dark">{e.name}</span>
+                <span className="text-text-secondary-light dark:text-text-secondary-dark">@{e.handle}</span>
+                {e.role && <span className="text-xs text-text-secondary-light dark:text-text-secondary-dark truncate">· {e.role}</span>}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="relative flex items-end w-full p-3 bg-card-light dark:bg-card-dark border border-border-light dark:border-border-dark rounded-2xl shadow-sm hover:shadow-md focus-within:border-primary dark:focus-within:border-primary transition-all duration-200">
           <button
             onClick={handleSendMessage}
@@ -141,7 +175,7 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
             onChange={(e) => setInputValue(e.target.value)}
             onKeyPress={handleKeyPress}
             className="w-full max-h-[200px] py-3 px-3 bg-transparent border-0 focus:ring-0 text-text-primary-light dark:text-text-primary-dark placeholder-text-secondary-light dark:placeholder-text-secondary-dark resize-none leading-relaxed outline-none text-sm"
-            placeholder="اكتب رسالتك بالتفصيل..."
+            placeholder="وجّه فريقك... اكتب @ لتخاطب موظفاً بعينه"
             rows="1"
             style={{ minHeight: '48px' }}
           />

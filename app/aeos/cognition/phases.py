@@ -441,6 +441,40 @@ class ObservePhase(ICognitivePhase):
         )
 
 
+class TopicIntelPhase(ICognitivePhase):
+    """حلّل ما رُصد: الصلة الدلالية بالتخصص + الأهمية (انتشار × حداثة).
+
+    يضع ``_sem``/``_imp`` على عناصر scratch نفسها فتستهلكها المهارات مباشرة
+    (حوض التفاعل، مرشّحو المحتوى، رئيس التحرير). نداء تضمين واحد للدورة، وأي
+    فشل يُبقي المسار الحتمي (الكلمات) كما هو.
+    """
+
+    name = "topic_intel"
+
+    def run(self, context: "ExecutionContext") -> None:
+        from ..employee import topic_intel
+
+        try:
+            report = topic_intel.analyze(context)
+        except Exception:  # noqa: BLE001 - التحليل تحسين، لا شرط للدورة
+            logger.exception("topic intel failed")
+            return
+        context.scratch["topic_intel_report"] = report
+        if not report.get("analyzed"):
+            return
+        account = getattr(context.config, "account_username", "") or "الموظف الذكي"
+        line = (f"🧭 **@{account} حلّل {report['analyzed']} عنصراً:** "
+                f"{report['in_scope']} ضمن تخصصه"
+                + ("" if report.get("semantic") else " (بالكلمات فقط — التحليل الدلالي غير متاح)"))
+        if report.get("promoted_dropped"):
+            line += f"، واستبعد {report['promoted_dropped']} إعلاناً مموّلاً"
+        top = report.get("top") or []
+        if top:
+            line += "\nالأهم الآن:\n" + "\n".join(
+                f"• {t['text'][:90]} _(أهمية {t['importance']:.0%})_" for t in top)
+        context.emit_progress(line, intent="aeos_cycle_thinking")
+
+
 class PerformancePhase(ICognitivePhase):
     """Read the account's OWN posts performance — the missing feedback loop.
 

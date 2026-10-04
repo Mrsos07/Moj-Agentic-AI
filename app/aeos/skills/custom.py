@@ -32,6 +32,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from ..employee import topic_intel
 from .base import ISkill, ProposedAction
 
 if TYPE_CHECKING:
@@ -518,7 +519,6 @@ class CustomSkillRunner(ISkill):
     # ---- الأهداف ----
     @staticmethod
     def _candidates(context: "ExecutionContext", spec: Dict[str, Any]) -> List[dict]:
-        from ..employee.persona_templates import relevance_score
         from .builtin import (
             _engaged_urls, _is_ad_or_spam_text, _is_specialty_match,
             _topic_recently_engaged, _violates_persona_donts,
@@ -557,9 +557,10 @@ class CustomSkillRunner(ISkill):
                 if _topic_recently_engaged(context, text):
                     continue
                 seen.add(url)
-                pool.append({**item, "_rel": relevance_score(hay, interests)
-                             if interests else 0})
-        pool.sort(key=lambda t: t.get("_rel", 0), reverse=True)
+                rel = topic_intel.relevance(context, hay, interests, item) if interests else 0
+                pool.append({**item, "_rel": rel,
+                             "_score": topic_intel.blended_score(rel, topic_intel.importance(item))})
+        pool.sort(key=lambda t: t.get("_score", 0), reverse=True)
         return pool
 
     # ---- بناء المقترحات ----
