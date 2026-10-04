@@ -32,6 +32,9 @@
   (`--config-only` for no network, `--no-image` to skip the priciest check).
   A wrong key produces 401 on every path — which is exactly how you tell
   "wiring is right, key is wrong" apart from "wiring is wrong".
+- Image generation defaults to GPT Image 2: `openai/gpt-image-2` on OpenRouter,
+  `gpt-image-2` on OpenAI. `verify_openrouter.py --config-only` also checks the
+  image-model defaults and mocked ImageMCP dispatch without generating paid images.
 - Do not change `OPENROUTER_EMBEDDING_MODEL` casually: a different embedding
   model changes vector dimensions, and every vector already stored in the graph
   becomes incomparable — the whole graph must be rebuilt.
@@ -524,3 +527,39 @@ independent structural causes — none of them fixable by telling the model to
 - Run one real cycle end-to-end (starts app/x, publishes for real):
   `.\venv\Scripts\python.exe run_live_cycle.py --account <handle> [--force-format thread] [--dry]`
   Use `--dry` first: it sets `daily_post_target=0` so nothing is published.
+
+## Cycle plan and execution consistency
+- `DecidePhase` stores `initial_decisions`; it must not announce the final plan.
+  `PersonaGuardPhase` can remove or substitute candidates. `ExecutePhase` snapshots
+  the post-guard decisions as `execution_plan`, then announces that exact plan.
+  A failed plan/decide/guard phase blocks tool execution instead of using stale decisions.
+- Each result carries the plan's `action_id`, capability and target. Preserve both
+  initial decisions and execution plan in the cycle report and persisted outcome.
+  Re-check business limits before each action: earlier successful actions can consume
+  the remaining daily budget. `status=skipped` is not a tool failure; evaluation,
+  critique, support messages and graph episodes must preserve that distinction.
+- `scratch["active_action"]` exists only during one action and is cleared in `finally`.
+  Reply/quote generation uses `ExecutionContext.action_prompt()` for that action's
+  rationale and target-specific graph facts/interaction signals. Never invent missing
+  relationship history or let target memory replace the owner's persona instructions.
+- Offline regression coverage: `verify_creator.py` (plan/guard/execution consistency)
+  and `verify_interaction.py` (mocked generation and per-target memory isolation).
+
+## Employee-local skill creation and import
+- Skill routes require an authenticated owner of the selected employee. Create and
+  import are previews; activation saves only that employee's `custom_skills`.
+  Preview IDs are unique so two pending previews cannot accidentally update one another.
+- Import accepts JSON specs or text/Markdown documents (32 KiB UTF-8 maximum).
+  HTTPS fetching validates every redirect and DNS address, pins the public IP while
+  preserving TLS hostname verification, and never forwards credentials or executes code.
+  Unsupported/ambiguous requirements must be rejected, not replaced with a default reply.
+- `skill_readiness()` checks supported capabilities and configured MCPs, not live success.
+  A missing tool blocks activation; user persona, guard and execution quotas still apply.
+  Interaction instructions travel as `skill_directive`, NOT string `brief` (the reply
+  handler interprets `brief` as a boolean short-reply mode).
+- Repository saves merge custom-skill changes against the loaded baseline. Preserve this:
+  otherwise an in-flight cycle can erase a newly saved skill or resurrect a deleted one.
+- Offline checks: `venv\Scripts\python.exe verify_custom_skill.py`.
+  Optional UI checks use a separate Vite port and a fresh headless Chrome with mocked APIs:
+  call `verify_custom_skill.check_skill_browser('http://127.0.0.1:3017/')` after starting
+  `npm run dev -- --host 127.0.0.1 --port 3017 --strictPort` in `frontend`.

@@ -71,9 +71,12 @@ def _action_line(result: Dict[str, Any]) -> str:
                 detail = f": «{txt[:120]}»"
     if not ok:
         err = (result.get("error") or "").strip()
+        if result.get("status") == "skipped":
+            return f"لم يُنفّذ {cap}: {err[:100]}"
         if err:
             detail = f" (تعذّر: {err[:100]})"
-    return f"{mark} {verb}{detail}"
+    target = str(result.get("target") or "")
+    return f"{mark} {verb}{detail}" + (f" — {target}" if target else "")
 
 
 def _observed_line(observations: Dict[str, Any]) -> str:
@@ -142,6 +145,15 @@ def build_cycle_narrative(config, report: Dict[str, Any]) -> str:
     observed = _observed_line(report.get("observations") or {})
     if observed:
         parts.append(f"👀 ما رصده: {observed}.")
+
+    guard = report.get("guard_report") or {}
+    if guard.get("rejected"):
+        reasons = "؛ ".join(dict.fromkeys(
+            str(r)[:160] for r in (guard.get("reasons") or {}).values() if r))
+        parts.append(
+            f"مراجعة الخطة: استُبعد {len(guard['rejected'])} من الاختيارات الأولية. "
+            + (f"السبب: {reasons}. " if reasons else "")
+            + ("اعتُمد بديل اجتاز الحارس قبل التنفيذ." if guard.get("substituted") else ""))
 
     results = report.get("results") or []
     action_lines = [_action_line(r) for r in results if isinstance(r, dict)]
@@ -337,6 +349,8 @@ class RuntimeManager(IRuntimeManager):
         try:
             outcome_snapshot = {
                 "results": report.get("results"),
+                "initial_decisions": report.get("initial_decisions"),
+                "execution_plan": report.get("execution_plan"),
                 "guard_report": report.get("guard_report"),
                 "thought": report.get("thought"),
                 "analysis": report.get("analysis"),

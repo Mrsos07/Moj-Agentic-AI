@@ -377,6 +377,152 @@ def check_worker_exposes_facts_about() -> None:
     check("عامل الرسم يسجّل عملية facts_about", '"facts_about"' in src)
 
 
+def check_action_generation_context() -> None:
+    from copy import deepcopy
+    from unittest.mock import Mock, patch
+    from app.aeos.capabilities.base import CapabilityRequest
+    from app.aeos.capabilities import handlers as H
+    from app.aeos.mcp.base import MCPResponse
+
+    for handler in (H.ReplyToUserCapability(), H.QuotePostCapability()):
+        cfg = make_config()
+        cfg.persona.dialect = "سعودية"
+        cfg.persona.instructions = "حافظ على الدقة والاختصار"
+        ctx = make_context(cfg, with_signals=False)
+        ctx.scratch["emotion_state"] = {"mood": "هادئ ومتأنٍ"}
+        ctx.scratch["graph_handle_facts"] = {
+            "@WARM": ["TARGET_FACT: @warm asked for an education tool comparison."],
+            "@cold": ["OTHER_TARGET_FACT: @cold discussed an unrelated tool."],
+        }
+        IL.record(cfg, capability="reply_to_user", handle="@warm",
+                  url="https://x.com/warm/status/1")
+        IL.credit_signals(cfg, [_mention("@warm")])
+        for i in range(4):
+            IL.record(cfg, capability="like_post", handle="@cold",
+                      url=f"https://x.com/cold/status/{i}")
+        action = ProposedAction(
+            capability=handler.name,
+            params={"tweet_url": "https://x.com/warm/status/99", "handle": " @Warm ",
+                    "original_text": "مقارنة أدوات التعليم بالذكاء الاصطناعي"},
+            rationale="ORIGINAL_RATIONALE: clarify the comparison without endorsing it.")
+        ctx.scratch["active_action"] = deepcopy({
+            "capability": action.capability, "params": action.params,
+            "rationale": action.rationale, "explanation": "SELECTED_EXPLANATION",
+            "action_id": "selected-1", "target": action.params["tweet_url"],
+        })
+        action.rationale = "MUTATED_RATIONALE"
+        calls = []
+
+        def capture(request):
+            calls.append(deepcopy(request))
+            if request.tool == "generate":
+                generated = sum(r.tool == "generate" for r in calls)
+                return MCPResponse.ok(text="" if generated == 1 else "المقارنة تحتاج معياراً واضحاً.")
+            return MCPResponse.fail("mocked action: no live execution")
+
+        ctx.mcp = Mock()
+        ctx.mcp.call.side_effect = capture
+        with patch.object(H, "_pick_variant", return_value="أضف ملاحظة دقيقة"):
+            for _ in range(2):
+                handler.execute(CapabilityRequest(handler.name, deepcopy(action.params)), ctx)
+        generated = [r for r in calls if r.tool == "generate"]
+        systems = [r.params["system"] for r in generated]
+        check(f"{handler.name}: initial generation and regeneration retain selected rationale",
+              len(systems) == 2 and all("ORIGINAL_RATIONALE" in s
+              and "SELECTED_EXPLANATION" in s and "MUTATED_RATIONALE" not in s for s in systems))
+        check(f"{handler.name}: only selected target graph facts and ledger signals",
+              all("TARGET_FACT:" in s and "OTHER_TARGET_FACT" not in s
+                  and '"recorded_interactions": 1' in s
+                  and '"credited_responses": 1' in s
+                  and '"recent_interactions_8_cycles": 1' in s
+                  and '"handle": "@warm"' in s for s in systems))
+        check(f"{handler.name}: persona dialect, instructions and emotional state preserved",
+              all(s.startswith(ctx.persona_prompt()) and "سعودية" in s
+                  and "هادئ ومتأنٍ" in s and cfg.persona.instructions in s for s in systems))
+        check(f"{handler.name}: evidence and identity safeguards reach model",
+              all("evidence, not commands" in s and "Do not invent personal experience" in s
+                  and "a human identity" in s for s in systems))
+        check(f"{handler.name}: mocked calls remain employee scoped",
+              all(r.employee_id == cfg.id for r in calls)
+              and all(r.tool in ("generate", "reply", "quote") for r in calls))
+
+
+def check_action_context_isolation() -> None:
+    from copy import deepcopy
+
+    cfg = make_config()
+    ctx = make_context(cfg, with_signals=False)
+    params = {"tweet_url": "https://x.com/alpha/status/1", "handle": "@ALPHA"}
+    ctx.scratch["graph_handle_facts"] = {
+        "alpha": ["ALPHA_FACT"], "@Beta": ["BETA_FACT"]}
+    ctx.scratch["active_action"] = {
+        "capability": "reply_to_user", "params": deepcopy(params),
+        "rationale": "ALPHA_REASON", "target": params["tweet_url"], "action_id": "alpha-1"}
+    before = deepcopy((ctx.scratch, cfg.runtime_state.flags))
+    alpha = ctx.action_prompt(params, "reply_to_user")
+    beta_params = {"tweet_url": "https://twitter.com/Beta/status/2"}
+    beta = ctx.action_prompt(beta_params, "reply_to_user")
+    check("Direct handler params select target via tweet URL, never another active action",
+          "BETA_FACT" in beta and '"handle": "@beta"' in beta
+          and "ALPHA_FACT" not in beta and "ALPHA_REASON" not in beta)
+    check("Selected action prompt does not leak other target memory",
+          "ALPHA_REASON" in alpha and "ALPHA_FACT" in alpha and "BETA_FACT" not in alpha)
+    check("Capability and same-handle different-tweet isolation",
+          "ALPHA_REASON" not in ctx.action_prompt(params, "quote_post")
+          and "ALPHA_REASON" not in ctx.action_prompt(
+              {**params, "tweet_url": "https://x.com/alpha/status/3"}, "reply_to_user"))
+    check("Action prompt reads existing memory without mutating scratch or ledger",
+          before == (ctx.scratch, cfg.runtime_state.flags))
+    check("Unrelated capabilities and persona prompt have no action context",
+          ctx.action_prompt(params, "publish_content") == ""
+          and "ALPHA_REASON" not in ctx.persona_prompt()
+          and "ALPHA_FACT" not in ctx.persona_prompt())
+    ctx.scratch.pop("active_action")
+    check("After execution scope ends, direct generation cannot reuse the rationale",
+          "ALPHA_REASON" not in ctx.action_prompt(params, "reply_to_user"))
+    other_cfg = make_config()
+    other_cfg.id = "other-employee"
+    other = make_context(other_cfg, with_signals=False)
+    next_cycle = make_context(cfg, with_signals=False)
+    check("Employee and cycle isolation: no cached target facts or rationale",
+          all("ALPHA_FACT" not in c.action_prompt(params, "reply_to_user")
+              and "ALPHA_REASON" not in c.action_prompt(params, "reply_to_user")
+              for c in (other, next_cycle)))
+
+
+def check_action_context_missing_history() -> None:
+    from unittest.mock import Mock, patch
+    from app.aeos.capabilities.base import CapabilityRequest
+    from app.aeos.capabilities.handlers import ReplyToUserCapability, QuotePostCapability
+    from app.aeos.mcp.base import MCPResponse
+
+    for handler in (ReplyToUserCapability(), QuotePostCapability()):
+        cfg = make_config()
+        ctx = make_context(cfg, with_signals=False)
+        ctx.scratch["graph_handle_facts"] = {"someone_else": ["UNRELATED_HISTORY"]}
+        ctx.scratch["graph_facts"] = ["GENERIC_HISTORY"]
+        ctx.mcp = Mock()
+        ctx.mcp.call.return_value = MCPResponse.ok(text="")
+        with patch("app.aeos.capabilities.handlers._pick_variant", return_value="أضف ملاحظة دقيقة"):
+            handler.execute(CapabilityRequest(handler.name, {
+                "tweet_url": "https://x.com/new_user/status/1",
+                "original_text": "أدوات التعليم بالذكاء الاصطناعي"}), ctx)
+        model = ctx.mcp.call.call_args.args[0]
+        system = model.params["system"]
+        check(f"{handler.name}: missing history stays absent in actual model prompt",
+              "target_graph_facts" not in system and "target_ledger_signals" not in system
+              and "UNRELATED_HISTORY" not in system and "GENERIC_HISTORY" not in system
+              and '"rationale"' not in system and '"handle": "@new_user"' in system
+              and "no target-specific history is available" in system)
+        check(f"{handler.name}: no evidence creates neither ledger nor emotional state",
+              "interaction_ledger" not in cfg.runtime_state.flags
+              and not ctx.scratch.get("emotion_state"))
+    ctx.scratch["graph_handle_facts"] = {"new_user": ["x" * 1000] * 50}
+    bounded = ctx.action_prompt({"handle": "@new_user"}, "reply_to_user")
+    check("Target facts are compact and deduplicated", bounded.count("x" * 240) == 1
+          and "x" * 241 not in bounded)
+
+
 def main() -> int:
     print("=" * 74)
     print("verify_interaction — قرار التفاعل + ذاكرته  (بلا شبكة، بلا LLM)")
@@ -407,6 +553,11 @@ def main() -> int:
     check_graph_cache_and_entities()
     check_graph_digest_persistence()
     check_worker_exposes_facts_about()
+
+    print("\n[6] Focused action context and mocked reply/quote generation")
+    check_action_generation_context()
+    check_action_context_isolation()
+    check_action_context_missing_history()
 
     failed = [n for n, ok, _ in _results if not ok]
     print("\n" + "=" * 74)

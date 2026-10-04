@@ -11,8 +11,11 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from app.auth.middleware import get_current_user
+from app.db.models import User
 
 from ..bootstrap import get_platform
 from ..employee.models import (
@@ -652,8 +655,14 @@ def employee_content_strategy(employee_id: str) -> Dict[str, Any]:
 
 class SkillGenerateIn(BaseModel):
     """برومبت المالك: «ماذا تريد أن يتقن موظفك؟»"""
-    prompt: str
+    prompt: str = Field(min_length=1, max_length=8000)
     activate: bool = False            # true = ولّد واحفظ وفعّل مباشرة
+
+
+class SkillImportIn(BaseModel):
+    content: str = Field(default="", max_length=32768)
+    url: str = Field(default="", max_length=2048)
+    filename: str = Field(default="", max_length=160)
 
 
 class SkillSaveIn(BaseModel):
@@ -665,33 +674,55 @@ class SkillPatchIn(BaseModel):
     enabled: Optional[bool] = None
 
 
-def _employee_or_404(employee_id: str):
+def _employee_or_404(employee_id: str, current_user: User):
     cfg = get_platform().repository.get(employee_id)
-    if not cfg:
+    if not cfg or cfg.user_id != current_user.id:
         raise HTTPException(404, "employee not found")
     return cfg
 
 
+def _skill_preview(cfg, spec, *, warnings=None, saved=False) -> Dict[str, Any]:
+    from ..skills import custom as CS
+
+    return {"ok": True, "employee_id": cfg.id, "saved": saved,
+            "skill": spec, "summary": CS.describe_spec(spec),
+            "warnings": warnings or [], "readiness": CS.skill_readiness(cfg, spec)}
+
+
+def _save_skill(cfg, spec):
+    from ..skills import custom as CS
+
+    clean = CS.normalize_spec(spec)
+    readiness = CS.skill_readiness(cfg, clean)
+    if clean.get("enabled", True) and not readiness["ready"]:
+        raise ValueError("المهارة غير جاهزة: " + "؛ ".join(readiness["warnings"]))
+    saved = CS.save_spec(cfg, clean)
+    get_platform().repository.save(cfg)
+    return saved
+
+
 @router.get("/employees/{employee_id}/skills")
-def list_employee_skills(employee_id: str) -> Dict[str, Any]:
+def list_employee_skills(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """مهارات هذا الموظف: المدمجة المثبّتة + المخصّصة التي أنشأها المالك."""
     from ..skills import custom as CS
 
-    cfg = _employee_or_404(employee_id)
+    cfg = _employee_or_404(employee_id, current_user)
     specs = CS.list_specs(cfg)
     return {
         "ok": True,
         "employee_id": employee_id,
         "installed_skills": list(cfg.installed_skills or []),
         "custom_skills": [
-            {**s, "summary": CS.describe_spec(s), "runs_today": CS.runs_today(cfg, s["id"])}
+            {**s, "summary": CS.describe_spec(s), "runs_today": CS.runs_today(cfg, s["id"]),
+             "readiness": CS.skill_readiness(cfg, s)}
             for s in specs
         ],
     }
 
 
 @router.post("/employees/{employee_id}/skills/generate")
-def generate_employee_skill(employee_id: str, body: SkillGenerateIn) -> Dict[str, Any]:
+def generate_employee_skill(employee_id: str, body: SkillGenerateIn,
+                            current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """حوّل برومبت المالك إلى مواصفة مهارة — **معاينة بلا حفظ** افتراضياً.
 
     المالك يرى بالعربية متى تعمل المهارة وماذا تفعل وبأي حدود، ثم يفعّلها.
@@ -699,54 +730,79 @@ def generate_employee_skill(employee_id: str, body: SkillGenerateIn) -> Dict[str
     """
     from ..skills import custom as CS
 
-    cfg = _employee_or_404(employee_id)
+    cfg = _employee_or_404(employee_id, current_user)
+    warnings = []
     try:
-        spec = CS.generate_spec(body.prompt, cfg, get_platform().llm)
+        spec = CS.generate_spec(body.prompt, cfg, get_platform().llm,
+                                _strict=True, _warnings=warnings)
+        spec["id"] = f"custom_{uuid.uuid4().hex}"
+        if body.activate:
+            spec = _save_skill(cfg, spec)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    return _skill_preview(cfg, spec, warnings=warnings, saved=body.activate)
 
-    saved = False
-    if body.activate:
-        spec = CS.save_spec(cfg, spec)
-        get_platform().repository.save(cfg)
-        saved = True
-    return {"ok": True, "employee_id": employee_id, "saved": saved,
-            "skill": spec, "summary": CS.describe_spec(spec)}
+
+@router.post("/employees/{employee_id}/skills/import")
+def import_employee_skill(employee_id: str, body: SkillImportIn,
+                          current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    from ..skills import custom as CS
+
+    cfg = _employee_or_404(employee_id, current_user)
+    if bool(body.content.strip()) == bool(body.url.strip()):
+        raise HTTPException(400, "أرسل محتوى المهارة أو رابطها، وليس كليهما.")
+    try:
+        content = CS.fetch_skill_document(body.url.strip()) if body.url.strip() else body.content
+        preview = CS.import_spec(content, cfg, get_platform().llm,
+                                 source_name=body.url.strip() or body.filename)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    preview["skill"]["id"] = f"custom_{uuid.uuid4().hex}"
+    return _skill_preview(cfg, preview["skill"], warnings=preview.get("warnings"))
 
 
 @router.post("/employees/{employee_id}/skills")
-def save_employee_skill(employee_id: str, body: SkillSaveIn) -> Dict[str, Any]:
+def save_employee_skill(employee_id: str, body: SkillSaveIn,
+                        current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """احفظ/حدّث مهارة مخصّصة (تمرّ إلزامياً بالتطبيع والقوائم البيضاء)."""
     from ..skills import custom as CS
 
-    cfg = _employee_or_404(employee_id)
+    cfg = _employee_or_404(employee_id, current_user)
     if not (body.spec or {}).get("actions"):
         raise HTTPException(400, "spec.actions is required")
-    spec = CS.save_spec(cfg, body.spec)
-    get_platform().repository.save(cfg)
-    return {"ok": True, "skill": spec, "summary": CS.describe_spec(spec)}
+    try:
+        spec = _save_skill(cfg, body.spec)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _skill_preview(cfg, spec, saved=True)
 
 
 @router.patch("/employees/{employee_id}/skills/{skill_id}")
 def patch_employee_skill(employee_id: str, skill_id: str,
-                         body: SkillPatchIn) -> Dict[str, Any]:
+                         body: SkillPatchIn,
+                         current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """تفعيل/إيقاف مهارة مخصّصة دون حذفها."""
     from ..skills import custom as CS
 
-    cfg = _employee_or_404(employee_id)
+    cfg = _employee_or_404(employee_id, current_user)
     if body.enabled is None:
         raise HTTPException(400, "nothing to update")
-    if not CS.set_enabled(cfg, skill_id, body.enabled):
+    spec = next((s for s in CS.list_specs(cfg) if s.get("id") == skill_id), None)
+    if spec is None:
         raise HTTPException(404, "skill not found")
-    get_platform().repository.save(cfg)
-    return {"ok": True, "skill_id": skill_id, "enabled": body.enabled}
+    try:
+        _save_skill(cfg, {**spec, "enabled": body.enabled})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "employee_id": employee_id, "skill_id": skill_id, "enabled": body.enabled}
 
 
 @router.delete("/employees/{employee_id}/skills/{skill_id}")
-def delete_employee_skill(employee_id: str, skill_id: str) -> Dict[str, Any]:
+def delete_employee_skill(employee_id: str, skill_id: str,
+                          current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     from ..skills import custom as CS
 
-    cfg = _employee_or_404(employee_id)
+    cfg = _employee_or_404(employee_id, current_user)
     if not CS.delete_spec(cfg, skill_id):
         raise HTTPException(404, "skill not found")
     get_platform().repository.save(cfg)
