@@ -223,6 +223,29 @@ class AIEmployee(Base):
         return f"<AIEmployee(id={self.id}, account=@{self.account_username}, status={self.status})>"
 
 
+class AgentMemory(Base):
+    """ذاكرة الوكلاء المستمدّة من المحادثة: المنسّق والموظفون.
+
+    ``scope``: ``coordinator:<user_id>`` أو ``employee:<employee_id>``.
+    ``kind``: preference | instruction | fact | decision | person | event | summary.
+    جدول جديد (لا عمود جديد) فيُنشأ تلقائياً بـ ``create_all`` بلا ترحيل.
+    """
+    __tablename__ = "agent_memories"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    scope = Column(String(100), nullable=False, index=True)
+    kind = Column(String(30), nullable=False, index=True)
+    key = Column(String(255), nullable=True, index=True)
+    content = Column(Text, nullable=False)
+    importance = Column(Integer, default=2)                  # 1..5
+    embedding = Column(Text, nullable=True)                  # JSON list[float]
+    extra_metadata = Column(Text, nullable=True)             # JSON
+    hits = Column(Integer, default=0)                        # مرات الاسترجاع
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+
+
 class EmployeeMemoryRecord(Base):
     """A single memory item across any memory layer for one employee."""
     __tablename__ = "employee_memories"

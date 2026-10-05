@@ -283,6 +283,17 @@ def answer_question(cfg, question: str, llm=None, employee_id: str = "",
                 f"\nآخر بيانات جلبتها للتو (استند إليها في النقاش):\n{extra_context[:1500]}\n"
                 if (extra_context or "").strip() else ""
             )
+            # الذاكرة: كانت كل رسالة تُجاب كأنها الأولى («وضّح أكثر» بلا معنى)، ولا
+            # يتذكّر الموظف ما قاله له مالكه سابقاً — الآن سياق المحادثة + ذاكرته الطويلة
+            memory_block = ""
+            try:
+                from ..memory import agent_memory as AM
+
+                short = AM.context_as_text(AM.current_chat_context(question))
+                long_ = AM.employee_brief(eid, question) if eid else ""
+                memory_block = "\n".join(x for x in (long_, short) if x)
+            except Exception:  # noqa: BLE001
+                logger.debug("employee chat memory unavailable", exc_info=True)
             prompt = (
                 f"أنت الموظف الذكي الذي يدير حساب X: @{account}. تحدّث بصيغة المتكلم.\n"
                 f"شخصيتك: {_persona_brief(cfg)}.\n"
@@ -290,8 +301,10 @@ def answer_question(cfg, question: str, llm=None, employee_id: str = "",
                 f"نسبة نجاح {stats.get('success_rate', 0)}%.\n"
                 f"آخر ما نشرته:\n{content_lines}\n"
                 f"{fetched_block}\n"
-                f"سؤال المستخدم: {question}\n"
-                "أجب بإيجاز ووضوح بالعربية، ملتزماً بتخصصك، واعتماداً على بياناتك أعلاه."
+                + (f"{memory_block}\n\n" if memory_block else "")
+                + f"رسالة المالك الآن: {question}\n"
+                "أجب بإيجاز ووضوح بالعربية، ملتزماً بتخصصك، واعتماداً على بياناتك وسياق "
+                "المحادثة أعلاه (إن أشار لشيء سابق فارجع إليه)."
             )
             out = llm.complete(
                 system="أنت موظف ذكي يدير حساب تواصل اجتماعي ويناقش مالكه بوضوح وأمانة. اكتب بالعربية.",

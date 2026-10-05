@@ -643,9 +643,39 @@ async def _run_coordinator(message: str, user_id, pinned: Optional[str], db,
         return None
 
 
+def _remember_turn(user_id, session_id: Optional[str], user_message: str, reply: str,
+                   employee_handle: Optional[str] = None) -> None:
+    """الذاكرة بعد كل دور (في الخلفية — نداءات LLM لا تؤخّر الرد): تحديث الملخّص
+    المتدحرج للمحادثة، واستخراج ما يستحق الحفظ طويلاً لنطاق المنسّق أو الموظف."""
+    if not (user_message or "").strip() or not (reply or "").strip() or not session_id:
+        return
+    import threading as _threading
+
+    def run():
+        try:
+            from app.aeos.memory import agent_memory as AM
+
+            uid = _norm_uid(user_id)
+            handle = employee_handle or (session_id[4:] if session_id.startswith("emp_") else None)
+            team = orchestrator.employees_for(uid)
+            employee = next((c for c in team if handle and c.account_username.lower() == handle.lower()), None)
+            db2 = next(get_db())
+            try:
+                conv = memory_service.get_or_create_conversation(db=db2, user_id=uid, session_id=session_id)
+                conv_id = conv.id
+            finally:
+                db2.close()
+            AM.after_turn(uid, conv_id, user_message, reply, get_platform().llm, team, employee)
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: memory update failed: {e}")
+
+    _threading.Thread(target=run, daemon=True).start()
+
+
 async def _send_employee_reply(websocket: WebSocket, db, user_id, session_id,
                                user_message: str, reply: str, intent: str, agent: str,
-                               metadata: Optional[Dict[str, Any]] = None) -> None:
+                               metadata: Optional[Dict[str, Any]] = None,
+                               employee_handle: Optional[str] = None) -> None:
     """احفظ رسالة المستخدم والرد في المحادثة ثم أرسل الرد للواجهة."""
     try:
         conv = memory_service.get_or_create_conversation(
@@ -664,6 +694,7 @@ async def _send_employee_reply(websocket: WebSocket, db, user_id, session_id,
         "metadata": metadata or {"agent": agent},
         "timestamp": datetime.now().isoformat(),
     }, websocket)
+    _remember_turn(user_id, session_id, user_message, reply, employee_handle)
 
 
 class ConnectionManager:
@@ -825,6 +856,9 @@ async def websocket_endpoint(websocket: WebSocket):
             attachment = message_data.get("attachment", None)
             file_upload = message_data.get("file_upload", None)
             pinned_account = message_data.get("pinned_account", None)
+            # سياق المحادثة الجارية لذاكرة الموظف قصيرة المدى (انظر agent_memory.CURRENT_CHAT)
+            from app.aeos.memory.agent_memory import CURRENT_CHAT
+            CURRENT_CHAT.set({"user_id": _norm_uid(user_id), "session_id": session_id})
 
             # remember which user owns this socket so background AEOS cycle
             # updates can be pushed to the right chat client in real time.
@@ -1068,7 +1102,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             intent_name, "AEOS",
                             {"agent": "AEOS",
                              "dispatched": [effective_pin] if effective_pin
-                             and intent_name != "aeos_employee_query" else []})
+                             and intent_name != "aeos_employee_query" else []},
+                            employee_handle=effective_pin)
                         handled = True
                         break
                 if handled:
@@ -1113,6 +1148,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "attachment": attachment,
                         "timestamp": datetime.now().isoformat()
                     }, websocket)
+                    _remember_turn(user_id, session_id, user_message, response_message, effective_pin)
                 elif response_message:
                     # في حالة الفشل مع وجود رسالة
                     await manager.send_message({
@@ -1142,6 +1178,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "metadata": {"agent": "AEOS"},
                             "timestamp": datetime.now().isoformat(),
                         }, websocket)
+                        _remember_turn(user_id, session_id, user_message, open_reply, effective_pin)
                         continue
 
                     # لا موظف مثبّت ولا نية مطابقة ⇒ المنسّق العام يتولّى الطلب.
@@ -1165,6 +1202,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "metadata": {"agent": "Coordinator", "dispatched": coord["dispatched"]},
                             "timestamp": datetime.now().isoformat(),
                         }, websocket)
+                        _remember_turn(user_id, session_id, user_message, coord["message"])
                         continue
                     await manager.send_message({"type": "typing", "status": False}, websocket)
 

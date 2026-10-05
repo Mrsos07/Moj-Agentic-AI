@@ -53,8 +53,11 @@ class PersonaCloneIn(BaseModel):
     """Clone the style of a target X account into a persona proposal."""
     account_username: str             # الحساب المرتبط (مصدر الكوكيز)
     target_handle: str                # يوزر الحساب المراد استنساخه
-    limit: int = 30                   # حجم العيّنة (تغريدات + ردود)
+    limit: int = 40                   # عدد التغريدات الأصلية (الردود ~ ثلاثة أرباعها)
     language: str = "ar"
+    test: bool = True                 # اختبار مطابقة بعيّنات مولَّدة (نداءان إضافيان)
+    employee_id: str = ""             # مع apply=true: احفظ الهوية على هذا الموظف مباشرة
+    apply: bool = False
 
 
 class GoalIn(BaseModel):
@@ -517,27 +520,32 @@ def persona_generate(body: PersonaGenerateIn) -> Dict[str, Any]:
 
 
 @router.post("/persona/clone")
-def persona_clone(body: PersonaCloneIn) -> Dict[str, Any]:
+def persona_clone(body: PersonaCloneIn,
+                  current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """استنساخ أسلوب حساب X: سحب عيّنة من تغريداته وردوده بكوكيز الحساب
     المرتبط، تحليل الأسلوب والمواضيع وطريقة النقاش، ثم إرجاع برسونا مقترحة
     يراجعها المستخدم في الواجهة قبل الحفظ (لا تُحفظ هنا).
     """
-    from ..services.persona_clone import clone_persona
+    from ..services.persona_clone import apply_to_employee, clone_persona
 
     handle = (body.target_handle or "").strip().lstrip("@")
     if not handle:
         raise HTTPException(400, "target_handle is required")
     if not (body.account_username or "").strip():
         raise HTTPException(400, "account_username is required")
+    cfg = _employee_or_404(body.employee_id, current_user) if body.apply else None
 
+    limit = max(10, min(int(body.limit or 40), 60))
     try:
         result = clone_persona(
             cookie_label=body.account_username.strip(),
             handle=handle,
             llm=get_platform().llm,
-            # عيّنة أكبر من 30 لا تُحسّن تحليل الأسلوب وتُطيل العملية على المستخدم
-            limit=max(10, min(int(body.limit or 20), 30)),
+            # عيّنة أعمق: البصمة تحتاج أزواج (تغريدة ← رد) وتوزيعاً للمواضيع، والسحب
+            # مقيّد زمنياً لكل تبويب فلا يطول بلا فائدة عند نفاد المحتوى الجديد
+            limit=limit, replies_limit=max(8, limit * 3 // 4),
             language=body.language or "ar",
+            test=body.test,
         )
     except RuntimeError as exc:
         # أسباب متوقّعة ومفهومة للمستخدم (متصفح مشغول/حساب محمي/كوكيز منتهية)
@@ -546,6 +554,10 @@ def persona_clone(body: PersonaCloneIn) -> Dict[str, Any]:
         logger.exception("persona clone failed for @%s", handle)
         raise HTTPException(500, f"تعذّر الاستنساخ: {exc}")
 
+    if cfg is not None:
+        apply_to_employee(cfg, result["persona"], result["voice_profile"],
+                          get_platform().repository)
+        result["applied"] = True
     return {"ok": True, **result}
 
 
@@ -563,11 +575,12 @@ def agents_overview() -> Dict[str, Any]:
 
 
 @router.get("/team")
-def team_roster(user_id: Optional[int] = None) -> Dict[str, Any]:
-    """فريق المستخدم كما يراه المنسّق العام في الشات الرئيسي."""
+def team_roster(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """فريق المستخدم الموثَّق كما يراه المنسّق (كان يقبل user_id من المتصفح فيكشف
+    فريق أي مستخدم بتخمين رقمه)."""
     from ..services import orchestrator
 
-    return {"ok": True, "employees": orchestrator.roster(user_id)}
+    return {"ok": True, "employees": orchestrator.roster(current_user.id)}
 
 
 # ─────────────────── employee insights (chat Q&A) ───────────────────
@@ -809,6 +822,58 @@ def delete_employee_skill(employee_id: str, skill_id: str,
     return {"ok": True, "deleted": skill_id}
 
 
+# ─────────────────── ذاكرة الوكلاء (المنسّق + الموظفون) ───────────────────
+class MemoryIn(BaseModel):
+    content: str
+    kind: str = "instruction"
+    importance: int = 4
+    employee_id: str = ""
+
+
+def _memory_scope(current_user: User, employee_id: str = "") -> str:
+    """نطاق الذاكرة من **المستخدم الموثَّق** لا من user_id يرسله المتصفح: ذاكرة
+    المنسّق تحوي تفضيلات المالك وقراراته، فلا تُقرأ ولا تُحذف بمعرّف مخمَّن."""
+    from ..memory import agent_memory as AM
+
+    if employee_id:
+        _employee_or_404(employee_id, current_user)
+        return AM.employee_scope(employee_id)
+    return AM.coordinator_scope(current_user.id)
+
+
+@router.get("/memory")
+def list_memory(employee_id: str = "",
+                current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """الذاكرة طويلة المدى لموظف (employee_id) أو للمنسّق (user_id) + أحدث الأحداث."""
+    from ..memory import agent_memory as AM
+
+    scope = _memory_scope(current_user, employee_id)
+    return {"ok": True, "scope": scope, "memories": AM.list_memories([scope], 150)}
+
+
+@router.post("/memory")
+def add_memory(body: MemoryIn, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    from ..memory import agent_memory as AM
+
+    scope = _memory_scope(current_user, body.employee_id)
+    try:
+        saved = AM.add(scope, body.content, body.kind, body.importance,
+                       meta={"source": "owner_ui"})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "memory": saved}
+
+
+@router.delete("/memory/{memory_id}")
+def delete_memory(memory_id: int, employee_id: str = "",
+                  current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    from ..memory import agent_memory as AM
+
+    if not AM.delete(memory_id, [_memory_scope(current_user, employee_id)]):
+        raise HTTPException(404, "memory not found in this scope")
+    return {"ok": True, "deleted": memory_id}
+
+
 # ─────────────────── أدوات الموظف (بحث + MCP خارجي) ───────────────────
 class ExternalMCPIn(BaseModel):
     name: str
@@ -836,16 +901,18 @@ class ToolCallIn(BaseModel):
 
 
 @router.get("/tools")
-def tools_overview(employee_id: str = "") -> Dict[str, Any]:
+def tools_overview(employee_id: str = "",
+                   current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """مزوّد البحث + الخوادم الخارجية، وحالة ربط كلٍّ منها بالموظف إن حُدّد."""
     from ..services import tools_service as TS
 
-    cfg = _employee_or_404(employee_id) if employee_id else None
+    cfg = _employee_or_404(employee_id, current_user) if employee_id else None
     return {"ok": True, **TS.overview(cfg)}
 
 
 @router.post("/tools/external")
-def add_external_tool(body: ExternalMCPIn) -> Dict[str, Any]:
+def add_external_tool(body: ExternalMCPIn,
+                      current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """يتصل بالخادم فعلاً ويكتشف أدواته قبل الحفظ — لا يُحفظ خادم لا يعمل."""
     from ..services import tools_service as TS
 
@@ -858,7 +925,8 @@ def add_external_tool(body: ExternalMCPIn) -> Dict[str, Any]:
 
 
 @router.delete("/tools/external/{name}")
-def delete_external_tool(name: str) -> Dict[str, Any]:
+def delete_external_tool(name: str,
+                         current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     from ..services import tools_service as TS
 
     if not TS.remove_external(name):
@@ -867,10 +935,11 @@ def delete_external_tool(name: str) -> Dict[str, Any]:
 
 
 @router.post("/employees/{employee_id}/tools")
-def attach_employee_tool(employee_id: str, body: ToolAttachIn) -> Dict[str, Any]:
+def attach_employee_tool(employee_id: str, body: ToolAttachIn,
+                         current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     from ..services import tools_service as TS
 
-    cfg = _employee_or_404(employee_id)
+    cfg = _employee_or_404(employee_id, current_user)
     try:
         return {"ok": True, **TS.set_attached(cfg, body.server, body.attach)}
     except ValueError as exc:
@@ -878,11 +947,12 @@ def attach_employee_tool(employee_id: str, body: ToolAttachIn) -> Dict[str, Any]
 
 
 @router.post("/employees/{employee_id}/tools/call")
-def call_employee_tool(employee_id: str, body: ToolCallIn) -> Dict[str, Any]:
+def call_employee_tool(employee_id: str, body: ToolCallIn,
+                       current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """استدعاء يطلبه المالك لأداة مربوطة بالموظف (للتجربة أو لمهمة مباشرة)."""
     from ..services import tools_service as TS
 
-    cfg = _employee_or_404(employee_id)
+    cfg = _employee_or_404(employee_id, current_user)
     try:
         return {"ok": True, "result": TS.call_tool(cfg, body.server, body.tool, body.arguments)}
     except ValueError as exc:

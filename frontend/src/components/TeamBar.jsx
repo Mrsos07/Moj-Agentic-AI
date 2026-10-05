@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import { MdChat, MdPushPin } from 'react-icons/md'
+import MemoryPanel from './MemoryPanel'
 
 /**
  * شريط الفريق في الشات الرئيسي (المنسّق العام).
@@ -9,7 +11,8 @@ import { MdChat, MdPushPin } from 'react-icons/md'
  *  - onOpenChat(handle): فتح محادثة الموظف الخاصة
  *  - onQuick(text, send): اقتراح سريع (send=true يرسل فوراً)
  */
-const TeamBar = ({ team, pinned, onMention, onOpenChat, onQuick, disabled }) => {
+const TeamBar = ({ team, pinned, onMention, onOpenChat, onQuick, disabled, userId }) => {
+  const [memoryOpen, setMemoryOpen] = useState(false)
   const quick = [
     { label: '📋 تقرير الفريق', text: 'وش حالة فريقي اليوم؟ مين نشط ومين نشر؟', send: true },
     { label: '📣 مهمة للفريق', text: 'خل كل الموظفين ينشرون عن ', send: false },
@@ -70,7 +73,20 @@ const TeamBar = ({ team, pinned, onMention, onOpenChat, onQuick, disabled }) => 
               {q.label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => setMemoryOpen(o => !o)}
+            className={`shrink-0 text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${memoryOpen ? 'bg-primary text-white border-primary' : 'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'}`}
+            title="ما يتذكّره المنسّق عنك وعن فريقك"
+          >
+            🧠 ذاكرة المنسّق
+          </button>
         </div>
+        {memoryOpen && (
+          <div className="mt-1 mb-1 rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark p-2.5 max-h-72 overflow-y-auto">
+            <MemoryPanel userId={userId} compact />
+          </div>
+        )}
       </div>
     </div>
   )
