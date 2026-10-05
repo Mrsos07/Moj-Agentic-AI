@@ -229,10 +229,16 @@ def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> 
         issues.append("cliche")
     if any(m in low for m in _META_PHRASES):
         issues.append("meta")
+    from ..employee import voice_profile
+
     rules = context.config.business_rules or {}
-    min_chars = int(rules.get("min_post_chars", 70))
+    vp = voice_profile.get(context.config)
+    # صاحب التغريدات القصيرة لا يُمنع من النشر: الحد يتبع أسلوبه المقاس
+    min_chars = voice_profile.min_post_chars(vp, int(rules.get("min_post_chars", 70)))
     if len(t) < min_chars:
         issues.append("too_short")
+    if vp and voice_profile.copies_exemplar(t, vp):
+        issues.append("copied_exemplar")
     # إعادة صياغة البريف: تشابه عالٍ مع نصّ التوجيه نفسه
     if brief:
         overlap = topic_overlap_ratio(normalize_topic_words(t),
@@ -257,12 +263,13 @@ def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> 
 
 #: عيوب تستحق إعادة توليد
 _HARD_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief",
-                        "repeated_opening", "question_ending"}
+                        "repeated_opening", "question_ending", "copied_exemplar"}
 
 #: عيوب تمنع النشر نهائياً لو بقيت بعد إعادة التوليد. تكرار المطلع ليس منها:
 #: شخصية تبدأ منشوراتها دائماً بنمط واحد (مثل «عاجل:») كانت ستُمنع من النشر
 #: كلياً — نطلب التنويع مرةً، ثم ننشر ويُسجّله حارس التقييم للدورة القادمة.
-_BLOCKING_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief"}
+_BLOCKING_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief",
+                            "copied_exemplar"}
 
 #: توجيه تصحيحي لكل عيب — يُمرَّر للنموذج في محاولة إعادة التوليد
 _QUALITY_FIX_HINTS = {
@@ -273,6 +280,8 @@ _QUALITY_FIX_HINTS = {
     "echo_brief": "لا تُعِد صياغة التعليمات؛ اكتب محتوى فعلياً عن الموضوع نفسه "
                   "بزاوية محدّدة.",
     "repeated_opening": "ابدأ بمطلع مختلف تماماً عن منشوراتك السابقة.",
+    "copied_exemplar": "نصّك منسوخ تقريباً من منشور حقيقي للحساب المستنسخ؛ اكتب "
+                       "فكرة وصياغة جديدتين تماماً بنفس الروح فقط.",
     "question_ending": "لا تنهِ المنشور بسؤال (منشوراتك السابقة انتهت بأسئلة)؛ "
                          "اختم بجملة موقف أو خلاصة ملموسة.",
 }
@@ -457,12 +466,18 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
     discussion"). This wrapper forces concrete, publishable content and forbids
     restating the instructions.
     """
+    from ..employee import voice_profile
+
     persona = context.config.persona
     lang = getattr(persona, "language", "ar") or "ar"
     interests = getattr(persona, "interests", None) or []
     focus = "، ".join(interests) if interests else ""
     dialect = getattr(persona, "dialect", "") or ""
     question_ok = _question_allowed(context.scratch.get("recent_posts") or [])
+    vp = voice_profile.get(context.config)
+    # هوية مستنسخة: قواعد «البيت» (الطول الثابت، إيموجي واحد، مطلع ونبرة تتناوبان)
+    # كانت تمحو الأسلوب المستنسخ فيصير كل حساب قالباً واحداً — تُستبدل بقياساته.
+    vrules = voice_profile.post_rules(vp) if vp else {}
     lines = [
         brief.strip(),
         "",
@@ -470,14 +485,16 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
         f"- اكتب التغريدة النهائية الجاهزة للنشر مباشرةً باللغة ({lang}) فقط.",
         "- ابدأ بالمحتوى مباشرةً. ممنوع منعاً باتاً وضع أي عنوان/تسمية في البداية "
         "مثل «مُطلعة:» أو «تغريدة:» أو «منشور:» أو «خبر:» أو «تعليق:».",
-        "- اكتب تغريدة واحدة قصيرة مكتملة المعنى تنتهي بجملة تامة، وممنوع أن "
-        "تتركها ناقصة أو تنهيها بـ«...»؛ اضبط طولها لتكتمل ضمن الحد.",
+        vrules.get("length") or (
+            "- اكتب تغريدة واحدة قصيرة مكتملة المعنى تنتهي بجملة تامة، وممنوع أن "
+            "تتركها ناقصة أو تنهيها بـ«...»؛ اضبط طولها لتكتمل ضمن الحد."),
         "- اكتب بأسلوب إنساني طبيعي وعفوي كأنك شخص حقيقي يغرّد من جواله، لا كبيان رسمي ولا كذكاء اصطناعي.",
         "- نوّع إيقاع الجمل (جملة قصيرة قوية ثم تفصيل)، وتجنّب البناء المتكرر نفسه في كل مرة.",
         _question_rule_line(question_ok),
         "- لا تصف ما ستكتبه، ولا تعِد صياغة التعليمات أو الهدف كتغريدة.",
         "- تناول موضوعاً محدّداً وملموساً برأي أو زاوية واضحة، وليس عبارات عامة.",
         "- تجنّب العبارات الفارغة والقوالب المكررة مثل «تحليل موضوعي» أو «دعوة للنقاش» أو «في عالم متسارع» دون مضمون فعلي.",
+        (vrules["emoji"] + " بدون علامات اقتباس حول النص.") if vrules else
         "- اجعلها أقل من 260 حرفاً لتبقى مكتملة، بدون علامات اقتباس حول النص، وهاشتاق واحد كحد أقصى (أو بدون)، وإيموجي واحد كحد أقصى.",
         "- التزم حصراً بمجال الاهتمامات المحدد، وتجاهل أي مواضيع خارج التخصص.",
         "- لا تنشئ ولا تعيد صياغة محتوى إعلاني أو ترويجي، وتجنب عروض البيع/الخصومات/السبام.",
@@ -490,12 +507,15 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
         "أو مقارنة محدّدة — الجملة التي لا تحمل شيئاً ملموساً تُحذف.",
         "- ممنوع منعاً باتاً هذه القوالب الفارغة: "
         + "، ".join(f"«{c}»" for c in _CLICHES[:8]) + " وما يشبهها.",
-        f"- نمط المطلع المطلوب لهذا المنشور: {_hook_style(context)}",
-        f"- النبرة المطلوبة لهذا المنشور (تتغير في كل مرة): "
-        f"{_pick_variant(context, 'voice', _POST_VOICES)}",
+        vrules.get("hook") or f"- نمط المطلع المطلوب لهذا المنشور: {_hook_style(context)}",
+        vrules.get("voice") or (
+            f"- النبرة المطلوبة لهذا المنشور (تتغير في كل مرة): "
+            f"{_pick_variant(context, 'voice', _POST_VOICES)}"),
         "- تنوّعُ الأسلوب لا يُلغي الشخصية: الموقف والقيم والتخصص ثابتة، "
         "والمتغير هو الصياغة والإيقاع.",
     ]
+    if vp:
+        lines += ["", voice_profile.voice_block(vp, "post")]
     if focus:
         lines.insert(1, f"مجال التخصص الذي يجب أن يدور حوله المحتوى: {focus}.")
     if dialect:
@@ -676,16 +696,25 @@ class ReplyToUserCapability(ICapability):
                 joined = " | ".join((r or "")[:80] for r in recent_replies[-4:])
                 recent_line = f"- لا تكرّر أسلوب أو مضمون ردودك السابقة: {joined}\n"
             question_ok = _question_allowed(list(reversed(own_replies)))
-            mode = _pick_variant(context, "reply_mode", _REPLY_MODES)
-            if not question_ok and "سؤالاً" in mode:
-                mode = _REPLY_MODES[0]
+            from ..employee import voice_profile
+
+            vp = voice_profile.get(context.config)
+            if vp and (vp.get("analysis") or {}).get("reply_playbook"):
+                # هوية مستنسخة: طريقة الرد تحددها نبرة التغريدة ودليل ردوده الحقيقي،
+                # لا نمط يتناوب آلياً (كان يجعل «الشاكر» و«المهاجم» يُردّ عليهما بالقالب نفسه)
+                mode = "طبّق «دليل ردودك» أدناه حسب نبرة التغريدة (موافقة/خلاف/سؤال/هجوم/تحية)."
+            else:
+                mode = _pick_variant(context, "reply_mode", _REPLY_MODES)
+                if not question_ok and "سؤالاً" in mode:
+                    mode = _REPLY_MODES[0]
             # نبرة الطول: في وضع الاختصار الشديد (ردود التنبيهات) نطلب جملة واحدة
             # قصيرة جداً؛ وإلا حتى ثلاث جمل.
-            length_line = (
+            length_line = (voice_profile.reply_length_line(vp, brief) if vp else "") or (
                 "- جملة واحدة قصيرة جداً فقط (أقل من 120 حرفاً)، بلا هاشتاقات، وبدون إيموجي أو إيموجي واحد كحد أقصى.\n"
                 if brief else
                 "- جملة إلى ثلاث جمل كحد أقصى، بلا هاشتاقات، وإيموجي واحد كحد أقصى.\n"
             )
+            voice_reply = ("\n" + voice_profile.voice_block(vp, "reply") + "\n") if vp else ""
             prompt = (
                 f"هذه تغريدة رأيتها الآن:\n«{original}»\n\n"
                 f"اكتب رداً قصيراً طبيعياً باللغة ({lang}) بصوت الشخصية دون ادعاء هوية بشرية:\n"
@@ -701,6 +730,7 @@ class ReplyToUserCapability(ICapability):
                 "- إن كان النص الأصلي خارج مجال تخصصك أو يبدو إعلانياً/ترويجياً فلا تنجرف وراءه، وحافظ على رد مهني ضمن اختصاصك فقط.\n"
                 "- التزم حرفياً بتعليمات الشخصية ومحظوراتها (Do/Don't) وقيمها الواردة في تعليمات النظام.\n"
                 "- اجعل الرد إنسانياً ومباشراً ويضيف قيمة فعلية قصيرة (Insight) لا مجاملة عامة.\n"
+                + voice_reply
                 + x_algorithm.algo_prompt_block("reply")
             )
             gen = context.mcp.call(MCPRequest(
@@ -715,6 +745,11 @@ class ReplyToUserCapability(ICapability):
                 reply_text = _drop_trailing_question(reply_text)
         if not reply_text:
             return CapabilityResult.fail("no reply text generated", self.name)
+        from ..employee import voice_profile as _vp
+
+        if _vp.copies_exemplar(reply_text, _vp.get(context.config)):
+            return CapabilityResult.fail(
+                "الرد نسخة شبه حرفية من رد حقيقي للحساب المستنسخ — لا يُنشر", self.name)
         # حدّ صارم للطول في وضع الاختصار الشديد
         if brief and len(reply_text) > 160:
             reply_text = reply_text[:157].rstrip() + "..."

@@ -290,12 +290,15 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
       const res = await axios.post('/api/aeos/persona/clone', {
         account_username: form.account,
         target_handle: handle,
-        limit: 30,
+        limit: 40,
         language: form.language || 'ar',
       }, { headers: authHeaders(), timeout: 300000 })
       applyPersona(res.data?.persona)
+      set('voice_profile', res.data?.voice_profile || null)
       const tgt = res.data?.target || {}
-      onNotify?.(`🧬 تم استنساخ أسلوب @${handle} (عيّنة: ${tgt.tweet_count ?? '?'} تغريدة و${tgt.reply_count ?? '?'} رد). راجع الحقول.`)
+      const score = res.data?.fidelity?.score
+      onNotify?.(`🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} تغريدة و${tgt.reply_count ?? '?'} رداً (${tgt.pairs ?? 0} مع سياقها)` +
+        (score != null ? ` · درجة المطابقة ${score}%` : '') + '. راجع الحقول.')
     } catch (e) {
       onNotify?.(`❌ تعذّر استنساخ @${handle}: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
     } finally {
@@ -340,6 +343,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
         generate_images: ['auto', 'always', 'off'].includes(form.generate_images)
           ? form.generate_images : 'auto',
         image_style: form.image_style || 'editorial',
+        ...(form.voice_profile ? { voice_profile: form.voice_profile } : {}),
       }
       const res = await axios.post('/api/aeos/agent/toggle', {
         platform: 'x',

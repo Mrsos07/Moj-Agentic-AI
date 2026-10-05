@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import EmployeeWizard from './EmployeeWizard'
 import ToolsPanel from './ToolsPanel'
+import VoiceProfileView from './VoiceProfileView'
+import MemoryPanel from './MemoryPanel'
 import {
   MdSmartToy,
   MdClose,
@@ -256,11 +258,15 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
             role: p.role || 'Social Media Manager',
             tone: p.tone || 'professional',
             language: p.language || 'ar',
+            dialect: p.dialect || '',
+            values: p.values || [],
             bio: p.bio || '',
             instructions: p.instructions || '',
             dos: (p.dos || []).join('\n'),
             donts: (p.donts || []).join('\n'),
             interests: p.interests || [],
+            voice_profile: br.voice_profile || null,
+            voice_pending: null,
             brief: '',
             goals: (agent?.goals || []).map(g => g.description).join('\n'),
             skills: agent?.installed_skills || ['daily_content_creator', 'community_engager'],
@@ -443,7 +449,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
     const row = rows.find(r => r.label === label)
     const running = !!row?.agent?.enabled
     onNotify?.(
-      `🧬 جارِ سحب عيّنة من تغريدات وردود @${handle} وتحليل أسلوبه — عادةً من 20 إلى 60 ثانية.`
+      `🧬 جارِ استنساخ هوية @${handle} بعمق: تغريداته مع تفاعلها، وردوده مع ما ردّ عليه، ثم تحليل الصوت وطريقة التفاعل واختبار مطابقة — عادةً من 40 إلى 90 ثانية.`
       + (running ? ' ⚠️ الموظف يعمل الآن وقد يحتجز المتصفح؛ إن تعذّرت العملية فأوقفه مؤقتاً ثم أعد المحاولة.' : '')
     )
     try {
@@ -451,29 +457,34 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
       const res = await axios.post('/api/aeos/persona/clone', {
         account_username: label,
         target_handle: handle,
-        limit: 20,
+        limit: 40,
         language: f.language || 'ar',
       }, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
-        timeout: 180000,
+        timeout: 240000,
       })
       const p = res.data?.persona
       const tgt = res.data?.target || {}
       if (p) {
-        setP(label, 'display_name', p.display_name || f.display_name || label)
+        // الاسم والنبذة لا يُنقلان من الحساب الأصلي (هوية لا انتحال): نُبقي الحاليين
         setP(label, 'role', p.role || f.role)
         setP(label, 'tone', p.tone || f.tone)
         setP(label, 'language', p.language || f.language)
-        setP(label, 'bio', p.bio || '')
+        if (p.dialect) setP(label, 'dialect', p.dialect)
+        if (Array.isArray(p.values) && p.values.length) setP(label, 'values', p.values)
         setP(label, 'instructions', p.instructions || '')
         setP(label, 'dos', (p.dos || []).join('\n'))
         setP(label, 'donts', (p.donts || []).join('\n'))
         if (Array.isArray(p.interests) && p.interests.length) setP(label, 'interests', p.interests)
+        setP(label, 'voice_pending', res.data?.voice_profile || null)
+        setP(label, 'clone_fidelity', res.data?.fidelity || null)
+        const score = res.data?.fidelity?.score
         onNotify?.(
-          `🧬 تم استنساخ أسلوب @${handle} (عيّنة: ${tgt.tweet_count ?? '?'} تغريدة و${tgt.reply_count ?? '?'} رد` +
-          (tgt.scrape_seconds ? ` في ${tgt.scrape_seconds} ثانية` : '') + ')' +
-          (res.data?.source === 'ai' ? ' بالذكاء الاصطناعي.' : ' (تحليل إحصائي — LLM غير متاح).') +
-          ' راجع الحقول ثم اضغط حفظ.'
+          `🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} تغريدة و${tgt.reply_count ?? '?'} رداً ` +
+          `(${tgt.pairs ?? 0} منها مع سياقها)` + (tgt.scrape_seconds ? ` في ${tgt.scrape_seconds} ثانية` : '') +
+          (res.data?.source === 'ai' ? '' : ' — تحليل إحصائي فقط (LLM غير متاح)') +
+          (score != null ? ` · درجة المطابقة ${score}%` : '') +
+          '. راجع بصمة الصوت والعيّنات ثم اضغط حفظ.'
         )
       }
     } catch (e) {
@@ -503,12 +514,15 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         role: f.role || 'Social Media Manager',
         tone: f.tone || 'professional',
         language: f.language || 'ar',
+        // كانت اللهجة والقيم لا تُرسلان فيمسحهما كل حفظ من البطاقة (Persona.from_dict
+        // يملأ الغائب بقيمة فارغة) — حتى لهجة الاستنساخ كانت تضيع عند أول حفظ
+        dialect: f.dialect || '',
+        values: f.values || [],
         bio: f.bio || '',
         instructions: f.instructions || '',
         dos: splitLines(f.dos),
         donts: splitLines(f.donts),
         interests: f.interests || [],
-        values: [],
       }
       const goals = splitLines(f.goals).map(desc => ({ description: desc, priority: 3 }))
       const clampInt = (v, def, min, max) => {
@@ -565,6 +579,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         max_likes_per_cycle: clampInt(f.max_likes_per_cycle, 3, 0, 20),
         max_follows_per_cycle: clampInt(f.max_follows_per_cycle, 1, 0, 5),
         daily_post_target: clampInt(f.daily_post_target, 1, 0, 20),
+        // بصمة صوت جديدة من استنساخ لم يُحفظ بعد (business_rules تُدمج فلا تمسح القديمة)
+        ...(f.voice_pending ? { voice_profile: f.voice_pending } : {}),
       }
       const res = await axios.post('/api/aeos/agent/toggle', {
         platform: 'x',
@@ -1431,6 +1447,18 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                               : '🧬 استنساخ'}
                           </button>
                         </div>
+                        <VoiceProfileView
+                          profile={pForm[label]?.voice_pending || pForm[label]?.voice_profile}
+                          pending={!!pForm[label]?.voice_pending}
+                          fidelity={pForm[label]?.clone_fidelity}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] text-text-secondary-light dark:text-text-secondary-dark mb-1">اللهجة</label>
+                        <input value={pForm[label]?.dialect || ''} onChange={(e) => setP(label, 'dialect', e.target.value)}
+                          placeholder="مثال: سعودية، مصرية، فصحى"
+                          className="w-full text-sm px-2 py-1.5 rounded-lg border border-border-light dark:border-border-dark bg-transparent text-text-primary-light dark:text-text-primary-dark" />
                       </div>
 
                       <div>
@@ -1615,6 +1643,13 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                             </div>
                           ))}
                         </div>
+                      )}
+
+                      {/* ── الذاكرة طويلة المدى للموظف ── */}
+                      {agent?.employee_id && settingsGroup(
+                        '🧠 ذاكرة الموظف',
+                        'ما قلته له أو عنه في الشات من تفضيلات وتعليمات دائمة، ودروس تقييم دوراته. يلتزم بها في كل دورة ودردشة. تُحفظ فوراً.',
+                        <MemoryPanel employeeId={agent.employee_id} />
                       )}
 
                       {/* ── الأدوات: بحث الويب + خوادم MCP خارجية (تُحفظ فوراً) ── */}

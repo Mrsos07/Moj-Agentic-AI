@@ -7,6 +7,7 @@ import MessageInput from './MessageInput'
 import AccountsDrawer from './AccountsDrawer'
 import AgentsDrawer from './AgentsDrawer'
 import TeamBar from './TeamBar'
+import authHeaders from '../authHeaders'
 import usePinnedAccount from '../hooks/usePinnedAccount'
 import logoLight from '../assets/logos/logo-light.png'
 import logoDark from '../assets/logos/logo-dark.png'
@@ -85,7 +86,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     let alive = true
     const load = async () => {
       try {
-        const res = await axios.get('/api/aeos/team', { params: user?.id ? { user_id: user.id } : {} })
+        const res = await axios.get('/api/aeos/team', { headers: authHeaders() })
         if (alive) setTeam(res.data?.employees || [])
       } catch { /* الخادم يُعاد تشغيله — نحاول لاحقاً */ }
     }
@@ -624,6 +625,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
         {!employeeChat && (
           <TeamBar
             team={team}
+            userId={user?.id}
             pinned={pinnedAccount}
             disabled={!isConnected}
             onMention={insertMention}

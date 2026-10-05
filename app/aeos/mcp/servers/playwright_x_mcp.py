@@ -353,6 +353,7 @@ class PlaywrightXMCP(IMCPServer):
                     str(cookie_file), handle, limit=limit, headless=headless,
                     lock_timeout=float(p.get("lock_timeout", 45.0)),
                     tab_budget_seconds=float(p.get("tab_budget_seconds", 18.0)),
+                    replies_limit=int(p.get("replies_limit", 0) or 0),
                 )
                 return MCPResponse.ok(account=label, **profile)
 
@@ -553,7 +554,8 @@ class PlaywrightXMCP(IMCPServer):
     def _read_user_profile(self, storage_state_path: str, handle: str,
                            limit: int, headless: bool,
                            lock_timeout: float = 45.0,
-                           tab_budget_seconds: float = 18.0) -> Dict[str, Any]:
+                           tab_budget_seconds: float = 18.0,
+                           replies_limit: int = 0) -> Dict[str, Any]:
         """Scrape a target user's bio + tweets + replies (for persona cloning).
 
         Reads ``x.com/<handle>`` for original tweets and ``/with_replies`` for
@@ -585,7 +587,8 @@ class PlaywrightXMCP(IMCPServer):
         budget = float(tab_budget_seconds)
 
         def _collect(page, url: str, cap: int, navigate: bool = True,
-                     exclude: Optional[set] = None) -> List[Dict[str, Any]]:
+                     exclude: Optional[set] = None,
+                     with_context: bool = False) -> List[Dict[str, Any]]:
             """اجمع منشورات الحساب الهدف من الصفحة الحالية بميزانية زمنية.
 
             ``exclude``: روابط معروفة مسبقاً (تغريدات الملف) — تُستثنى **ويُقاس
@@ -612,13 +615,24 @@ class PlaywrightXMCP(IMCPServer):
                 except Exception:  # noqa: BLE001
                     batch = []
                 before = len(seen)
+                prev = None
                 for t in batch:
                     u = t.get("url")
                     # فقط ما كتبه الحساب الهدف نفسه (نستبعد بطاقات الاقتباس/الرتويت)
                     if (u and u not in seen and u not in skip
                             and (t.get("handle") or "").lower() == target):
-                        seen[u] = {k: v for k, v in t.items()
-                                   if k not in ("group_label", "counts_text", "per_button")}
+                        item = _with_metrics(t)
+                        # سياق الرد: في تبويب الردود تظهر التغريدة المردود عليها
+                        # بطاقةً مباشرةً فوق الرد. بدونها لا يُعرف «كيف» يرد الحساب
+                        # (على اتفاق؟ هجوم؟ سؤال؟) وهذا نصف الشخصية.
+                        if with_context and prev and prev.get("text"):
+                            item["in_reply_to"] = {
+                                "handle": prev.get("handle", ""),
+                                "text": (prev.get("text") or "")[:400],
+                                "self": (prev.get("handle") or "").lower() == target,
+                            }
+                        seen[u] = item
+                    prev = t
                 if len(seen) >= cap:
                     break
                 # توقّف مبكر: ثلاث تمريرات بلا أي جديد = نهاية المحتوى المتاح
@@ -658,7 +672,8 @@ class PlaywrightXMCP(IMCPServer):
                     tweet_urls = {t["url"] for t in profile.get("tweets", [])}
                     profile["replies"] = _collect(
                         page, f"https://x.com/{handle}/with_replies",
-                        max(6, want // 2), exclude=tweet_urls,
+                        int(replies_limit or max(6, want // 2)), exclude=tweet_urls,
+                        with_context=True,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.info("replies tab failed for @%s: %s", handle, exc)

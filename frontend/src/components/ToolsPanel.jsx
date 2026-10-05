@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import axios from 'axios'
+import authHeaders from '../authHeaders'
 
 /**
  * أدوات الموظف: البحث على الويب + الأدوات المدمجة + خوادم MCP الخارجية.
@@ -24,7 +25,7 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
   const load = useCallback(async () => {
     if (!employeeId) return
     try {
-      const res = await axios.get('/api/aeos/tools', { params: { employee_id: employeeId } })
+      const res = await axios.get('/api/aeos/tools', { headers: authHeaders(), params: { employee_id: employeeId } })
       setData(res.data)
       setError('')
     } catch (e) { setError(e?.response?.data?.detail || 'تعذّر تحميل الأدوات') }
@@ -35,7 +36,7 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
   const attach = async (server, on) => {
     setBusy(server)
     try {
-      await axios.post(`/api/aeos/employees/${employeeId}/tools`, { server, attach: on })
+      await axios.post(`/api/aeos/employees/${employeeId}/tools`, { server, attach: on }, { headers: authHeaders() })
       await load()
     } catch (e) { setError(e?.response?.data?.detail || 'تعذّر الحفظ') }
     setBusy('')
@@ -52,9 +53,9 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
       research_tool: form.research_tool.trim(),
     }
     try {
-      const res = await axios.post('/api/aeos/tools/external', body, { timeout: 90000 })
+      const res = await axios.post('/api/aeos/tools/external', body, { headers: authHeaders(), timeout: 90000 })
       const s = res.data?.server
-      await axios.post(`/api/aeos/employees/${employeeId}/tools`, { server: s.name, attach: true })
+      await axios.post(`/api/aeos/employees/${employeeId}/tools`, { server: s.name, attach: true }, { headers: authHeaders() })
       onNotify?.(`🔌 تمّ ربط خادم MCP «${s.label}» (${s.tools.length} أداة) بالموظف.`)
       setForm(null)
       await load()
@@ -65,7 +66,7 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
   const removeServer = async (name) => {
     if (!window.confirm('حذف هذا الخادم من النظام؟ سيُفصل عن كل الموظفين.')) return
     setBusy(name)
-    try { await axios.delete(`/api/aeos/tools/external/${name}`); await load() } catch (e) {
+    try { await axios.delete(`/api/aeos/tools/external/${name}`, { headers: authHeaders() }); await load() } catch (e) {
       setError(e?.response?.data?.detail || 'تعذّر الحذف')
     }
     setBusy('')
@@ -80,7 +81,7 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
     setBusy(`call:${server}`)
     try {
       const res = await axios.post(`/api/aeos/employees/${employeeId}/tools/call`,
-        { server, tool: t.tool, arguments: args }, { timeout: 60000 })
+        { server, tool: t.tool, arguments: args }, { headers: authHeaders(), timeout: 60000 })
       const r = res.data?.result || {}
       setTrial(p => ({ ...p, [server]: { ...t, out: r.text || JSON.stringify(r.results || r, null, 2) } }))
     } catch (e) {

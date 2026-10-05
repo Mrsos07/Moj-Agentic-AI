@@ -142,6 +142,19 @@ class ExecutionContext:
             parts.append("افعل دائماً: " + "؛ ".join(p.dos))
         if p.donts:
             parts.append("لا تفعل أبداً: " + "؛ ".join(p.donts))
+        # بصمة الصوت المستنسخة: الصوت والمعجم والخطوط الحمراء (الأمثلة ودليل الردود
+        # تُضاف في موجّه كل فعل حسب نوعه، لا هنا، حتى لا يتضخم كل نداء)
+        try:
+            from ..employee import voice_profile
+            vblock = voice_profile.voice_block(voice_profile.get(self.config), "general")
+        except Exception:  # noqa: BLE001
+            vblock = ""
+        if vblock:
+            parts.append(vblock)
+        # الذاكرة طويلة المدى (يحسبها ObservePhase مرة للدورة): ما قاله المالك عن
+        # هذا الموظف في الشات + دروس التقييم — كانت تُحفظ ولا تصل لأي موجّه كتابة
+        if self.scratch.get("memory_brief"):
+            parts.append(self.scratch["memory_brief"])
         # الحالة العاطفية/السلوكية المستنتَجة من الذاكرة المعرفية (Zep/Graphiti)
         # — تضبط نبرة وسلوك كل منشور/رد/تفاعل في هذه الدورة.
         emo = self.scratch.get("emotion_state") or {}

@@ -53,8 +53,22 @@ class ObservePhase(ICognitivePhase):
         recall = context.memory.recall_all(context.config.id, limit=5)
         summary_lines: List[str] = []
         for layer, records in recall.items():
+            if layer == "reflection":
+                continue  # الدروس الآلية («executed X») ضجيج — الدروس الحقيقية في البريف أدناه
             for r in records[:3]:
                 summary_lines.append(f"[{layer}] {r.content[:160]}")
+        # الذاكرة طويلة المدى: ما قاله المالك عن هذا الموظف + دروس التقييم. تُحسب مرة
+        # واحدة للدورة (persona_prompt يُستدعى مرات كثيرة) وتُقرأ من scratch.
+        try:
+            from ..memory import agent_memory as AM
+
+            brief = AM.employee_brief(context.config.id)
+        except Exception:  # noqa: BLE001
+            logger.debug("employee memory brief failed", exc_info=True)
+            brief = ""
+        context.scratch["memory_brief"] = brief
+        if brief:
+            summary_lines.insert(0, brief)
         context.scratch["recent_memory_summary"] = "\n".join(summary_lines)
 
         # راجع سجلّ تفاعلاتك المنظّم قبل أن تقرّر: ماذا نشرتَ ورددتَ وأعجبتَ
@@ -1169,8 +1183,19 @@ class LearnPhase(ICognitivePhase):
                 f"Cycle via {context.event.type.value}: executed {done}. "
                 f"{evaluation.get('successes',0)} ok / {evaluation.get('failures',0)} failed."
             )
-        context.memory.learn(context.config.id, lesson, importance=2)
+        # لا نكرّر الدرس نفسه: قيس 100 سجل «chose to wait» لموظف واحد تُغرق الذاكرة
+        last = context.memory.recall(context.config.id, MemoryLayerType.REFLECTION, limit=1)
+        if not (last and last[0].content == lesson):
+            context.memory.learn(context.config.id, lesson, importance=1 if not results else 2)
         context.scratch["lesson"] = lesson
+        # احتفاظ محدود بذاكرة الدورة (كل 25 دورة) — النمو بلا حد يبطئ الاسترجاع
+        if context.config.runtime_state.cycles_completed % 25 == 0:
+            try:
+                from ..memory import agent_memory as AM
+
+                AM.prune_employee_memory(context.config.id)
+            except Exception:  # noqa: BLE001
+                logger.debug("memory pruning failed", exc_info=True)
 
 
 class CritiquePhase(ICognitivePhase):
@@ -1195,6 +1220,17 @@ class CritiquePhase(ICognitivePhase):
             return
         C.store_critique(context.config, result)
         context.scratch["critique"] = result
+        # توجيهات التقييم دروس طويلة المدى: تُدمج مع مكرّرها (فترتفع أهمية المتكرّر)
+        # وتحضر في ذاكرة الموظف حتى بعد أن تخرج من نافذة critique_history القصيرة.
+        try:
+            from ..memory import agent_memory as AM
+
+            for d in (result.get("directives") or [])[:3]:
+                AM.add(AM.employee_scope(context.config.id), str(d), kind="lesson",
+                       importance=3, meta={"source": "critique",
+                                           "cycle": context.config.runtime_state.cycles_completed})
+        except Exception:  # noqa: BLE001
+            logger.debug("storing critique lessons failed", exc_info=True)
 
         account = getattr(context.config, "account_username", "") or "الموظف الذكي"
         lines = [f"🧪 **تقييم دورة @{account}: {result.get('score')}/10**"]
