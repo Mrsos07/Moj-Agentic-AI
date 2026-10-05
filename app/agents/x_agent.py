@@ -35,9 +35,6 @@ class XAgent:
 
 استخدم الأدوات المتاحة لتنفيذ هذه المهام بكفاءة.
 تحدث بالعربية مع المستخدم وكن مفيداً ودقيقاً.""",
-            llm_config=llm_config,
-            human_input_mode="NEVER",
-            code_execution_config=False,
         )
 
         self._register_tools()
@@ -47,7 +44,7 @@ class XAgent:
         # في الإصدار الجديد، الأدوات تُستخدم مباشرة
         pass
 
-    def get_agent(self) -> ConversableAgent:
+    def get_agent(self) -> AssistantAgent:
         """الحصول على كائن الوكيل"""
         return self.agent
 

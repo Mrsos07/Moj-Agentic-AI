@@ -39,7 +39,11 @@ class MainAgent:
 3. التعامل مع الاستفسارات العامة
 4. تقديم المساعدة والتوجيه
 
-يمكنك استخدام الأدوات المتاحة لتحليل النوايا وتنفيذ المهام.""",
+يمكنك استخدام الأدوات المتاحة لتحليل النوايا وتنفيذ المهام.
+
+خطوات العمل:
+1. حلّل نية المستخدم
+2. حدّد المنصة المعنية
 3. حدد الوكيل المناسب حسب النية والمنصة
 4. أرسل الطلب للوكيل الفرعي
 5. أرجع النتيجة للمستخدم
@@ -58,9 +62,6 @@ class MainAgent:
 - Facebook (قريباً)
 
 تحدث بالعربية وكن مفيداً ومنظماً.""",
-            llm_config=llm_config,
-            human_input_mode="NEVER",
-            code_execution_config=False,
         )
         
         self.x_agent = XAgent(llm_config)
@@ -315,7 +316,7 @@ class MainAgent:
                 "error": str(e)
             }
     
-    def get_agent(self) -> ConversableAgent:
+    def get_agent(self) -> AssistantAgent:
         """الحصول على كائن الوكيل الرئيسي"""
         return self.agent
     
