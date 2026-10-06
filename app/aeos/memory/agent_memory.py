@@ -324,6 +324,26 @@ def get_summary(conversation_id: int) -> Dict[str, Any]:
         db.close()
 
 
+def purge_conversation(conversation_id: int, db=None) -> int:
+    """احذف ملخّص المحادثة (الذاكرة قصيرة المدى) مع حذفها.
+
+    الملخّص مفتاحه ``conv:<id>`` فقط، وSQLite يعيد استخدام معرّف آخر صف محذوف: بلا
+    هذا الحذف ترث محادثةٌ جديدة — قد تكون لمستخدم آخر — ملخّصَ محادثة محذوفة في سياقها.
+    """
+    M = _model()
+    own = db is None
+    db = db or _session()
+    try:
+        n = db.query(M).filter(M.key == _summary_key(conversation_id), M.kind == "summary").delete(
+            synchronize_session=False)
+        if own:
+            db.commit()
+        return n
+    finally:
+        if own:
+            db.close()
+
+
 def chat_context(db, conversation_id: int, keep: int = SHORT_TERM_TURNS,
                  exclude_last_user: str = "") -> Dict[str, Any]:
     """سياق قصير المدى: ملخّص ما مضى + آخر ``keep`` رسالة حرفياً."""

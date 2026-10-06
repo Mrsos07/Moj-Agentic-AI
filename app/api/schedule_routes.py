@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
+from app.auth.internal import verify
+from app.auth.ownership import label_or_404, require_user
 from app.db.database import get_db
-from app.db.models import ScheduleEvent
+from app.db.models import ScheduleEvent, User
 from app.services.schedule_service import create_schedule_event
 from app.services.memory_service import memory_service
 
@@ -41,10 +43,13 @@ class ScheduleEventInput(BaseModel):
 async def schedule_event(
     payload: ScheduleEventInput,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_user),
 ):
     """
     استقبال JSON للمنشور وإنشاء ScheduleEvent مجدول بناءً على نية المحتوى.
     """
+    # كان مجهول يستطيع جدولة نشر على أي حساب
+    label_or_404(payload.username, current_user)
     try:
         event = create_schedule_event(
             db=db,
@@ -52,6 +57,7 @@ async def schedule_event(
             username=payload.username,
             category=payload.category,
             content=payload.content,
+            user_id=current_user.id,
         )
         return event.to_dict()
     except Exception as e:
@@ -74,12 +80,15 @@ class ScheduleCallbackInput(BaseModel):
 @router.post("/webhooks/schedule_callback")
 async def schedule_callback(
     payload: ScheduleCallbackInput,
+    sig: str = "",
     db: Session = Depends(get_db),
 ):
     """
     Webhook يستقبل نتيجة نشر تغريدة مجدولة من سيرفر app/x.
     يحدّث الـ ScheduleEvent المحلي ويرسل إشعاراً في محادثة المستخدم.
     """
+    if not verify("schedule", payload.event_id, sig):
+        raise HTTPException(status_code=403, detail="invalid callback signature")
     event = db.query(ScheduleEvent).filter(
         ScheduleEvent.schedule_event_id == payload.event_id
     ).first()

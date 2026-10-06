@@ -168,23 +168,32 @@ class SqlEmployeeRepository(IEmployeeRepository):
             db.close()
 
     def delete(self, employee_id: str) -> bool:
-        """Permanently remove an employee and its execution logs."""
+        """Permanently remove an employee and EVERYTHING it owns, in one transaction.
+
+        كان يحذف السجلات فقط: ذاكرته بطبقاتها (``employee_memories``) وذاكرته طويلة
+        المدى (``agent_memories`` بنطاق ``employee:<id>``) وطابور مهامه تبقى يتيمة —
+        بيانات لمالك لم يعد يملك الموظف، ولا واجهة تصل إليها لحذفها.
+        """
+        from app.db.models import (
+            AgentMemory, EmployeeMemoryRecord, ExecutionJobRecord, ExecutionLogRecord,
+        )
+
         db = self._session_factory()
         try:
             row = db.query(AIEmployee).filter(AIEmployee.id == employee_id).first()
             if not row:
                 return False
-            # نظّف سجلّات الدورات المرتبطة أيضاً
-            try:
-                from app.db.models import ExecutionLogRecord
-                db.query(ExecutionLogRecord).filter(
-                    ExecutionLogRecord.employee_id == employee_id
-                ).delete(synchronize_session=False)
-            except Exception:  # noqa: BLE001
-                pass
+            for model in (ExecutionLogRecord, EmployeeMemoryRecord, ExecutionJobRecord):
+                db.query(model).filter(model.employee_id == employee_id).delete(
+                    synchronize_session=False)
+            db.query(AgentMemory).filter(AgentMemory.scope == f"employee:{employee_id}").delete(
+                synchronize_session=False)
             db.delete(row)
             db.commit()
             return True
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 

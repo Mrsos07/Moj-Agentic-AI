@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth.middleware import get_current_user
+from app.auth.ownership import is_admin, label_or_404, owns_employee
+from app.auth.ownership import require_user as get_current_user
 from app.db.models import User
 
 from ..bootstrap import get_platform
@@ -130,22 +131,22 @@ def health() -> Dict[str, Any]:
 
 
 @router.get("/employees")
-def list_employees() -> Dict[str, Any]:
+def list_employees(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     repo = get_platform().repository
-    return {"employees": [e.to_dict() for e in repo.list_active()]}
+    return {"employees": [e.to_dict() for e in repo.list_active() if owns_employee(e, current_user)]}
 
 
 @router.get("/employees/{employee_id}")
-def get_employee(employee_id: str) -> Dict[str, Any]:
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
-    return cfg.to_dict()
+def get_employee(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    return _employee_or_404(employee_id, current_user).to_dict()
 
 
 @router.post("/employees")
-def create_employee(body: EmployeeIn) -> Dict[str, Any]:
+def create_employee(body: EmployeeIn, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     platform = get_platform()
+    # المالك من التوكن لا من الجسم، والحساب يجب أن يكون للمستخدم (لا موظف على كوكيز غيره)
+    body.user_id = current_user.id
+    label_or_404(body.cookie_label or body.account_username, current_user)
     persona = Persona.from_dict(body.persona.dict()) if body.persona else Persona(
         display_name=body.account_username
     )
@@ -188,11 +189,10 @@ def create_employee(body: EmployeeIn) -> Dict[str, Any]:
 
 
 @router.patch("/employees/{employee_id}/status")
-def set_status(employee_id: str, status: str) -> Dict[str, Any]:
+def set_status(employee_id: str, status: str,
+               current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     repo = get_platform().repository
-    cfg = repo.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     try:
         cfg.status = EmployeeStatus(status)
     except ValueError:
@@ -202,11 +202,10 @@ def set_status(employee_id: str, status: str) -> Dict[str, Any]:
 
 
 @router.delete("/employees/{employee_id}")
-def delete_employee(employee_id: str) -> Dict[str, Any]:
-    """Permanently delete an AI employee (stops schedule + removes logs)."""
+def delete_employee(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """Permanently delete an AI employee (stops schedule + removes logs + purges memory)."""
     platform = get_platform()
-    if not platform.repository.get(employee_id):
-        raise HTTPException(404, "employee not found")
+    _employee_or_404(employee_id, current_user)
     ok = platform.delete_employee(employee_id)
     if not ok:
         raise HTTPException(500, "failed to delete employee")
@@ -214,9 +213,13 @@ def delete_employee(employee_id: str) -> Dict[str, Any]:
 
 
 @router.delete("/agent")
-def delete_agent(account_username: str, platform: str = "x") -> Dict[str, Any]:
+def delete_agent(account_username: str, platform: str = "x",
+                 current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Delete an employee by its connected account (used by the chatbot UI)."""
     plat = get_platform()
+    cfg = plat.repository.get_by_account(platform, account_username)
+    if not owns_employee(cfg, current_user):
+        raise HTTPException(404, "agent not found for this account")
     ok = plat.delete_agent(platform, account_username)
     if not ok:
         raise HTTPException(404, "agent not found for this account")
@@ -229,6 +232,7 @@ def employee_logs(
     limit: int = 25,
     latest_only: bool = True,
     summary: bool = True,
+    current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Per-cycle execution logs.
 
@@ -236,6 +240,8 @@ def employee_logs(
     - latest_only=False: return full logs list (legacy behavior).
     """
     import json as _json
+
+    _employee_or_404(employee_id, current_user)
 
     from app.db.database import SessionLocal
     from app.db.models import ExecutionLogRecord
@@ -350,10 +356,10 @@ def employee_logs(
 
 
 @router.post("/employees/{employee_id}/trigger")
-def trigger(employee_id: str, body: TriggerIn) -> Dict[str, Any]:
+def trigger(employee_id: str, body: TriggerIn,
+            current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     platform = get_platform()
-    if not platform.repository.get(employee_id):
-        raise HTTPException(404, "employee not found")
+    _employee_or_404(employee_id, current_user)
     if body.sync:
         report = platform.run_cycle_now(employee_id, body.event_type, body.payload)
         return {"ok": True, "mode": "sync", "report": report}
@@ -363,15 +369,13 @@ def trigger(employee_id: str, body: TriggerIn) -> Dict[str, Any]:
 
 # ─────────── هوية X من البرسونا (اسم/بايو/صورة/هيدر) ───────────
 @router.post("/employees/{employee_id}/identity/preview")
-def identity_preview(employee_id: str) -> Dict[str, Any]:
+def identity_preview(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """يولّد هوية كاملة من برسونا الموظف (اسم + بايو + صورة + هيدر)
     للمعاينة في الواجهة — بلا أي تغيير على حساب X. يستغرق ~دقيقة
     (صورتا Gemini). الصور روابط مؤقتة تُحذف بعد ساعة — طبّق أو أعد التوليد."""
     from ..services import identity_service
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     try:
         identity = identity_service.generate_preview(cfg)
     except Exception as exc:  # noqa: BLE001
@@ -382,14 +386,13 @@ def identity_preview(employee_id: str) -> Dict[str, Any]:
 
 
 @router.post("/employees/{employee_id}/identity/field")
-def identity_field(employee_id: str, body: IdentityFieldIn) -> Dict[str, Any]:
+def identity_field(employee_id: str, body: IdentityFieldIn,
+                   current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """يعيد توليد عنصر واحد من الهوية (صورة/هيدر/اسم/بايو) من البرسونا
     مع برومبت اختياري — للمعاينة فقط، بلا تغيير على X. الصور تأخذ 30-90ث."""
     from ..services import identity_service
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     if body.field not in identity_service.IDENTITY_FIELDS:
         raise HTTPException(400, f"field must be one of {identity_service.IDENTITY_FIELDS}")
     try:
@@ -401,37 +404,38 @@ def identity_field(employee_id: str, body: IdentityFieldIn) -> Dict[str, Any]:
 
 
 @router.post("/employees/{employee_id}/identity/apply")
-def identity_apply(employee_id: str, body: IdentityApplyIn) -> Dict[str, Any]:
+def identity_apply(employee_id: str, body: IdentityApplyIn,
+                   current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """يطبّق الهوية على حساب X في الخلفية (متصفح + كوكيز الحساب) ويعيد
     إقراراً فورياً؛ النتيجة النهائية تُدفع لشات المستخدم عند الاكتمال."""
     from ..services import identity_service
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
-    ack = identity_service.request_apply_identity(
-        cfg, body.user_id if body.user_id is not None else cfg.user_id,
-        identity=body.identity,
-    )
+    cfg = _employee_or_404(employee_id, current_user)
+    # النتيجة تُدفع لشات المستخدم الموثَّق — لا لرقم يرسله المتصفح
+    ack = identity_service.request_apply_identity(cfg, current_user.id, identity=body.identity)
     return {"ok": True, "message": ack}
 
 
 @router.get("/stats")
-def stats() -> Dict[str, Any]:
+def stats(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     return get_platform().stats()
 
 
 # ─────────────────── agent toggle (chatbot) ───────────────────
 @router.post("/agent/toggle")
-def toggle_agent(body: AgentToggleIn) -> Dict[str, Any]:
+def toggle_agent(body: AgentToggleIn, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Turn an account's autonomous agent on/off from the chatbot UI."""
     platform = get_platform()
+    label_or_404(body.cookie_label or body.account_username, current_user)
+    existing = platform.repository.get_by_account(body.platform, body.account_username)
+    if existing is not None and not owns_employee(existing, current_user):
+        raise HTTPException(404, "agent not found for this account")
     view = platform.toggle_agent(
         platform=body.platform,
         account_username=body.account_username,
         enabled=body.enabled,
         cookie_label=body.cookie_label,
-        user_id=body.user_id,
+        user_id=current_user.id,
         interval_minutes=body.interval_minutes,
         active_hours_start=body.active_hours_start,
         active_hours_end=body.active_hours_end,
@@ -445,7 +449,7 @@ def toggle_agent(body: AgentToggleIn) -> Dict[str, Any]:
 
 
 @router.get("/catalog")
-def catalog() -> Dict[str, Any]:
+def catalog(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Available skills and MCP servers an employee can be equipped with."""
     s = get_platform().stats()
     return {
@@ -458,7 +462,7 @@ def catalog() -> Dict[str, Any]:
 
 # ─────────────────── persona: interests, templates, AI generate ───────────────────
 @router.get("/persona/templates")
-def persona_templates() -> Dict[str, Any]:
+def persona_templates(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Main persona templates per interest (politics, economy, sports, ...)."""
     from ..employee.persona_templates import INTERESTS, list_templates
     return {
@@ -469,7 +473,8 @@ def persona_templates() -> Dict[str, Any]:
 
 
 @router.post("/persona/generate")
-def persona_generate(body: PersonaGenerateIn) -> Dict[str, Any]:
+def persona_generate(body: PersonaGenerateIn,
+                     current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Generate a persona from interests + a brief using the LLM."""
     import json as _json
     import re as _re
@@ -533,6 +538,8 @@ def persona_clone(body: PersonaCloneIn,
         raise HTTPException(400, "target_handle is required")
     if not (body.account_username or "").strip():
         raise HTTPException(400, "account_username is required")
+    # السحب يجري بكوكيز هذا الحساب: يجب أن يكون للمستخدم
+    label_or_404(body.account_username.strip(), current_user)
     cfg = _employee_or_404(body.employee_id, current_user) if body.apply else None
 
     limit = max(10, min(int(body.limit or 40), 60))
@@ -562,16 +569,27 @@ def persona_clone(body: PersonaCloneIn,
 
 
 @router.get("/agent/status")
-def agent_status(account_username: str, platform: str = "x") -> Dict[str, Any]:
+def agent_status(account_username: str, platform: str = "x",
+                 current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Current on/off state for one account's agent."""
+    cfg = get_platform().repository.get_by_account(platform, account_username)
+    if cfg is not None and not owns_employee(cfg, current_user):
+        return {"ok": True, "exists": False, "agent": None}
     view = get_platform().get_agent_by_account(platform, account_username)
     return {"ok": True, "exists": bool(view), "agent": view}
 
 
 @router.get("/agents")
-def agents_overview() -> Dict[str, Any]:
-    """Overview of all agents: how many are running right now."""
-    return {"ok": True, **get_platform().agents_overview()}
+def agents_overview(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """Overview of the CURRENT USER's agents: how many are running right now."""
+    overview = get_platform().agents_overview()
+    if is_admin(current_user):
+        return {"ok": True, **overview}
+    mine = {c.account_username for c in get_platform().repository.list_all()
+            if owns_employee(c, current_user)}
+    agents = [a for a in overview.get("agents") or [] if a["account_username"] in mine]
+    return {"ok": True, "agents": agents, "total": len(agents),
+            "running": sum(1 for a in agents if a["enabled"])}
 
 
 @router.get("/team")
@@ -598,13 +616,11 @@ def _resolve_employee(employee_id: str = "", account_username: str = "", platfor
 
 
 @router.get("/employees/{employee_id}/insights")
-def employee_insights(employee_id: str) -> Dict[str, Any]:
+def employee_insights(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Aggregated engagement stats + latest contents + suggestions for the chat."""
     from ..services import insights as I
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     llm = get_platform().llm
     stats = I.aggregate_stats(employee_id)
     contents = I.recent_contents(employee_id, 8)
@@ -621,7 +637,7 @@ def employee_insights(employee_id: str) -> Dict[str, Any]:
 
 
 @router.get("/employees/{employee_id}/critique")
-def employee_critique(employee_id: str) -> Dict[str, Any]:
+def employee_critique(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """تقييم الدورات وتوجيهات التحسين السارية على الموظف.
 
     يُظهر: درجة آخر دورة وحكمها، اتجاه الدرجات، المشكلات المتكرّرة، ونصّ
@@ -629,15 +645,14 @@ def employee_critique(employee_id: str) -> Dict[str, Any]:
     """
     from ..cognition.critique import critique_report
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     return {"ok": True, "employee_id": employee_id,
             "account_username": cfg.account_username, **critique_report(cfg)}
 
 
 @router.get("/employees/{employee_id}/content-strategy")
-def employee_content_strategy(employee_id: str) -> Dict[str, Any]:
+def employee_content_strategy(employee_id: str,
+                              current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """استراتيجية المحتوى وأداؤها: المحاور، الصيغ، ما نجح فعلاً، وخطة الدورة القادمة.
 
     هذه النافذة التي تُظهر أن الموظف صانع محتوى يتعلّم: أفضل الصيغ والمحاور
@@ -645,9 +660,7 @@ def employee_content_strategy(employee_id: str) -> Dict[str, Any]:
     """
     from ..employee import strategy as S
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     return {
         "ok": True,
         "employee_id": employee_id,
@@ -688,8 +701,9 @@ class SkillPatchIn(BaseModel):
 
 
 def _employee_or_404(employee_id: str, current_user: User):
+    # سياسة الملكية واحدة (owns_employee)، والوصول للبيانات عبر منصة هذه الطبقة
     cfg = get_platform().repository.get(employee_id)
-    if not cfg or cfg.user_id != current_user.id:
+    if not owns_employee(cfg, current_user):
         raise HTTPException(404, "employee not found")
     return cfg
 
@@ -841,6 +855,17 @@ def _memory_scope(current_user: User, employee_id: str = "") -> str:
     return AM.coordinator_scope(current_user.id)
 
 
+@router.get("/memory/overview")
+def memory_overview(employee_id: str = "",
+                    current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """صورة موحّدة لكل أنظمة الذاكرة (قصيرة/طويلة/طبقات الدورة/الرسم) لموظف أو للمنسّق."""
+    from ..memory import lifecycle
+
+    if employee_id:
+        return {"ok": True, **lifecycle.employee_overview(_employee_or_404(employee_id, current_user))}
+    return {"ok": True, **lifecycle.coordinator_overview(current_user.id)}
+
+
 @router.get("/memory")
 def list_memory(employee_id: str = "",
                 current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
@@ -962,7 +987,8 @@ def call_employee_tool(employee_id: str, body: ToolCallIn,
 
 
 @router.get("/employees/{employee_id}/interactions")
-def employee_interactions(employee_id: str, limit: int = 10) -> Dict[str, Any]:
+def employee_interactions(employee_id: str, limit: int = 10,
+                          current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """ما تعلّمه الموظف عن **تفاعله** فعلياً: ماذا أثمر ومع مَن.
 
     نظير ``/content-strategy`` لكن لجانب التفاعل: نسبة الاستجابة لكل نوع
@@ -971,9 +997,7 @@ def employee_interactions(employee_id: str, limit: int = 10) -> Dict[str, Any]:
     """
     from ..employee import interaction_ledger as IL
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     return {
         "ok": True,
         "employee_id": employee_id,
@@ -985,16 +1009,15 @@ def employee_interactions(employee_id: str, limit: int = 10) -> Dict[str, Any]:
 
 @router.get("/employees/{employee_id}/graph-memory")
 def employee_graph_memory(
-    employee_id: str, query: str = "", limit: int = 10
+    employee_id: str, query: str = "", limit: int = 10,
+    current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """حالة الذاكرة المعرفية الزمنية (Zep/Graphiti) لموظف: هل تُغذّى وتُسترجع؟
 
     بلا ``query`` تعيد أحدث الحقائق زمنياً؛ ومع ``query`` تجري بحثاً هجيناً.
     مفيدة للتأكد فعلياً من فاعلية الذاكرة بدل الاعتماد على السجلّات.
     """
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    _employee_or_404(employee_id, current_user)
     graph = get_platform().graph_memory
     limit = max(1, min(int(limit), 50))
     facts = (graph.search(employee_id, query, limit=limit) if query.strip()
@@ -1010,13 +1033,12 @@ def employee_graph_memory(
 
 
 @router.post("/employees/{employee_id}/ask")
-def employee_ask(employee_id: str, body: AskIn) -> Dict[str, Any]:
+def employee_ask(employee_id: str, body: AskIn,
+                 current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Free-form discussion with the employee, grounded in its own data."""
     from ..services import insights as I
 
-    cfg = get_platform().repository.get(employee_id)
-    if not cfg:
-        raise HTTPException(404, "employee not found")
+    cfg = _employee_or_404(employee_id, current_user)
     if not (body.question or "").strip():
         raise HTTPException(400, "question is required")
     answer = I.answer_question(cfg, body.question.strip(), get_platform().llm, employee_id)

@@ -3,7 +3,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi import (Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,6 +44,7 @@ from app.services.memory_service import memory_service
 from app.trend_detector.scheduler.scheduler import trend_scheduler
 from app.scheduler.tick import scheduler_tick
 from app.aeos.api.routes import router as aeos_router
+from app.auth.ownership import require_user as _require_user
 from app.aeos.bootstrap import get_platform
 from app.aeos.services import orchestrator
 
@@ -825,7 +827,19 @@ async def get_react_app():
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
+    # الهوية من التوكن فقط: كان الخادم يثق بـuser_id داخل كل رسالة، فأي اتصال
+    # ينتحل أي مستخدم ويوجّه موظفيه عبر المنسّق ويقرأ ذاكرته.
+    from app.auth.ownership import owns_label, user_from_token
+
+    auth_user = await asyncio.to_thread(user_from_token, websocket.query_params.get("token", ""))
     await manager.connect(websocket)
+    if auth_user is None:
+        await websocket.close(code=4401, reason="authentication required")
+        manager.disconnect(websocket)
+        return
+    auth_uid = auth_user.id
+    manager.set_user(websocket, auth_uid)
+    manager.register_user(auth_uid, websocket)
     try:
         while True:
             data = await websocket.receive_text()
@@ -851,23 +865,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
             user_message = message_data.get("message", "")
             session_id = message_data.get("session_id", None)
-            user_id = message_data.get("user_id", None)
-            user_email = message_data.get("user_email", None)
+            # user_id/user_email في الرسالة يُتجاهلان: الهوية من توكن الاتصال فقط
+            user_id = auth_uid
+            user_email = auth_user.email
             attachment = message_data.get("attachment", None)
             file_upload = message_data.get("file_upload", None)
             pinned_account = message_data.get("pinned_account", None)
+            # التثبيت على حساب لا يملكه المستخدم يُسقَط (كان يوجّه موظف غيره)
+            if pinned_account and not await asyncio.to_thread(owns_label, pinned_account, auth_user):
+                pinned_account = None
             # سياق المحادثة الجارية لذاكرة الموظف قصيرة المدى (انظر agent_memory.CURRENT_CHAT)
             from app.aeos.memory.agent_memory import CURRENT_CHAT
             CURRENT_CHAT.set({"user_id": _norm_uid(user_id), "session_id": session_id})
-
-            # remember which user owns this socket so background AEOS cycle
-            # updates can be pushed to the right chat client in real time.
-            if user_id is not None:
-                manager.set_user(websocket, user_id)
-
-            # ربط هذا الـ WebSocket بـ user_id لإرسال إشعارات تسجيل الدخول لاحقاً
-            if user_id:
-                manager.register_user(user_id, websocket)
 
             await manager.send_message({
                 "type": "user_message",
@@ -1297,7 +1306,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 @app.post("/api/uploads")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), current_user=Depends(_require_user)):
     max_size_bytes = 10 * 1024 * 1024
     filename = file.filename or ""
     ext = Path(filename).suffix.lower()
@@ -1346,7 +1355,7 @@ async def upload_file(file: UploadFile = File(...)):
     }
 
 @app.post("/api/send-message")
-async def send_message_to_n8n(request: MessageRequest):
+async def send_message_to_n8n(request: MessageRequest, current_user=Depends(_require_user)):
     """
     Endpoint POST لإرسال رسالة إلى n8n webhook واستقبال الرد
     
@@ -1356,7 +1365,7 @@ async def send_message_to_n8n(request: MessageRequest):
         n8n_response = await webhook_service.send_message_to_n8n(
             user_message=request.message,
             session_id=request.session_id,
-            user_id=request.user_id,
+            user_id=current_user.id,
             metadata=request.metadata
         )
         
@@ -1396,13 +1405,17 @@ async def health_check():
 # ليس مكشوفًا للعموم — يقبل اتصال محلي فقط (127.0.0.1).
 # ────────────────────────────────────────────────────────────────────────────
 @app.post("/api/internal/login-callback", include_in_schema=False)
-async def login_callback(payload: Dict[str, Any], request):
-    # حماية: يقبل فقط من localhost (loginx يشتغل محلياً)
-    client_host = (request.client.host if request.client else "") if hasattr(request, "client") else ""
-    if client_host not in ("127.0.0.1", "localhost", "::1", ""):
-        raise HTTPException(status_code=403, detail="callback مسموح محلياً فقط")
+async def login_callback(payload: Dict[str, Any], request: Request, sig: str = ""):
+    # «محلي فقط» لا يكفي: طلبات المتصفح عبر بروكسي Vite تصل من 127.0.0.1 أيضاً.
+    # الحَكَم توقيع الرابط الذي أعطيناه لـloginx (app.auth.internal).
+    from app.auth.internal import verify
 
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "localhost", "::1"):
+        raise HTTPException(status_code=403, detail="callback مسموح محلياً فقط")
     user_id = payload.get("user_id")
+    if not verify("login", user_id, sig):
+        raise HTTPException(status_code=403, detail="invalid callback signature")
     if not user_id:
         return {"ok": True, "note": "no user_id, nothing to notify"}
 

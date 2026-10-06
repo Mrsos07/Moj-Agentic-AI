@@ -1754,4 +1754,4 @@ if __name__ == '__main__':
         print('[X-Server] ✅ Scheduled publisher worker started')
     except Exception as e:
         print(f'[X-Server] ⚠️ Failed to start scheduler worker: {e}')
-    app.run(host='0.0.0.0', port=port, debug=debug, use_reloader=False, threaded=True)
+    app.run(host=os.getenv('BIND_HOST', '127.0.0.1'), port=port, debug=debug, use_reloader=False, threaded=True)

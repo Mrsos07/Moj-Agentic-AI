@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 from app.agents.agent_manager import agent_manager
-from app.auth.dependencies import get_current_user
+from app.auth.ownership import require_user as get_current_user
 from app.db.models import User
 
 router = APIRouter(prefix="/api/agent", tags=["AI Agents"])
@@ -37,7 +37,7 @@ class AgentMessageResponse(BaseModel):
 @router.post("/message", response_model=AgentMessageResponse)
 async def send_message_to_agent(
     request: AgentMessageRequest,
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     إرسال رسالة إلى نظام الوكلاء الذكية
@@ -117,7 +117,7 @@ async def agent_health_check():
 
 @router.post("/reset")
 async def reset_agents(
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     إعادة تعيين نظام الوكلاء

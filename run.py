@@ -34,6 +34,9 @@ print(f"Python version: {sys.version}")
 import uvicorn
 
 PORT = int(os.getenv("PORT", "8000"))
+# هذا الجهاز فقط افتراضياً: على 0.0.0.0 كانت الواجهة البرمجية مكشوفة لكل الشبكة.
+# BIND_HOST=0.0.0.0 يعيد الإتاحة للأجهزة الأخرى صراحةً (الخوادم الداخلية تقرأه أيضاً).
+BIND_HOST = os.getenv("BIND_HOST", "127.0.0.1")
 
 
 def _free_port(port: int) -> None:
@@ -144,7 +147,7 @@ if __name__ == "__main__":
     if reload:
         _run_with_self_healing_reload(uvicorn.Config(
             "app.main:app",
-            host="0.0.0.0",
+            host=BIND_HOST,
             port=PORT,
             reload=True,
             # Only watch our own source. Watching the whole tree (incl. venv)
@@ -157,7 +160,7 @@ if __name__ == "__main__":
         print("[Runner] إعادة التحميل معطّلة (RELOAD=0) — عملية واحدة ثابتة")
         uvicorn.run(
             "app.main:app",
-            host="0.0.0.0",
+            host=BIND_HOST,
             port=PORT,
             reload=False,
             log_level="info",

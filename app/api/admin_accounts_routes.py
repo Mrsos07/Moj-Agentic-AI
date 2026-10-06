@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from app.db.database import get_db
 from app.db.models import User
-from app.auth.dependencies import get_current_user, require_admin
+from app.auth.dependencies import require_admin
+from app.auth.ownership import require_user as get_current_user
 from app.services.account_service import account_service
 
 router = APIRouter(prefix="/api/admin/accounts", tags=["Admin - Accounts"])

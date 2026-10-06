@@ -147,7 +147,7 @@ def start_identity_server() -> bool:
 
         _process = subprocess.Popen(
             [python_exe, "-m", "flask", "--app", "app", "run",
-             "--host", "0.0.0.0", "--port", str(IDENTITY_PORT)],
+             "--host", os.getenv("BIND_HOST", "127.0.0.1"), "--port", str(IDENTITY_PORT)],
             cwd=str(IDENTITY_DIR),
             env=env,
             stdout=_log_fh,

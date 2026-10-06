@@ -763,7 +763,10 @@ class XAgent:
                 run_at_iso = run_at_for_bridge.strftime('%Y-%m-%d %H:%M:%S')
                 # webhook لإشعار الشات بنتيجة النشر
                 webhook_base = (context or {}).get("webhook_base") or "http://127.0.0.1:3000"
-                callback_url = f"{webhook_base}/api/webhooks/schedule_callback"
+                from app.auth.internal import signed_url
+
+                callback_url = signed_url(f"{webhook_base}/api/webhooks/schedule_callback",
+                                          "schedule", event.schedule_event_id)
 
                 bridge_result = x_bridge.schedule_post(
                     event_id=event.schedule_event_id,

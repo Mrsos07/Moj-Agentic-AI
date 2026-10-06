@@ -15,7 +15,7 @@ import json
 from app.services.memory_service import memory_service
 from app.db.database import get_db
 from app.db.models import Conversation, Message
-from app.auth.dependencies import get_current_user
+from app.auth.ownership import conversation_or_404, require_user as get_current_user
 from app.db.models import User
 
 router = APIRouter(prefix="/api/conversations", tags=["Conversations"])
@@ -68,7 +68,7 @@ class EnsureConversationRequest(BaseModel):
 async def ensure_conversation(
     body: EnsureConversationRequest,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """إنشاء أو جلب محادثة مرتبطة بجلسة محددة (session_id) مع عنوان اختياري،
     وإرجاعها مع كامل رسائلها — تُستخدم لفتح «محادثة الموظف الذكي» وتحميل سياقها."""
@@ -81,7 +81,7 @@ async def ensure_conversation(
         )
         # حصر الملكية: لا نُرجع محادثة مستخدم آخر
         if conversation.user_id and conversation.user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="غير مصرح لك بالوصول لهذه المحادثة")
+            raise HTTPException(status_code=404, detail="conversation not found")
         messages = memory_service.get_conversation_history(db, conversation.id)
         return ConversationDetailResponse(
             conversation=ConversationResponse(
@@ -114,7 +114,7 @@ async def get_user_conversations(
     user_id: Optional[int] = None,
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     الحصول على محادثات المستخدم
@@ -166,7 +166,7 @@ async def get_user_conversations(
 async def get_conversation_detail(
     conversation_id: int,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     الحصول على تفاصيل محادثة محددة
@@ -180,16 +180,8 @@ async def get_conversation_detail(
         تفاصيل المحادثة مع الرسائل
     """
     try:
-        conversation = db.query(Conversation).filter(
-            Conversation.id == conversation_id
-        ).first()
-        
-        if not conversation:
-            raise HTTPException(status_code=404, detail="المحادثة غير موجودة")
-        
-        # التحقق من الصلاحية
-        if current_user and conversation.user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="غير مصرح لك بالوصول لهذه المحادثة")
+        # 404 لا 403: لا نؤكد وجود محادثة لا يملكها
+        conversation = conversation_or_404(conversation_id, current_user, db)
         
         messages = memory_service.get_conversation_history(db, conversation_id)
         
@@ -231,7 +223,8 @@ async def get_conversation_detail(
 async def get_conversation_context(
     conversation_id: int,
     max_messages: int = 10,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     الحصول على سياق المحادثة
@@ -244,6 +237,7 @@ async def get_conversation_context(
     Returns:
         سياق المحادثة
     """
+    conversation_or_404(conversation_id, current_user, db)
     try:
         context = memory_service.get_conversation_context(
             db, conversation_id, max_messages
@@ -266,7 +260,7 @@ async def get_conversation_context(
 async def get_user_preferences(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     الحصول على تفضيلات المستخدم من المحادثات السابقة
@@ -281,8 +275,8 @@ async def get_user_preferences(
     """
     try:
         # التحقق من الصلاحية
-        if current_user and user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="غير مصرح لك بالوصول لهذه البيانات")
+        if user_id != current_user.id and not current_user.is_admin:
+            raise HTTPException(status_code=404, detail="غير موجود")
         
         preferences = memory_service.get_user_preferences(db, user_id)
         
@@ -301,7 +295,7 @@ async def get_user_preferences(
 async def delete_conversation(
     conversation_id: int,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     حذف محادثة
@@ -342,7 +336,7 @@ async def delete_conversation(
 async def get_conversations_summary(
     user_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     الحصول على ملخص إحصائيات المحادثات
@@ -356,12 +350,8 @@ async def get_conversations_summary(
         ملخص الإحصائيات
     """
     try:
-        if current_user:
-            user_id = current_user.id
-        
-        if not user_id:
-            raise HTTPException(status_code=400, detail="user_id مطلوب")
-        
+        # دائماً المستخدم الموثَّق: كان مجهول يمرّر user_id أي مستخدم فيقرأ إحصاءاته
+        user_id = current_user.id
         conversations = memory_service.get_user_conversations(db, user_id, limit=100)
         
         total_messages = sum(len(conv.messages) for conv in conversations)
