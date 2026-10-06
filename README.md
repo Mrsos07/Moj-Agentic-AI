@@ -1,546 +1,337 @@
-# 🤖 Moj AI - Agentic AI Social Media Management System v2.0
-
 <div dir="rtl">
 
-# موج AI - نظام إدارة وسائل التواصل الاجتماعي بالذكاء الاصطناعي الإجرائي
-
-نظام متكامل لإدارة وسائل التواصل الاجتماعي باستخدام الذكاء الاصطناعي، مبني على FastAPI و OpenAI GPT مع دعم كامل للواجهة العربية.
-
-</div>
-
-## 🌟 Features / المميزات
-
-### Core Features
-- 🤖 **AI-Powered Chatbot** - Intelligent conversational AI using OpenAI GPT-4
-- 💬 **Real-time WebSocket Communication** - Instant messaging with WebSocket
-- 🌐 **Arabic RTL Support** - Full Arabic interface with RTL layout
-- 🌓 **Dark/Light Mode** - Beautiful dark and light themes
-- 📱 **Responsive Design** - Works on all devices (desktop, tablet, mobile)
-- ⚡ **High Performance** - Built with FastAPI for optimal speed
-
-### Advanced Capabilities (Planned)
-- 🔄 **Social Media Automation** - Twitter, Instagram, YouTube, TikTok integration
-- 🌐 **Browser Automation** - Playwright for web scraping and automation
-- 🎥 **Media Processing** - Video, audio, and image processing with OpenCV
-- 🔐 **Secure Authentication** - JWT-based authentication system
-- 📊 **Data Analytics** - Advanced analytics and reporting
-- ⚙️ **Task Queue** - Celery for background job processing
-
-<div dir="rtl">
-
-### المميزات الأساسية
-- 🤖 **شات بوت ذكي** - ذكاء اصطناعي محادث باستخدام OpenAI GPT-4
-- 💬 **اتصال WebSocket مباشر** - رسائل فورية مع WebSocket
-- 🌐 **دعم العربية RTL** - واجهة عربية كاملة مع تخطيط من اليمين لليسار
-- 🌓 **الوضع الليلي/النهاري** - ثيمات جميلة للوضع الليلي والنهاري
-- 📱 **تصميم متجاوب** - يعمل على جميع الأجهزة
-- ⚡ **أداء عالي** - مبني على FastAPI للأداء الأمثل
-
-### الإمكانيات المتقدمة (مخطط لها)
-- 🔄 **أتمتة وسائل التواصل** - تكامل مع Twitter, Instagram, YouTube, TikTok
-- 🌐 **أتمتة المتصفح** - Playwright للكشط والأتمتة
-- 🎥 **معالجة الوسائط** - معالجة الفيديو والصوت والصور مع OpenCV
-- 🔐 **المصادقة الآمنة** - نظام مصادقة يعتمد على JWT
-- 📊 **تحليل البيانات** - تحليلات وتقارير متقدمة
-- ⚙️ **قائمة المهام** - Celery لمعالجة المهام في الخلفية
-
-</div>
-
-## 📋 Requirements / المتطلبات
-
-- Python 3.11 or higher
-- OpenRouter API Key (Get one at [openrouter.ai/keys](https://openrouter.ai/keys))
-- PostgreSQL (optional, for database features)
-- MongoDB (optional, for NoSQL storage)
-- Redis (optional, for caching and task queue)
-
-<div dir="rtl">
-
-- Python 3.11 أو أحدث
-- مفتاح OpenRouter (احصل عليه من [openrouter.ai/keys](https://openrouter.ai/keys))
-- PostgreSQL (اختياري، للميزات القاعدة البيانات)
-- MongoDB (اختياري، للتخزين NoSQL)
-- Redis (اختياري، للتخزين المؤقت وقائمة المهام)
-
-</div>
-
-## 🚀 Quick Start / البدء السريع
-
-### Installation / التثبيت
-
-1. **Clone the repository / استنساخ المستودع:**
-
-```bash
-git clone https://github.com/Mrsos07/Moj-Agentic-AI.git
-cd Moj-Agentic-AI
-```
-
-2. **Create virtual environment / إنشاء بيئة افتراضية:**
-
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# Linux/Mac
-python3 -m venv venv
-source venv/bin/activate
-```
-
-3. **Install dependencies / تثبيت المتطلبات:**
-
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-4. **Install Playwright browsers (Required) / تثبيت متصفحات Playwright (مطلوب):**
-
-```bash
-playwright install
-```
-
-5. **Setup environment variables / إعداد متغيرات البيئة:**
-
-Create a `.env` file in the root directory:
-
-```env
-# OpenRouter Configuration (primary LLM provider)
-# Model names MUST be provider-qualified: "openai/gpt-4o-mini", not "gpt-4"
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-OPENROUTER_MODEL=openai/gpt-4o-mini
-OPENAI_MAX_TOKENS=2000
-OPENAI_TEMPERATURE=0.7
-
-# Optional fallback — used only when OPENROUTER_API_KEY is empty
-# OPENAI_API_KEY=your_openai_api_key_here
-# OPENAI_MODEL=gpt-4o-mini
-
-# Server Configuration
-HOST=0.0.0.0
-PORT=8000
-DEBUG=True
-
-# Database (Optional)
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_USER=your_user
-POSTGRES_PASSWORD=your_password
-POSTGRES_DB=moj_ai_db
-
-# MongoDB (Optional)
-MONGODB_URI=mongodb://localhost:27017
-MONGODB_DB=moj_ai_db
-
-# Redis (Optional)
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_DB=0
-```
-
-<div dir="rtl">
-
-أنشئ ملف `.env` في المجلد الرئيسي:
-
-</div>
-
-6. **Run the application / تشغيل التطبيق:**
-
-```bash
-python run.py
-```
-
-Or using uvicorn directly:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-7. **Open in browser / فتح في المتصفح:**
-
-**Backend API:** http://localhost:8000
-
-**Frontend (React):** http://localhost:3000 (see Frontend Setup section)
-
-<div dir="rtl">
-
-**واجهة الخادم (API):** http://localhost:8000
-
-**الواجهة الأمامية (React):** http://localhost:3000 (راجع قسم إعداد الواجهة الأمامية)
-
-</div>
-
-## 📁 Project Structure / بنية المشروع
-
-```
-Moj-Agentic-AI/
-├── app/                          # Backend Application (FastAPI)
-│   ├── __init__.py
-│   ├── main.py                   # FastAPI application & WebSocket handler
-│   ├── core/
-│   │   ├── __init__.py
-│   │   └── config.py             # Configuration settings
-│   └── services/
-│       ├── __init__.py
-│       └── ai_service.py         # OpenAI integration service
-├── frontend/                     # React Frontend Application
-│   ├── src/
-│   │   ├── components/           # React components
-│   │   │   ├── ChatInterface.jsx
-│   │   │   ├── Sidebar.jsx
-│   │   │   ├── MessageList.jsx
-│   │   │   ├── Message.jsx
-│   │   │   ├── MessageInput.jsx
-│   │   │   └── TypingIndicator.jsx
-│   │   ├── App.jsx               # Main React component
-│   │   ├── main.jsx              # Entry point
-│   │   └── index.css             # Tailwind styles
-│   ├── index.html
-│   ├── package.json              # Node.js dependencies
-│   ├── vite.config.js            # Vite configuration
-│   ├── tailwind.config.js        # Tailwind configuration
-│   ├── postcss.config.js         # PostCSS configuration
-│   └── README.md                 # Frontend documentation
-├── templates/
-│   └── chat.html                 # Legacy HTML interface
-├── static/                       # Static files (CSS, JS, images)
-├── requirements.txt              # Python dependencies
-├── .env.example                  # Environment variables template
-├── .gitignore                    # Git ignore rules
-├── run.py                        # Backend quick start script
-├── SETUP.md                      # Detailed setup guide
-├── USAGE_GUIDE.md               # Usage guide
-└── README.md                     # This file
-```
-
-## 🎨 Frontend (React + Vite + TailwindCSS)
-
-### Technology Stack
-- **React 18.2.0** - Modern UI library
-- **Vite 5.0.8** - Fast build tool and dev server
-- **TailwindCSS 3.4.1** - Utility-first CSS framework
-- **Axios 1.6.5** - HTTP client for API calls
-- **React Icons 5.0.1** - Icon library (FiSend, FiPlus, MdDashboard, etc.)
-
-### Frontend Features
-- ✨ **Modern React Components** - Modular and reusable components
-- 🎨 **TailwindCSS Styling** - Beautiful and responsive design
-- 🌓 **Dark/Light Mode** - Toggle between themes
-- 📱 **Fully Responsive** - Works on all screen sizes
-- ⚡ **Fast Development** - Vite HMR for instant updates
-- 🔌 **WebSocket Integration** - Real-time chat with backend
-- 🎯 **Arabic RTL Support** - Full right-to-left layout
-
-### Frontend Setup
-
-1. **Navigate to frontend directory:**
-```bash
-cd frontend
-```
-
-2. **Install Node.js dependencies:**
-```bash
-npm install
-```
-
-3. **Run development server:**
-```bash
-npm run dev
-```
-
-Frontend will be available at: **http://localhost:3000**
-
-4. **Build for production:**
-```bash
-npm run build
-```
-
-### Frontend Scripts
-```bash
-npm run dev      # Start development server
-npm run build    # Build for production
-npm run preview  # Preview production build
-npm run lint     # Lint code
-```
-
-<div dir="rtl">
-
-## 🎨 الواجهة الأمامية (React + Vite + TailwindCSS)
-
-### التقنيات المستخدمة
-- **React 18.2.0** - مكتبة واجهة مستخدم حديثة
-- **Vite 5.0.8** - أداة بناء وخادم تطوير سريع
-- **TailwindCSS 3.4.1** - إطار عمل CSS
-- **Axios 1.6.5** - عميل HTTP للاتصال بالـ API
-- **React Icons 5.0.1** - مكتبة الأيقونات
-
-### مميزات الواجهة الأمامية
-- ✨ **مكونات React حديثة** - مكونات معيارية وقابلة لإعادة الاستخدام
-- 🎨 **تصميم TailwindCSS** - تصميم جميل ومتجاوب
-- 🌓 **الوضع الليلي/النهاري** - التبديل بين الثيمات
-- 📱 **متجاوب بالكامل** - يعمل على جميع أحجام الشاشات
-- ⚡ **تطوير سريع** - Vite HMR للتحديثات الفورية
-- 🔌 **تكامل WebSocket** - دردشة فورية مع الخادم
-- 🎯 **دعم العربية RTL** - تخطيط كامل من اليمين لليسار
-
-### إعداد الواجهة الأمامية
-
-1. **الانتقال إلى مجلد frontend:**
-```bash
-cd frontend
-```
-
-2. **تثبيت مكتبات Node.js:**
-```bash
-npm install
-```
-
-3. **تشغيل خادم التطوير:**
-```bash
-npm run dev
-```
-
-الواجهة الأمامية ستكون متاحة على: **http://localhost:3000**
-
-4. **البناء للإنتاج:**
-```bash
-npm run build
-```
-
-### أوامر الواجهة الأمامية
-```bash
-npm run dev      # تشغيل خادم التطوير
-npm run build    # البناء للإنتاج
-npm run preview  # معاينة بناء الإنتاج
-npm run lint     # فحص الكود
-```
-
-</div>
-
-## 🔌 API Endpoints
-
-### WebSocket
-- `ws://localhost:8000/ws/chat` - WebSocket connection for real-time chat
-
-### HTTP
-- `GET /` - Chat interface (HTML)
-- `GET /health` - Health check endpoint
-- `GET /static/{file_path}` - Static files (CSS, JS, images)
-
-**Note:** Backend runs on port **8000**, Frontend runs on port **3000**
-
-### Example Health Check Response
-
-```json
-{
-  "status": "healthy",
-  "timestamp": "2026-01-08T20:27:14.254772"
-}
-```
-
-## ⚙️ Configuration / التكوين
-
-### Environment Variables
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `OPENROUTER_API_KEY` | OpenRouter API key | - | Yes |
-| `OPENROUTER_MODEL` | Model, provider-qualified | `openai/gpt-4o-mini` | No |
-| `OPENAI_API_KEY` | Fallback only, if no OpenRouter key | - | No |
-| `OPENAI_MAX_TOKENS` | Maximum tokens | `2000` | No |
-| `OPENAI_TEMPERATURE` | Model temperature | `0.7` | No |
-| `HOST` | Server host | `0.0.0.0` | No |
-| `PORT` | Server port | `8000` | No |
-| `DEBUG` | Debug mode | `True` | No |
-
-<div dir="rtl">
-
-| المتغير | الوصف | القيمة الافتراضية | مطلوب |
-|---------|-------|-------------------|-------|
-| `OPENROUTER_API_KEY` | مفتاح OpenRouter | - | نعم |
-| `OPENROUTER_MODEL` | الموديل، مؤهَّل بالمزوّد | `openai/gpt-4o-mini` | لا |
-| `OPENAI_API_KEY` | احتياط فقط، إن غاب مفتاح OpenRouter | - | لا |
-| `OPENAI_MAX_TOKENS` | الحد الأقصى للتوكنز | `2000` | لا |
-| `OPENAI_TEMPERATURE` | درجة الإبداع | `0.7` | لا |
-| `HOST` | عنوان الخادم | `0.0.0.0` | لا |
-| `PORT` | منفذ الخادم | `8000` | لا |
-| `DEBUG` | وضع التطوير | `True` | لا |
-
-</div>
-
-## 🛠️ Development / التطوير
-
-### Running in Development Mode
-
-```bash
-# With auto-reload
-python run.py
-
-# Or with uvicorn
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Adding New Features
-
-1. **Add a new service**: Create a file in `app/services/`
-2. **Add a new endpoint**: Modify `app/main.py`
-3. **Modify the UI**: Edit `templates/chat.html`
-4. **Update configuration**: Modify `app/core/config.py`
-
-<div dir="rtl">
-
-### إضافة ميزات جديدة
-
-1. **إضافة خدمة جديدة**: أنشئ ملف في `app/services/`
-2. **إضافة endpoint جديد**: عدّل `app/main.py`
-3. **تعديل الواجهة**: عدّل `templates/chat.html`
-4. **تحديث التكوين**: عدّل `app/core/config.py`
-
-</div>
-
-## 📦 Dependencies / المتطلبات
-
-### Core Dependencies
-- **FastAPI** - Modern web framework
-- **Uvicorn** - ASGI server
-- **OpenAI** - AI integration
-- **Pydantic** - Data validation
-- **WebSocket** - Real-time communication
-
-### Additional Dependencies (from requirements.txt)
-- Social Media APIs (Tweepy, yt-dlp, Instaloader)
-- Browser Automation (Playwright, Selenium)
-- Media Processing (OpenCV, MoviePy, Pillow)
-- AI/ML Libraries (PyTorch, Transformers, LangChain)
-- Database Support (PostgreSQL, MongoDB, Redis)
-- Task Queue (Celery, Flower)
-
-<div dir="rtl">
-
-### المتطلبات الأساسية
-- **FastAPI** - إطار عمل ويب حديث
-- **Uvicorn** - خادم ASGI
-- **OpenAI** - تكامل الذكاء الاصطناعي
-- **Pydantic** - التحقق من البيانات
-- **WebSocket** - الاتصال المباشر
-
-</div>
-
-## 🐛 Troubleshooting / حل المشاكل
-
-### Common Issues
-
-1. **UnicodeEncodeError on Windows**
-   - The `run.py` script handles encoding automatically
-   - Make sure you're using Python 3.11+
-
-2. **ModuleNotFoundError**
-   - Activate the virtual environment first
-   - Install dependencies: `pip install -r requirements.txt`
-
-3. **OpenAI API Error**
-   - Check your API key in `.env` file
-   - Ensure you have credits in your OpenAI account
-
-4. **Port already in use**
-   - Change the PORT in `.env` file
-   - Or kill the process using the port
-
-<div dir="rtl">
-
-### المشاكل الشائعة
-
-1. **خطأ UnicodeEncodeError على Windows**
-   - سكربت `run.py` يتعامل مع الترميز تلقائياً
-   - تأكد من استخدام Python 3.11+
-
-2. **خطأ ModuleNotFoundError**
-   - فعّل البيئة الافتراضية أولاً
-   - ثبّت المتطلبات: `pip install -r requirements.txt`
-
-3. **خطأ OpenAI API**
-   - تحقق من مفتاح API في ملف `.env`
-   - تأكد من وجود رصيد في حساب OpenAI
-
-4. **المنفذ مستخدم بالفعل**
-   - غيّر PORT في ملف `.env`
-   - أو أوقف العملية التي تستخدم المنفذ
-
-</div>
-
-## 📄 License / الترخيص
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-<div dir="rtl">
-
-هذا المشروع مرخص تحت رخصة MIT - راجع ملف LICENSE للتفاصيل.
-
-</div>
-
-## 🤝 Contributing / المساهمة
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-<div dir="rtl">
-
-المساهمات مرحب بها! لا تتردد في إرسال Pull Request.
-
-</div>
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 👤 Author / المؤلف
-
-**Mrsos07**
-- GitHub: [@Mrsos07](https://github.com/Mrsos07)
-
-## 🔗 Links / الروابط
-
-- Repository: [https://github.com/Mrsos07/Moj-Agentic-AI](https://github.com/Mrsos07/Moj-Agentic-AI)
-- OpenAI API: [https://platform.openai.com](https://platform.openai.com)
-- FastAPI Docs: [https://fastapi.tiangolo.com](https://fastapi.tiangolo.com)
-
-## 📝 Changelog / سجل التغييرات
-
-### Version 2.0.0 (Current)
-- ✅ Complete rewrite with FastAPI
-- ✅ React Frontend with Vite + TailwindCSS
-- ✅ Arabic RTL interface
-- ✅ WebSocket real-time communication
-- ✅ OpenAI GPT-4 integration
-- ✅ Modern component-based architecture
-- ✅ Axios for API calls
-- ✅ React Icons integration
-- ✅ Comprehensive requirements.txt
-- ✅ Windows encoding fixes
-
-<div dir="rtl">
-
-### الإصدار 2.0.0 (الحالي)
-- ✅ إعادة كتابة كاملة مع FastAPI
-- ✅ واجهة أمامية React مع Vite + TailwindCSS
-- ✅ واجهة عربية RTL
-- ✅ اتصال WebSocket مباشر
-- ✅ تكامل OpenAI GPT-4
-- ✅ بنية معمارية حديثة قائمة على المكونات
-- ✅ Axios للاتصال بالـ API
-- ✅ تكامل React Icons
-- ✅ requirements.txt شامل
-- ✅ إصلاحات ترميز Windows
-
-</div>
+# 🌊 موج — منصّة الموظفين الأذكياء لإدارة حسابات X
+
+**موج** منصّة وكلاء ذكية متعددة: تسجّل الدخول فيستقبلك **المنسّق العام** في شات واحد، ومن خلاله تدير
+فريقاً من **الموظفين الأذكياء** — كل موظف وكيل فرعي يدير حساب X بشخصيته وتخصصه ومهاراته وذاكرته
+وجدوله، ويعمل وحده على مدار اليوم: يرصد التايم لاين والترند والأخبار، يفهم ما يخص تخصصه، يقرّر،
+ينشر ويتفاعل، ثم يقيّم نفسه ويتعلّم.
+
+> **الوضع الحالي:** يعمل على هذا الجهاز (FastAPI + React)، والمزوّد الذكي OpenRouter.
+> التفاصيل المعمارية الكاملة (8 مخططات): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
-<div dir="rtl">
-
-**صنع بـ ❤️ باستخدام Python و FastAPI**
+## 🧭 كيف يعمل النظام
 
 </div>
 
-**Made with ❤️ using Python and FastAPI**
+```mermaid
+flowchart TB
+    OWNER(["👤 المالك"])
+
+    subgraph UI["① الواجهة — شات واحد"]
+        CHAT["💬 شات المنسّق العام<br/>@موظف · تثبيت موظف · بطاقة الموظف"]
+    end
+
+    subgraph GATE["② البوابة — عزل لكل مستخدم"]
+        AUTH["🔐 JWT في كل طلب وفي الـWebSocket<br/>الملكية من الخادم لا من المتصفح"]
+    end
+
+    subgraph BRAIN["③ التوجيه والعقول"]
+        ROUTER{"🔀 لمن الرسالة؟"}
+        COORD["🧭 المنسّق العام<br/>يوزّع المهام على الفريق حسب التخصص<br/>يعدّل الموظفين · يضيف مهارات وأدوات"]
+        EMPCHAT["🧑‍💼 الموظف نفسه<br/>يناقشك بصيغة المتكلم<br/>وينفّذ مهامك على حسابه"]
+    end
+
+    subgraph AEOS["④ AEOS — الموظفون يعملون وحدهم"]
+        direction LR
+        SCHED["⏰ المجدول<br/>يوقظ كل موظف في دوره"]
+        CYCLE["🔁 الدورة المعرفية<br/>رصد ← فهم ← قرار ← تنفيذ ← تعلّم"]
+        SCHED --> CYCLE
+    end
+
+    subgraph MEM["⑤ الذاكرة — معزولة لكل وكيل"]
+        direction LR
+        ST["قصيرة المدى<br/>آخر 12 رسالة + ملخّص"]
+        LT["طويلة المدى<br/>تفضيلات · تعليمات · دروس"]
+        KG["رسم معرفي<br/>Graphiti / Neo4j"]
+    end
+
+    subgraph WORLD["⑥ العالم الخارجي"]
+        direction LR
+        X["𝕏 منصة X<br/>قراءة بالمتصفح · نشر موثَّق"]
+        LLM["🧠 OpenRouter<br/>LLM · Embeddings · صور"]
+        TOOLS["🔌 بحث ويب · MCP خارجي"]
+    end
+
+    OWNER --> CHAT --> AUTH --> ROUTER
+    ROUTER -- "للفريق / عام" --> COORD
+    ROUTER -- "@موظف أو محادثته" --> EMPCHAT
+    COORD -- "يسند مهمة" --> CYCLE
+    EMPCHAT -- "ينفّذ مهمة" --> CYCLE
+    CYCLE <--> MEM
+    COORD <--> MEM
+    EMPCHAT <--> MEM
+    CYCLE --> X
+    CYCLE --> LLM
+    CYCLE --> TOOLS
+    CYCLE -. "تقدّم الدورة والنتائج لحظياً" .-> CHAT
+```
+
+<div dir="rtl">
+
+### دورة الموظف الذكي — ماذا يحدث في كل استيقاظ
+
+</div>
+
+```mermaid
+flowchart LR
+    subgraph OBS["👀 الرصد"]
+        O1["التايم لاين · ترندات X<br/>أهم البوستات · الأخبار<br/>المنشنات · أداء منشوراته"]
+    end
+    subgraph UND["🧠 الفهم"]
+        U1["تحليل المواضيع<br/>الصلة بالتخصص (دلالياً)<br/>× الأهمية (انتشار × حداثة)"]
+        U2["ذكاء الترند<br/>يفرز كل الترندات بمعرفة العالم<br/>ويقرأ تغريدات الأقوى"]
+    end
+    subgraph DEC["⚖️ القرار"]
+        D1["المهارات تقترح أفعالاً"]
+        D2["محرّك القرار<br/>المنفعة · الميزانيات اليومية"]
+        D3["حارس الشخصية<br/>المحظورات والقيم"]
+    end
+    subgraph ACT["⚡ التنفيذ"]
+        A1["نشر بالهاشتاق · اقتباس<br/>رد · إعجاب · متابعة · ثريد"]
+        A2["تحقّق فعلي من X<br/>لا نجاح بلا دليل"]
+    end
+    subgraph LRN["📈 التعلّم"]
+        L1["تقييم ذاتي للدورة<br/>دروس للدورة القادمة<br/>ذاكرة + رسم معرفي"]
+    end
+    OBS --> UND --> DEC --> ACT --> LRN
+    LRN -. "توجيهات تحسين" .-> DEC
+```
+
+<div dir="rtl">
+
+### مثال: من رسالتك إلى تغريدة منشورة
+
+</div>
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor M as 👤 المالك
+    participant UI as 💬 الشات
+    participant S as 🔐 الخادم
+    participant C as 🧭 المنسّق
+    participant E as 🧑‍💼 موظف السياسة
+    participant X as 𝕏 منصة X
+
+    M->>UI: «خلّ الفريق يغطي تصعيد البحر الأحمر»
+    UI->>S: WebSocket (هويتك من التوكن)
+    S->>C: رسالة للفريق
+    C->>C: يقرأ تخصص كل موظف + ذاكرتك
+    C->>E: يسند الموضوع لموظف السياسة فقط
+    C-->>UI: «أسندت الموضوع لـ@emaad — النتيجة تصلك هنا»
+    E->>X: يقرأ الترند والتغريدات الحيّة
+    E->>E: يفهم · يختار الزاوية · يكتب بأسلوبه
+    E->>X: ينشر بالهاشتاق
+    X-->>E: تأكيد النشر (رابط حقيقي)
+    E-->>UI: ✅ نُشر + الرابط
+```
+
+<div dir="rtl">
+
+---
+
+## ✨ المميزات
+
+### 🧭 المنسّق العام (الوكيل الرئيسي)
+- شات واحد تدير منه الفريق كاملاً بلغتك الطبيعية.
+- **توجيه هجين:** الأوامر الواضحة تُنفَّذ مباشرة، و`@موظف` يخاطب الموظف نفسه، والطلبات العامة يتولاها المنسّق.
+- يوزّع المهام حسب التخصص، ويعدّل الموظفين (الشخصية، الجدول، الاهتمامات) **دون لمس ما لم تطلبه**.
+- يضيف مهارات وأدوات، ويستنسخ هويات، ويتذكّر تفضيلاتك عبر الجلسات. **لا يحذف موظفاً أبداً.**
+
+### 🧑‍💼 الموظفون الأذكياء (الوكلاء الفرعيون)
+- كل موظف: حساب X + شخصية + تخصص + مهارات + أدوات + ذاكرة + جدول عمل.
+- **تحليل مواضيع دلالي:** يفهم المعنى لا الكلمات، ويرتّب بالأهمية الحقيقية (مشاهدات، تفاعل، حداثة).
+- **ذكاء الترند:** يكتشف الهاشتاق الذي يخص تخصصه (مثلاً `#الحوثي` لموظف سياسة) ولو لم يحوِ أي كلمة مفتاحية، ويقرأ تغريداته، ويختار المشاركة الصحيحة: منشور بالهاشتاق، أو اقتباس للتغريدة المحورية، أو رد.
+- **استنساخ الهوية بعمق:** بصمة صوت من التغريدات والردود مع سياقها، ودليل ردود حسب نبرة المخاطَب.
+- **ناقشه مباشرة:** `@الموظف` يفتح نقاشاً معه بصيغة المتكلم، وينفّذ ما تطلبه.
+- **يتعلّم من نفسه:** تقييم بعد كل دورة، ودروس تُطبَّق في الدورة التالية.
+
+### 🧠 الذاكرة
+- **قصيرة المدى:** آخر 12 رسالة حرفياً + ملخّص متدحرج لما قبلها (محادثات طويلة بلا تضخّم).
+- **طويلة المدى:** تفضيلات وتعليمات وقرارات تُستخرج تلقائياً من كلامك أنت فقط، مع دمج للمكرّر واسترجاع بالصلة والأهمية.
+- **رسم معرفي زمني** (Graphiti/Neo4j) لحقائق الحسابات والعلاقات.
+- **عزل تام:** لا يرى موظف ذاكرة زميله، ولا يرى أحد ذاكرة المنسّق إلا مالكها. حذف أي مالك يمحو كل ما يخصه.
+
+### 🔌 المهارات والأدوات
+- 11 مهارة مدمجة + **مهارات مخصّصة** تكتبها بلغتك («كل صباح ردّ على أهم تغريدة عن النفط»).
+- **بحث ويب حقيقي** (Tavily / Brave / SerpAPI) قبل الكتابة.
+- **خوادم MCP خارجية** (stdio / HTTP) بقوائم بيضاء للأدوات.
+
+### 🔐 الأمان والعزل
+- تسجيل دخول إلزامي على كل نقطة، والهوية من التوكن فقط (لا يُصدَّق أي `user_id` من المتصفح).
+- كل مستخدم يرى موظفيه وحساباته ومحادثاته وذاكرته فقط، وغير المالك يرى «غير موجود».
+- روابط الإشعارات الداخلية موقّعة، وكل الخوادم تعمل على هذا الجهاز فقط افتراضياً.
+- **لا يُعلَن نجاح أي فعل على X دون تحقّق فعلي** (حتى على مستوى استجابات الشبكة للثريدات).
+
+---
+
+## 🚀 التشغيل
+
+### المتطلبات
+| المكوّن | الإصدار | ملاحظة |
+|---|---|---|
+| Python | 3.12 | البيئة الافتراضية `venv\` |
+| Node.js | 18 أو أحدث | للواجهة |
+| Playwright + Chromium | — | قراءة X والنشر عليه |
+| مفتاح OpenRouter | — | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| Neo4j | اختياري | الرسم المعرفي (Graphiti) |
+| Redis | اختياري | إبطال التوكنات عند تسجيل الخروج |
+
+### التثبيت
+
+</div>
+
+```powershell
+git clone https://github.com/Mrsos07/Moj-Agentic-AI.git
+cd Moj-Agentic-AI
+
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m playwright install chromium
+
+cd frontend; npm install; cd ..
+copy .env.example .env      # ثم عدّل القيم
+```
+
+<div dir="rtl">
+
+### أهم متغيرات `.env`
+
+| المتغير | الوصف |
+|---|---|
+| `OPENROUTER_API_KEY` | **مطلوب** — مفتاح المزوّد الذكي |
+| `OPENROUTER_MODEL` | الموديل **مؤهّلاً بالمزوّد**: `openai/gpt-4o-mini` (لا `gpt-4`) |
+| `JWT_SECRET_KEY` | **مطلوب** — 32 حرفاً على الأقل (وإلا تنتهي الجلسات مع كل تشغيل) |
+| `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPAPI_KEY` | أحدها لتفعيل البحث على الويب |
+| `OPENROUTER_EMBEDDING_MODEL` | لا تغيّره بعد بدء الاستخدام: يغيّر أبعاد المتجهات |
+| `BIND_HOST` / `VITE_HOST` | `0.0.0.0` لإتاحة النظام لأجهزة أخرى (الافتراضي: هذا الجهاز فقط) |
+
+### التشغيل
+
+</div>
+
+```powershell
+# الخادم (يشغّل AEOS ويستدعي خوادم X الداخلية تلقائياً)
+.\venv\Scripts\python.exe run.py
+
+# الواجهة — في نافذة ثانية
+cd frontend; npm run dev
+```
+
+<div dir="rtl">
+
+افتح **http://localhost:3000** وسجّل الدخول.
+
+| الخدمة | المنفذ |
+|---|---|
+| الواجهة (Vite) | 3000 |
+| الخادم الرئيسي (FastAPI + WebSocket) | 8000 |
+| X Suite — تنفيذ أفعال X | 5789 |
+| LoginX — تسجيل دخول الحسابات | 5000 |
+| Identity — توليد الهويات | 5990 |
+| Neo4j (اختياري) | 7687 |
+
+---
+
+## 💬 أمثلة من الشات
+
+| تكتب | يحدث |
+|---|---|
+| `وش وضع الفريق اليوم؟` | المنسّق يعرض أداء كل موظف بأرقام حقيقية |
+| `خلّ الفريق يغطي قمة الرياض` | المنسّق يسند الموضوع للموظف المختص |
+| `@emaad5079` | الموظف يرحّب ويقترح مهاماً من واقع بياناته |
+| `@emaad5079 وش رأيك نسوي سلسلة عن اليمن؟` | نقاش مع الموظف نفسه |
+| `@emaad5079 روح للتايم لاين ورد على أهم تغريدة سياسية` | مهمة حرّة يختار هدفها بنفسه |
+| `خلّ عماد يشتغل كل 45 دقيقة` | تعديل الجدول فقط دون لمس غيره |
+| `أضف لعماد مهارة: كل صباح علّق على أهم خبر نفط` | مهارة مخصّصة تعمل تلقائياً |
+| `استنسخ هوية @فلان لعماد` | بصمة صوت كاملة في الخلفية + درجة المطابقة |
+| `تذكّر دائماً: ما نكتب عن الرياضة` | ذاكرة دائمة يلتزم بها الفريق |
+
+---
+
+## 🗂️ بنية المشروع
+
+</div>
+
+```
+Moj-Agentic-AI/
+├── run.py                       # تشغيل الخادم (إعادة تحميل ذاتية الإصلاح)
+├── app/
+│   ├── main.py                  # FastAPI · WebSocket · التوجيه الهجين
+│   ├── auth/                    # JWT · ownership.py (العزل) · internal.py (callbacks موقّعة)
+│   ├── api/                     # REST: الحسابات · المحادثات · X · الجدولة · المشرف
+│   ├── aeos/                    # نظام تشغيل الموظفين الأذكياء
+│   │   ├── bootstrap.py         #   تركيب المنصة: الأطوار · الخوادم · القدرات · المهارات
+│   │   ├── services/            #   orchestrator.py (المنسّق) · الاستنساخ · الأدوات
+│   │   ├── cognition/           #   الدورة المعرفية (18 طوراً) · التقييم الذاتي
+│   │   ├── employee/            #   النماذج · topic_intel · trend_intel · voice_profile · strategy
+│   │   ├── skills/              #   المهارات المدمجة والمخصّصة
+│   │   ├── capabilities/        #   34 قدرة (نشر · رد · اقتباس · بحث · ...)
+│   │   ├── decision/            #   محرّك القرار والميزانيات
+│   │   ├── mcp/servers/         #   X · Playwright · محتوى · بحث · صور · MCP خارجي
+│   │   ├── memory/              #   agent_memory · lifecycle · Graphiti
+│   │   └── api/routes.py        #   /api/aeos/*
+│   ├── x/                       # X Suite (5789) و LoginX (5000)
+│   └── core/llm_provider.py     # resolve_llm() — مصدر وحيد لإعدادات المزوّد
+├── frontend/src/                # React: ChatInterface · TeamBar · AgentsDrawer · ...
+├── docs/ARCHITECTURE.md         # المعمارية التفصيلية (8 مخططات)
+├── AGENTS.md                    # ملاحظات تقنية لمن يطوّر المشروع
+└── verify_*.py                  # فحوص التحقق (بلا نشر على X)
+```
+
+<div dir="rtl">
+
+---
+
+## ✅ فحوص التحقق
+
+كلها تعمل **بلا نشر على X** وأغلبها بلا شبكة، وبعضها على قاعدة بيانات مؤقتة:
+
+</div>
+
+```powershell
+$env:PYTHONUTF8=1
+foreach ($v in 'verify_isolation','verify_trend_intel','verify_memory','verify_coordinator',
+               'verify_voice','verify_tools','verify_creator','verify_interaction',
+               'verify_custom_skill','verify_mission','verify_critique') {
+  .\venv\Scripts\python.exe "$v.py"
+}
+cd frontend; npm run build
+```
+
+<div dir="rtl">
+
+| الفحص | يتحقق من |
+|---|---|
+| `verify_isolation.py` | كل نقاط الـAPI ترفض المجهول (تعداد تلقائي)، وعدم تسرّب أي بيانات بين المستخدمين، وعدم ترك ذاكرة يتيمة |
+| `verify_trend_intel.py` | اكتشاف الترند المرتبط بالتخصص وطريقة المشاركة الصحيحة |
+| `verify_memory.py` | الذاكرة قصيرة وطويلة المدى والعزل بين الوكلاء |
+| `verify_coordinator.py` | أدوات المنسّق ووضع الموظف المخاطَب |
+| `verify_openrouter.py` | إعداد المزوّد الذكي (`--config-only` بلا شبكة) |
+
+---
+
+## 🛠️ حل المشاكل
+
+| العَرَض | السبب والحل |
+|---|---|
+| `ECONNREFUSED 127.0.0.1:8000` في Vite لثوانٍ | الخادم يعيد التحميل بعد تعديل الكود — ينتهي وحده |
+| المنفذ 8000 يقبل الاتصال ولا يرد | عملية إعادة تحميل عالقة — أعد تشغيل `run.py` (ينظّف المنفذ تلقائياً) |
+| `charmap codec` عند طباعة العربية | `$env:PYTHONUTF8=1` قبل تشغيل السكربتات |
+| كل ردود الذكاء فارغة | اسم الموديل غير مؤهّل — استخدم `openai/gpt-4o-mini` |
+| الواجهة تعيدك لتسجيل الدخول | انتهت صلاحية التوكن أو تغيّر `JWT_SECRET_KEY` |
+| لا يمكن فتح النظام من جهاز آخر | مقصود — اضبط `BIND_HOST=0.0.0.0` و`VITE_HOST=0.0.0.0` |
+
+---
+
+## 📚 مراجع
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — المعمارية التفصيلية: التوجيه، الدورة المعرفية، الذاكرة، العزل، MCP.
+- [`AGENTS.md`](AGENTS.md) — قواعد تقنية مهمة للتطوير (المزوّد، الرسم المعرفي، التحقق من أفعال X).
+
+**المطوّر:** [@Mrsos07](https://github.com/Mrsos07)
+
+</div>
