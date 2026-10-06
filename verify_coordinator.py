@@ -145,6 +145,29 @@ boom = Boom([[_call(1, "order_publish", {"employee": "alpha", "topic": "x"})]])
 out = O.handle("انشر", 1, client_factory=lambda: (boom, "m"))
 check("يعيد تنبيهاً بما نُفّذ", out and "order_publish" in out["message"] and out["dispatched"] == ["alpha"])
 
+print("6) وضع الموظف المخاطَب مباشرة (@ أو محادثته)")
+alpha = O.resolve_employee("alpha", 1)
+schemas = O._employee_tool_schemas()
+names = {t["function"]["name"] for t in schemas}
+check("أدوات الموظف بلا إدارة الفريق (لا list_employees/clone/attach/forget)",
+      not names & {"list_employees", "clone_identity", "attach_tool", "forget"} and "order_mission" in names)
+check("مخطط أدوات الموظف بلا وسيط employee",
+      all("employee" not in t["function"]["parameters"].get("properties", {}) for t in schemas))
+dispatched.clear()
+et = O._Tools(1, "انشر عن الطقس", only_employee=alpha)
+r = json.loads(et.call("order_publish", json.dumps({"employee": "beta", "topic": "الطقس"})))
+check("الأداة تُفرض على الموظف المخاطَب حتى لو طلب الموديل زميله",
+      r.get("employee") == "alpha" and [d[0] for d in dispatched] == ["alpha"])
+check("أداة خارج قائمة الموظف مرفوضة", "error" in json.loads(et.call("list_employees", "{}")))
+fake = FakeClient(["أهلاً! أنا أحمد، اليوم نشرت منشوراً واحداً. أقترح: ..."])
+out = O.handle(O.CALL_ONLY, 1, employee=alpha, client_factory=lambda: (fake, "m"))
+sysmsg = fake.seen[0]["messages"][0]["content"]
+check("الموظف يتحدث بنفسه: موجّه بصيغة المتكلم ومالكه هو المخاطِب",
+      out and "@alpha" in sysmsg and "مالكك" in sysmsg and "@beta" not in sysmsg)
+check("النداء بلا رسالة له تعليمات ترحيب واقتراح", O.CALL_ONLY in sysmsg)
+check("الموظف يُمنع من طلب رابط تغريدة بلا داعٍ", "لا تطلب رابط تغريدة" in sysmsg)
+check("أدوات الموظف هي المرسلة للموديل", {t["function"]["name"] for t in fake.seen[0]["tools"]} == names)
+
 print()
 if FAILED:
     print(f"❌ {len(FAILED)} فحص فشل: {FAILED}")

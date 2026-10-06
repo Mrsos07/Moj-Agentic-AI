@@ -631,13 +631,13 @@ def _maybe_handle_employee_command(message: str, pinned_account: Optional[str],
 
 
 async def _run_coordinator(message: str, user_id, pinned: Optional[str], db,
-                           session_id: Optional[str]) -> Optional[Dict[str, Any]]:
+                           session_id: Optional[str], employee=None) -> Optional[Dict[str, Any]]:
     """المنسّق العام في خيط منفصل: حلقة الأدوات تأخذ عدة نداءات LLM، وتشغيلها
     داخل حلقة الأحداث كان سيجمّد كل اتصالات الشات الأخرى حتى تنتهي."""
     try:
         return await asyncio.to_thread(
             orchestrator.handle, message, _norm_uid(user_id),
-            pinned=pinned, db=db, session_id=session_id)
+            pinned=pinned, db=db, session_id=session_id, employee=employee)
     except Exception as e:  # noqa: BLE001
         print(f"Warning: coordinator failed: {e}")
         return None
@@ -1058,9 +1058,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 # الأمر لأن الأنماط الحتمية مثبّتة على بداية النص («^انشر عن …»).
                 effective_pin = pinned_account
                 route_message = user_message
+                # موظف «مخاطَب مباشرة»: مذكور بـ@ أو هذه محادثته الخاصة (emp_<handle>).
+                # المالك يكلّم الموظف نفسه، فلا يجوز أن يلتقط الرسالةَ مصنّفُ نوايا X
+                # القديم — قيس: «@liketoday5 …» صُنّفت «لايك» (اليوزر يحوي like) فطُلب
+                # رابط تغريدة بدل النقاش.
+                addressed = None
                 if len(team_mentions) == 1:
-                    effective_pin = team_mentions[0].account_username
-                    route_message = orchestrator.strip_mentions(user_message, team_mentions) or user_message
+                    addressed = team_mentions[0]
+                    effective_pin = addressed.account_username
+                    route_message = orchestrator.strip_mentions(user_message, team_mentions)
+                elif session_id and str(session_id).startswith("emp_"):
+                    addressed = orchestrator.resolve_employee(str(session_id)[4:], _norm_uid(user_id))
+                    if addressed is not None:
+                        effective_pin = addressed.account_username
+                if addressed is None and not route_message:
+                    route_message = user_message
 
                 # بناء الـ metadata: المرفق + الحساب المثبّت من الشات
                 agent_metadata = {}
@@ -1093,6 +1105,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     (lambda: _maybe_answer_employee_query(route_message, effective_pin),
                      "aeos_employee_query"),
                 )
+                if addressed is not None:
+                    # مسارات التنفيذ الحتمية فقط (1–6)؛ النقاش والمهام الحرة للموظف نفسه
+                    employee_routes = employee_routes[:-1] if route_message else ()
                 handled = False
                 for route, intent_name in employee_routes:
                     reply = route()
@@ -1108,6 +1123,26 @@ async def websocket_endpoint(websocket: WebSocket):
                         break
                 if handled:
                     continue
+
+                # ── الموظف المخاطَب يرد بنفسه: يناقش، ويقترح، وينفّذ المهام بأدواته ──
+                if addressed is not None:
+                    emp = await _run_coordinator(route_message or orchestrator.CALL_ONLY, user_id,
+                                                 None, db, session_id, employee=addressed)
+                    if emp:
+                        await _send_employee_reply(
+                            websocket, db, user_id, session_id, user_message, emp["message"],
+                            "aeos_employee_agent", "AEOS",
+                            {"agent": "AEOS", "dispatched": emp["dispatched"]},
+                            employee_handle=addressed.account_username)
+                        continue
+                    # بلا LLM: النقاش القديم المؤصَّل ببياناته (لا مصنّف نوايا X)
+                    fallback = (_maybe_answer_employee_query(route_message or "مرحبا", effective_pin)
+                                or _employee_open_discussion(route_message or "مرحبا", effective_pin))
+                    if fallback:
+                        await _send_employee_reply(
+                            websocket, db, user_id, session_id, user_message, fallback,
+                            "aeos_employee_discussion", "AEOS", employee_handle=effective_pin)
+                        continue
 
                 # استخدام نظام الوكلاء الذكية مع الذاكرة
                 try:
