@@ -18,7 +18,7 @@ import time
 from app.x.modules.x_post import post_to_x
 from app.x.modules.x_profile import update_profile_on_x
 from app.x.modules.utils import download_to_temp, is_url, safe_label
-from app.auth.dependencies import get_current_user
+from app.auth.ownership import label_or_404, require_user as get_current_user, visible_labels
 from app.db.models import User
 
 router = APIRouter(prefix="/api/x", tags=["X Platform"])
@@ -141,9 +141,25 @@ class XProfileUpdateRequest(BaseModel):
     headless: bool = Field(default=True, description="تشغيل المتصفح في الخلفية")
 
 
+def _register_owner(label: str, filename: str, user_id: int) -> None:
+    """سجّل ملكية الحساب للمستخدم الرافع (مصدر ``label_owner_ids``)."""
+    from app.db.database import SessionLocal
+    from app.services.account_service import account_service
+
+    db = SessionLocal()
+    try:
+        if not account_service.get_account_by_username(db=db, user_id=user_id, platform="x",
+                                                       username=label):
+            account_service.create_account(db=db, user_id=user_id, platform="x", username=label,
+                                           display_name=label, account_label=label,
+                                           cookie_filename=filename)
+    finally:
+        db.close()
+
+
 @router.post("/login")
 async def x_login_disabled(
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     تسجيل الدخول بالباسورد معطّل.
@@ -165,7 +181,7 @@ class XLoginCredentialsRequest(BaseModel):
 @router.post("/login-credentials")
 async def x_login_credentials(
     request: XLoginCredentialsRequest,
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     تسجيل دخول حساب X باسم المستخدم/كلمة المرور عبر خادم loginx.
@@ -178,11 +194,15 @@ async def x_login_credentials(
     username = (request.username or "").strip().lstrip("@")
     if not username or not (request.password or "").strip():
         raise HTTPException(status_code=400, detail="اسم المستخدم وكلمة المرور مطلوبان")
+    # حساب مسجّل لمستخدم آخر لا يُعاد ربطه (كان الدخول يكتب فوق كوكيزه)
+    if (COOKIES_DIR / f"{safe_label(username)}.json").exists():
+        label_or_404(safe_label(username), current_user)
 
     result = x_login_account(
         username=username,
         password=request.password.strip(),
         email=(request.email or "").strip(),
+        user_id=current_user.id,  # الحساب يُسجَّل باسم من بدأ الدخول فيظهر له وحده
     )
     if not result.get("success"):
         raise HTTPException(
@@ -201,7 +221,7 @@ async def x_login_credentials(
 async def x_upload_cookies(
     cookie_file: UploadFile = File(..., description="ملف كوكيز الحساب (JSON)"),
     label: Optional[str] = Form(None, description="اسم الحساب (اختياري — إذا لم يُحدد يُستخدم اسم الملف)"),
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     رفع ملف كوكيز لحساب X وحفظه بصيغة Playwright.
@@ -227,6 +247,9 @@ async def x_upload_cookies(
         
         if not account_name:
             raise HTTPException(status_code=400, detail="اسم الحساب فارغ")
+        # لا يكتب مستخدم فوق كوكيز حساب يملكه غيره (كان الرفع يستبدل الملف بصمت)
+        if (COOKIES_DIR / f"{account_name}.json").exists():
+            label_or_404(account_name, current_user)
         
         # تحويل إلى صيغة Playwright
         playwright_data = _convert_to_playwright_format(cookies_data)
@@ -240,6 +263,7 @@ async def x_upload_cookies(
         dst = COOKIES_DIR / f"{account_name}.json"
         with open(dst, 'w', encoding='utf-8') as f:
             json.dump(playwright_data, f, ensure_ascii=False, indent=2)
+        _register_owner(account_name, dst.name, current_user.id)
         
         return XUploadCookiesResponse(
             success=True,
@@ -261,7 +285,7 @@ async def x_upload_cookies(
 @router.post("/post", response_model=XPostResponse)
 async def x_post(
     request: XPostRequest,
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     نشر تغريدة على X
@@ -274,7 +298,7 @@ async def x_post(
         نتيجة النشر
     """
     try:
-        label = safe_label(request.label)
+        label = label_or_404(safe_label(request.label), current_user)
         cookie_file = COOKIES_DIR / f"{label}.json"
         
         if not cookie_file.exists():
@@ -323,7 +347,7 @@ async def x_post(
 @router.post("/profile/update")
 async def x_profile_update(
     request: XProfileUpdateRequest,
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     تحديث الملف الشخصي على X
@@ -336,7 +360,7 @@ async def x_profile_update(
         نتيجة التحديث
     """
     try:
-        label = safe_label(request.label)
+        label = label_or_404(safe_label(request.label), current_user)
         cookie_file = COOKIES_DIR / f"{label}.json"
         
         if not cookie_file.exists():
@@ -399,7 +423,7 @@ async def x_profile_update(
 
 @router.get("/accounts")
 async def list_x_accounts(
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     عرض قائمة حسابات X المحفوظة
@@ -411,7 +435,10 @@ async def list_x_accounts(
         accounts = []
         
         if COOKIES_DIR.exists():
-            for cookie_file in COOKIES_DIR.glob("*.json"):
+            files = {f.stem: f for f in COOKIES_DIR.glob("*.json")}
+            # كل مستخدم يرى حساباته فقط (كانت تُعرض كل ملفات الكوكيز لأي مستخدم)
+            for label in visible_labels(files, current_user):
+                cookie_file = files[label]
                 accounts.append({
                     "label": cookie_file.stem,
                     "filename": cookie_file.name,
@@ -435,7 +462,7 @@ async def list_x_accounts(
 @router.delete("/accounts/{label}")
 async def delete_x_account(
     label: str,
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     حذف حساب X
@@ -448,7 +475,7 @@ async def delete_x_account(
         نتيجة الحذف
     """
     try:
-        label = safe_label(label)
+        label = label_or_404(safe_label(label), current_user)
         cookie_file = COOKIES_DIR / f"{label}.json"
         
         if not cookie_file.exists():

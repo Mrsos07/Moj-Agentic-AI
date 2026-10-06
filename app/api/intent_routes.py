@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from app.services.intent_service import intent_service, IntentType, Platform
-from app.auth.dependencies import get_current_user
+from app.auth.ownership import require_user as get_current_user
 from app.db.models import User
 
 router = APIRouter(prefix="/api/intent", tags=["Intent Recognition"])
@@ -54,7 +54,7 @@ class IntentListResponse(BaseModel):
 @router.post("/detect", response_model=IntentResponse)
 async def detect_intent(
     request: IntentRequest,
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     التعرف على نية المستخدم من النص
@@ -135,7 +135,7 @@ async def list_supported_intents():
 @router.post("/batch", response_model=List[IntentResponse])
 async def detect_batch_intents(
     requests: List[IntentRequest],
-    current_user: Optional[User] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     التعرف على نوايا متعددة دفعة واحدة

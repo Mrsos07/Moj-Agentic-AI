@@ -1,7 +1,7 @@
 # معمارية نظام Moj Agentic AI
 
 > مخططات Mermaid تُعرض مباشرة على GitHub وفي VS Code (إضافة Markdown Preview Mermaid).
-> مطابقة للكود عند الـ commit `fe371049`.
+> مطابقة للكود الحالي (تشمل طبقة العزل الموحّدة ودورة حياة الذاكرة وذكاء الترند).
 
 ---
 
@@ -223,6 +223,68 @@ flowchart TB
 
 ---
 
+## 4.5) العزل والأمان — طبقة ملكية موحّدة
+
+كل نقطة دخول تمرّ بنفس السياسة (`app/auth/ownership.py`): **الهوية من التوكن، والملكية من الخادم**.
+`user_id` المرسل في جسم الطلب أو في رسالة الـWebSocket يُتجاهل دائماً، وغير المالك يرى **404** لا 403.
+
+```mermaid
+flowchart LR
+    subgraph IN["نقاط الدخول"]
+        direction TB
+        REST["REST /api/*<br/>95 نقطة محمية"]
+        WSK["/ws/chat?token=…<br/>رفض بـ4401 بلا توكن صالح"]
+        CB["callbacks داخلية<br/>loginx · ناشر الجدولة"]
+    end
+
+    subgraph POL["app/auth/ownership.py — سياسة واحدة"]
+        direction TB
+        RU["require_user<br/>JWT صالح + غير مُبطَل + مستخدم نشط"]
+        OE["owns_employee<br/>employee.user_id = user"]
+        OL["owns_label (حساب X/كوكيز)<br/>social_accounts أو موظف مملوك"]
+        OC["conversation_or_404<br/>conversation.user_id = user"]
+        ADM["is_admin يتجاوز صراحةً"]
+    end
+
+    SIG["app/auth/internal.py<br/>رابط callback موقّع HMAC<br/>(الغرض + المعرّف)"]
+
+    REST --> RU --> OE & OL & OC
+    WSK --> RU
+    WSK -- "pinned_account" --> OL
+    CB --> SIG
+
+    subgraph DATA["البيانات المعزولة"]
+        direction TB
+        D1["الموظفون وسجلاتهم وذاكرتهم"]
+        D2["كوكيز الحسابات — نشر/حذف/تعديل/جدولة"]
+        D3["المحادثات (البحث بالجلسة ضمن المالك)"]
+        D4["ذاكرة المنسّق coordinator:&lt;user&gt;"]
+    end
+    OE --> D1
+    OL --> D2
+    OC --> D3
+    RU --> D4
+
+    NET["الشبكة: كل الخوادم على 127.0.0.1<br/>BIND_HOST / VITE_HOST للإتاحة صراحةً"]
+```
+
+**فحص لياقة دائم:** `verify_isolation.py` يعدّد كل نقاط التطبيق تلقائياً، ويفشل إن ظهرت نقطة جديدة
+تقبل طلباً مجهولاً أو وصل مستخدم لبيانات غيره.
+
+### دورة حياة الذاكرة — لا بيانات يتيمة
+
+```mermaid
+flowchart TB
+    DE["حذف موظف"] --> P1["معاملة واحدة: execution_logs · employee_memories<br/>execution_jobs · agent_memories employee:&lt;id&gt;"]
+    DE --> P2["مسح رسمه المعرفي (Graphiti)"]
+    DC["حذف محادثة"] --> P3["حذف ملخّصها conv:&lt;id&gt;<br/>(SQLite يعيد استخدام المعرّف — بلا هذا<br/>ترث محادثة جديدة ملخّص غيرها)"]
+    DU["حذف مستخدم (مشرف)"] --> P4["purge_user: موظفوه ← كل ما سبق<br/>محادثاته ورسائلها وملخّصاتها<br/>ذاكرة منسّقه · سجلات حساباته"]
+    OV["GET /api/aeos/memory/overview"] --> V["صورة موحّدة لكل أنظمة الذاكرة<br/>للموظف أو للمنسّق"]
+    OR["lifecycle.orphan_report()"] --> V2["تشخيص: بيانات بلا مالك موجود"]
+```
+
+---
+
 ## 5) الأدوات وخوادم MCP
 
 ```mermaid
@@ -251,10 +313,13 @@ flowchart LR
 
 ## 6) العمليات والمنافذ
 
+كل الخوادم تستمع على `127.0.0.1` فقط (هذا الجهاز). للإتاحة على الشبكة صراحةً: `BIND_HOST=0.0.0.0`
+للخادم والخوادم الداخلية، و`VITE_HOST=0.0.0.0` للواجهة.
+
 | العملية | المنفذ | الدور |
 |---|---|---|
 | `run.py` → FastAPI (uvicorn + إعادة تحميل ذاتية الإصلاح) | 8000 | الخادم الرئيسي، WebSocket، API، AEOS |
-| `frontend` → Vite | 3000 | الواجهة (يمرّر `/api` و`/ws` إلى 8000) |
+| `frontend` → Vite | 3000 | الواجهة (يمرّر `/api` و`/ws` إلى 8000؛ التوكن يُرفق مركزياً في `apiAuth.js`) |
 | `app/x/app.py` (X Suite) | 5789 | تنفيذ أفعال X بالمتصفح — يُعاد تشغيله تلقائياً عند الحاجة |
 | `app/x/loginx` | 5000 | تسجيل دخول حسابات X |
 | Identity server | 5990 | توليد الهويات |
@@ -272,5 +337,8 @@ flowchart LR
 | `app/aeos/employee/topic_intel.py` | تحليل المواضيع (صلة + أهمية) |
 | `app/aeos/employee/voice_profile.py` · `services/persona_clone.py` | استنساخ الهوية |
 | `app/aeos/memory/agent_memory.py` | الذاكرة قصيرة وطويلة المدى |
+| `app/aeos/memory/lifecycle.py` | دورة حياة الذاكرة: الصورة الموحّدة، المحو، تقرير الأيتام |
+| `app/auth/ownership.py` · `internal.py` | طبقة العزل الموحّدة · روابط callback الموقّعة |
+| `app/aeos/employee/trend_intel.py` | ذكاء الترند والمشاركة فيه |
 | `app/aeos/mcp/servers/` | خوادم الأدوات (منها `external_mcp.py`) |
 | `app/core/llm_provider.py` | `resolve_llm()` — مصدر وحيد لإعدادات OpenRouter |

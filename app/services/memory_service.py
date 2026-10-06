@@ -39,11 +39,14 @@ class MemoryService:
         """
         conversation = None
         
-        # البحث عن محادثة موجودة
+        # البحث عن محادثة موجودة — **ضمن مالكها**: معرّفات الجلسات متوقَّعة
+        # («emp_<handle>»)، والبحث بالجلسة وحدها كان يُسلّم مستخدماً محادثة مستخدم آخر
+        # بنفس الاسم: يقرأ سجلها، ويُحقن في سياق النموذج، وتُكتب رسائله داخلها.
         if session_id:
-            conversation = db.query(Conversation).filter(
-                Conversation.session_id == session_id
-            ).first()
+            q = db.query(Conversation).filter(Conversation.session_id == session_id)
+            if user_id:
+                q = q.filter(Conversation.user_id == user_id)
+            conversation = q.first()
         
         if not conversation and user_id:
             # البحث عن آخر محادثة للمستخدم
@@ -288,6 +291,10 @@ class MemoryService:
         conversation = query.first()
         
         if conversation:
+            from app.aeos.memory.agent_memory import purge_conversation
+
+            # الملخّص يُحذف في المعاملة نفسها (انظر purge_conversation)
+            purge_conversation(conversation.id, db)
             db.delete(conversation)
             db.commit()
             return True

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "كنق الاتمته - Chatbot"
     VERSION: str = "1.0.0"
     DEBUG: bool = True
-    HOST: str = "0.0.0.0"
+    HOST: str = "127.0.0.1"
     PORT: int = 8000
 
     # ── المزوّد الأساسي: OpenRouter ─────────────────────────────────────

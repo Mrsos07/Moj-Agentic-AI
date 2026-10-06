@@ -272,6 +272,11 @@ async def delete_user(
             detail="Cannot delete your own account"
         )
     
+    # كل ما يخص المستخدم يُمحى معه: كان الحذف يترك موظفيه يعملون بلا مالك، ومحادثاته
+    # وذاكرة منسّقه يتيمة في قاعدة البيانات (app.aeos.memory.lifecycle)
+    from app.aeos.memory.lifecycle import purge_user
+
+    purge_user(user.id, db)
     db.delete(user)
     db.commit()
     

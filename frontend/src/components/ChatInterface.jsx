@@ -240,7 +240,9 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/chat`
+    // الخادم يوثّق الاتصال بالتوكن ويتجاهل أي user_id في الرسائل
+    const token = localStorage.getItem('token') || ''
+    const wsUrl = `${protocol}//${window.location.host}/ws/chat?token=${encodeURIComponent(token)}`
     
     const websocket = new WebSocket(wsUrl)
 
@@ -264,10 +266,18 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       console.error('WebSocket error:', error)
     }
 
-    websocket.onclose = () => {
+    websocket.onclose = (event) => {
       console.log('WebSocket disconnected')
       setIsConnected(false)
       stopHeartbeat()
+      // 4401 = التوكن مرفوض/منتهٍ: إعادة الاتصال بلا جدوى — أعِد المستخدم لتسجيل الدخول
+      if (event?.code === 4401) {
+        wsRef.current = null
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        window.location.assign('/login')
+        return
+      }
       // أعد الاتصال فقط إن كان هذا هو السوكت النشط (ليس إغلاقاً مقصوداً
       // من التنظيف ولا سوكتاً قديماً استُبدل) — يمنع تراكم الاتصالات المكررة
       if (wsRef.current === websocket) {

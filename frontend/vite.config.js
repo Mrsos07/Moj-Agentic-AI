@@ -4,9 +4,10 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: '0.0.0.0',
+    // هذا الجهاز فقط (VITE_HOST=0.0.0.0 للإتاحة على الشبكة صراحةً)
+    host: process.env.VITE_HOST || '127.0.0.1',
     port: 3000,
-    allowedHosts: true,
+    allowedHosts: process.env.VITE_HOST ? true : ['localhost', '127.0.0.1'],
     proxy: {
       '/ws': {
         // 127.0.0.1 صراحةً: الباك إند يستمع على IPv4 فقط، وNode يحوّل localhost إلى ::1

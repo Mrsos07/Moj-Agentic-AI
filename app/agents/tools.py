@@ -650,7 +650,10 @@ def x_login_account(username: str, password: str, email: str = "", headless: boo
         # إرسال طلب التسجيل + callback_url لاستلام إشعار اكتمال في الشات
         headers = {"X-API-Key": LOGINX_API_KEY, "Content-Type": "application/json"}
         # موج يشتغل افتراضياً على 8000 — يقبل callback من localhost فقط
-        callback_url = "http://127.0.0.1:8000/api/internal/login-callback"
+        from app.auth.internal import signed_url
+
+        callback_url = signed_url("http://127.0.0.1:8000/api/internal/login-callback",
+                                  "login", user_id)
         payload = {
             "username": username, "password": password, "email": email,
             "headless": headless, "user_id": user_id,

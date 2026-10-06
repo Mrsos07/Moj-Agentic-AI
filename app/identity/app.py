@@ -2,6 +2,7 @@ from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+import os
 import random
 import logging
 from datetime import datetime
@@ -388,4 +389,4 @@ def server_error(e):
 
 
 if __name__ == '__main__':
-    app.run(debug=Config.DEBUG, host='0.0.0.0', port=5990)
+    app.run(debug=Config.DEBUG, host=os.getenv('BIND_HOST', '127.0.0.1'), port=5990)
