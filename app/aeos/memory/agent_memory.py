@@ -84,6 +84,8 @@ _MAX_CONTENT = 400
 _SCAN_LIMIT = 400
 SHORT_TERM_TURNS = 12      # رسائل حرفية في الموجّه
 _COMPACT_MIN_NEW = 8       # لا نلخّص إلا بعد تراكم رسائل جديدة كافية
+_COMPACT_MAX_MESSAGES = 60  # سقف رسائل كل تحديث للملخّص
+_COMPACT_MAX_CHARS = 16000  # سقف حجم النص المرسَل للتلخيص (~4–5 آلاف توكن)
 
 
 def coordinator_scope(user_id: Optional[int]) -> str:
@@ -354,13 +356,17 @@ def compact(conversation_id: int, llm, keep: int = SHORT_TERM_TURNS,
         cutoff = all_ids[-keep - 1]
         prev = get_summary(conversation_id)
         upto = int((prev.get("meta") or {}).get("upto", 0)) if prev else 0
-        new = (db.query(Message).filter(Message.conversation_id == conversation_id,
-                                        Message.id > upto, Message.id <= cutoff)
-               .order_by(Message.created_at).all())
+        # الأحدث فقط وبسقف حجم: محادثة موظف قديمة فيها آلاف الرسائل، فأول تلخيص
+        # كان يرسلها كلها — قيس: 511 ألف توكن ⇒ رفض 400 من المزوّد في كل دور.
+        new = list(reversed(
+            db.query(Message).filter(Message.conversation_id == conversation_id,
+                                     Message.id > upto, Message.id <= cutoff)
+            .order_by(Message.created_at.desc()).limit(_COMPACT_MAX_MESSAGES).all()))
         if len(new) < min_new:
             return False
         transcript = "\n".join(
-            f"{'المالك' if m.role == 'user' else 'المساعد'}: {_norm(m.content)[:500]}" for m in new)
+            f"{'المالك' if m.role == 'user' else 'المساعد'}: {_norm(m.content)[:400]}"
+            for m in new)[-_COMPACT_MAX_CHARS:]
     finally:
         db.close()
     text = llm.complete(
@@ -382,12 +388,21 @@ def compact(conversation_id: int, llm, keep: int = SHORT_TERM_TURNS,
 _DURABLE_CUES = re.compile(
     r"تذكّ?ر|لا\s*تنس|دائم|دايم|كل\s*(?:يوم|مرة|أسبوع|جمعة)|أبي|ابي|أبغى|ابغى|أفضّ?ل|"
     r"افضّ?ل|أحب|احب|لا\s*(?:ت|ي)|ممنوع|خلّ?|خله|خليه|ركّ?ز|أسلوب|اسلوب|نبر|جمهور|هدف|"
-    r"اسمي|أنا|انا|شركت|مشروع|عميل|remember|always|never|prefer", re.IGNORECASE)
+    r"اسمي|أنا|انا|شركت|مشروع|عميل|موافق|وافقت|اعتمد|نعتمد|من\s*الحين|من\s*اليوم|"
+    r"remember|always|never|prefer", re.IGNORECASE)
+
+_QUESTION_ONLY = re.compile(r"[؟?]\s*$|^(?:وش|ايش|إيش|شو|ما|ماذا|كيف|هل|ليش|لماذا|متى|وين)\b")
+_EXPLICIT_DIRECTIVE = re.compile(
+    r"تذكّ?ر|لا\s*تنس|دائم|دايم|من\s*الحين|من\s*اليوم|اعتمد|موافق|وافقت|نعتمد|خلّ?ه|خليه|"
+    r"ممنوع|لا\s*(?:ت|ي)\S+\s*(?:أبد|ابد)|remember|always|never", re.IGNORECASE)
 
 _EXTRACT_SYSTEM = (
     "تستخرج من محادثة عمل ما يستحق أن يُتذكّر **لأسابيع**: تفضيلات المالك وتعليماته "
-    "الدائمة وقراراته وحقائق عنه أو عن فريقه أو أعماله. لا تستخرج الطلبات الآنية "
-    "المنفّذة لمرة واحدة، ولا المجاملات، ولا ما قاله المساعد من عنده. أعد JSON فقط."
+    "الدائمة وقراراته وحقائق عنه أو عن فريقه أو أعماله. **المصدر الوحيد هو كلام المالك "
+    "نفسه**: رد المساعد سياق فقط — اقتراحاته وتحليلاته ليست قرارات للمالك (قيس: سأل المالك "
+    "«وش تقترح؟» فحُفظ اقتراح المساعد «تعليمة دائمة»). لا يُحفظ اقتراح إلا إذا وافق عليه "
+    "المالك صراحةً في رسالته. ولا تستخرج الأسئلة، ولا الطلبات الآنية المنفّذة لمرة واحدة، "
+    "ولا المجاملات. أعد JSON فقط."
 )
 
 
@@ -397,6 +412,9 @@ def extract_memories(user_message: str, reply: str, llm,
         return []
     msg = _norm(user_message)
     if len(msg) < 12 or not _DURABLE_CUES.search(msg):
+        return []
+    # سؤال خالص (بلا أمر/تفضيل صريح) لا يُنشئ ذكرى: «وش تقترح نركز عليه؟» سؤال لا قرار
+    if _QUESTION_ONLY.search(msg) and not _EXPLICIT_DIRECTIVE.search(msg):
         return []
     handles = ", ".join(f"@{h}" for h in team_handles) or "(لا يوجد)"
     who = (f"المحادثة مباشرة مع الموظف @{talking_to}: ما يوجّهه المالك له ضعه about=@{talking_to}.\n"

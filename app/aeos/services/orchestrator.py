@@ -322,10 +322,13 @@ TOOLS: List[Dict[str, Any]] = [
 class _Tools:
     """منفّذ الأدوات لمستخدم واحد. يسجّل من كُلِّف بمهمّة لتعرض الواجهة نتائجه."""
 
-    def __init__(self, user_id: Optional[int], user_message: str = "") -> None:
+    def __init__(self, user_id: Optional[int], user_message: str = "",
+                 only_employee=None) -> None:
         self.user_id = user_id
         self.user_message = user_message
         self.dispatched: List[str] = []
+        # وضع الموظف: كل أداة تُفرض على هذا الموظف وحده (لا يوجّه زملاءه ولا يرى ذاكرتهم)
+        self.only_employee = only_employee
 
     # helpers
     def _cfg(self, args: Dict[str, Any]):
@@ -546,6 +549,8 @@ class _Tools:
     def _memory_scopes(self) -> List[str]:
         from app.aeos.memory import agent_memory as AM
 
+        if self.only_employee is not None:
+            return [AM.employee_scope(self.only_employee.id)]
         return [AM.coordinator_scope(self.user_id)] + [
             AM.employee_scope(c.id) for c in employees_for(self.user_id)]
 
@@ -553,6 +558,8 @@ class _Tools:
         from app.aeos.memory import agent_memory as AM
 
         about = str(args.get("about") or "team").strip().lstrip("@")
+        if self.only_employee is not None:
+            about = self.only_employee.account_username
         target = resolve_employee(about, self.user_id) if about not in ("team", "owner", "") else None
         scope = AM.employee_scope(target.id) if target else AM.coordinator_scope(self.user_id)
         saved = AM.add(scope, str(args.get("content") or ""),
@@ -637,12 +644,15 @@ class _Tools:
         raise ValueError(f"إجراء غير مدعوم: {action}")
 
     def call(self, name: str, raw_args: str) -> str:
-        fn = getattr(self, name, None) if name in _TOOL_NAMES else None
+        allowed = EMPLOYEE_TOOL_NAMES if self.only_employee is not None else _TOOL_NAMES
+        fn = getattr(self, name, None) if name in allowed else None
         if fn is None:
             return json.dumps({"error": f"أداة غير معروفة: {name}"}, ensure_ascii=False)
         try:
             args = json.loads(raw_args or "{}") or {}
             args = args if isinstance(args, dict) else {}
+            if self.only_employee is not None:
+                args["employee"] = self.only_employee.account_username
             result = fn(args)
         except Exception as exc:  # noqa: BLE001
             logger.info("orchestrator tool %s failed: %s", name, exc)
@@ -677,6 +687,34 @@ _EVENT_TOOLS = {
 
 
 _TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOLS)
+
+#: أدوات الموظف حين يُخاطَب مباشرة (@ أو محادثته الخاصة): ينفّذ على نفسه فقط.
+#: لا إدارة للفريق، ولا استنساخ، ولا ربط/فصل أدوات، ولا حذف ذكريات.
+EMPLOYEE_TOOL_NAMES = frozenset({
+    "employee_report", "order_publish", "order_mission", "order_engage", "employee_data",
+    "update_employee", "control_employee", "list_employee_skills", "add_employee_skill",
+    "set_employee_skill", "list_tools", "use_tool", "web_search", "remember", "recall_memory",
+})
+
+
+def _employee_tool_schemas() -> List[Dict[str, Any]]:
+    """نفس أدوات المنسّق بلا وسيط ``employee`` (يُفرض تلقائياً) وبوصف بصيغة المتكلم."""
+    import copy
+
+    out = []
+    for t in TOOLS:
+        if t["function"]["name"] not in EMPLOYEE_TOOL_NAMES:
+            continue
+        t = copy.deepcopy(t)
+        params = t["function"]["parameters"]
+        params.get("properties", {}).pop("employee", None)
+        if "required" in params:
+            params["required"] = [r for r in params["required"] if r != "employee"]
+        t["function"]["description"] = (t["function"]["description"]
+                                        .replace("كلّف موظفاً", "نفّذ بنفسك")
+                                        .replace("موظفاً", "نفسك").replace("موظف", "نفسك"))
+        out.append(t)
+    return out
 
 _AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 _HOURS_EVIDENCE = r"ساعات|الساعة|من\s*\S+\s*(?:الى|إلى|لين|لحد|حتى)|صباح|مساء|الفجر|الظهر|العصر|الليل"
@@ -758,30 +796,91 @@ def _client():
     return OpenAI(**endpoint.client_kwargs(), timeout=60), endpoint.model
 
 
+#: رسالة «نداء فقط» (@الموظف بلا نص) — يرحّب الموظف ويقترح بدل أن يُعامل كأمر
+CALL_ONLY = "(المالك نادى عليك بالاسم دون رسالة)"
+
+
+def _employee_system_prompt(cfg, message: str) -> str:
+    """الموظف نفسه يتحدث مع مالكه: زميل يناقش ويقترح، وينفّذ المهام بأدواته."""
+    p = cfg.persona
+    rs, sc = cfg.runtime_state, cfg.scheduler
+    status = "نشط" if (sc.enabled and cfg.status.value == "active") else f"متوقف ({cfg.status.value})"
+    today = "، ".join(f"{k.replace('_today', '')}: {v}" for k, v in (rs.counters or {}).items()
+                      if k.endswith("_today")) or "لا شيء بعد"
+    try:
+        from app.aeos.memory import agent_memory as AM
+
+        memory = AM.employee_brief(cfg.id, message)
+    except Exception:  # noqa: BLE001
+        memory = ""
+    try:
+        from app.aeos.employee import voice_profile as VP
+
+        voice = (VP.get(cfg).get("analysis") or {}).get("voice_summary", "")
+    except Exception:  # noqa: BLE001
+        voice = ""
+    return (
+        f"أنت @{cfg.account_username} — {(p.display_name if p else '') or cfg.account_username}، "
+        f"{(p.role if p else '') or 'صانع محتوى'} على X. أنت موظف ذكي تدير هذا الحساب، والذي "
+        "يكلّمك الآن هو **مالكك** مباشرةً. تحدّث بصيغة المتكلم كزميل عمل حقيقي.\n"
+        f"اهتماماتك: {'، '.join(p.interests) if p and p.interests else 'غير محددة'}. "
+        + (f"لهجتك: {p.dialect}. " if p and p.dialect else "")
+        + (f"صوتك: {voice}\n" if voice else "\n")
+        + f"حالتك: {status} · كل {sc.interval_minutes} دقيقة · أنجزت اليوم: {today} · "
+        f"دورات مكتملة: {rs.cycles_completed}.\n"
+        + (f"\n{memory}\n" if memory else "")
+        + "\nطريقتك:\n"
+        "1. ناقش بصدق ورأي واضح من تخصصك وبياناتك (employee_report عند الحاجة لأرقامك).\n"
+        "2. إذا طلب مهمة فنفّذها فوراً بأدواتك ثم أخبره أنها جارية والنتيجة تصله في الشات:\n"
+        "   نشر عن موضوع ← order_publish · تفاعل تختار هدفه بنفسك (تايم لاين/منشنات/ترند/بحث) "
+        "← order_mission · تفاعل مع تغريدة ألصقها هو ← order_engage · أخبار/ترند/تحليل ← "
+        "employee_data · تعديل اهتماماتك أو جدولتك ← update_employee · قاعدة تعمل تلقائياً ← "
+        "add_employee_skill · «تذكّر» ← remember.\n"
+        "3. لا تطلب رابط تغريدة أبداً إلا إذا قصد تغريدة بعينها لم يلصقها؛ وإن طلب لايك/رد/"
+        "ريتويت بلا هدف محدد فاختر الهدف بنفسك عبر order_mission.\n"
+        "4. إن كان طلبه غامضاً فاسأل سؤالاً واحداً محدداً، أو اقترح خياراً واحداً واطلب موافقته.\n"
+        f"5. إذا كانت الرسالة «{CALL_ONLY}» فرحّب باختصار، واذكر حالك اليوم في سطر، واقترح "
+        "مهمتين أو ثلاثاً تناسب تخصصك الآن.\n"
+        "6. لا تدّعِ تنفيذ ما لم تستدعِ أداته، ولا تخترع أرقاماً. أنت تتحكم بنفسك فقط لا بزملائك.\n"
+        "7. أجب بالعربية، باختصار وبنبرتك."
+    )
+
+
 # ─────────────────────────── entry point ───────────────────────────
 def handle(message: str, user_id: Optional[int], *, pinned: Optional[str] = None,
            db=None, session_id: Optional[str] = None,
-           client_factory: Callable[[], Any] = _client) -> Optional[Dict[str, Any]]:
+           client_factory: Callable[[], Any] = _client,
+           employee=None) -> Optional[Dict[str, Any]]:
     """شغّل المنسّق على رسالة. يعيد ``{"message", "dispatched", "tools"}`` أو
-    ``None`` إن تعذّر (لا LLM / فشل الشبكة) ليكمل المتصل المسار القديم."""
+    ``None`` إن تعذّر (لا LLM / فشل الشبكة) ليكمل المتصل المسار القديم.
+
+    ``employee``: وضع الموظف — المالك يخاطب هذا الموظف مباشرة (@ أو محادثته
+    الخاصة)، فيرد الموظف نفسه بأدوات محصورة عليه."""
     if not (message or "").strip():
         return None
     client, model = client_factory()
     if client is None:
         return None
 
-    tools = _Tools(user_id, message)
-    messages: List[Dict[str, Any]] = [{"role": "system", "content": _system_prompt(user_id, pinned)}]
-    # الذاكرة طويلة المدى: ثوابت المالك + ما يرتبط بالطلب + آخر الإسنادات
-    try:
-        from app.aeos.memory import agent_memory as AM
+    if employee is not None:
+        tools = _Tools(user_id, message, only_employee=employee)
+        schemas = _employee_tool_schemas()
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": _employee_system_prompt(employee, message)}]
+    else:
+        tools = _Tools(user_id, message)
+        schemas = TOOLS
+        messages = [{"role": "system", "content": _system_prompt(user_id, pinned)}]
+        # الذاكرة طويلة المدى: ثوابت المالك + ما يرتبط بالطلب + آخر الإسنادات
+        try:
+            from app.aeos.memory import agent_memory as AM
 
-        brief = AM.coordinator_brief(user_id, message, employees_for(user_id))
-    except Exception:  # noqa: BLE001
-        logger.debug("coordinator memory brief failed", exc_info=True)
-        brief = ""
-    if brief:
-        messages[0]["content"] += "\n\n" + brief
+            brief = AM.coordinator_brief(user_id, message, employees_for(user_id))
+        except Exception:  # noqa: BLE001
+            logger.debug("coordinator memory brief failed", exc_info=True)
+            brief = ""
+        if brief:
+            messages[0]["content"] += "\n\n" + brief
     messages += _history(db, session_id, user_id, message)
     messages.append({"role": "user", "content": message})
     used: List[str] = []
@@ -789,7 +888,7 @@ def handle(message: str, user_id: Optional[int], *, pinned: Optional[str] = None
     try:
         for _ in range(_MAX_ROUNDS):
             resp = client.chat.completions.create(
-                model=model, messages=messages, tools=TOOLS,
+                model=model, messages=messages, tools=schemas,
                 tool_choice="auto", temperature=0.3, max_tokens=1200,
             )
             msg = resp.choices[0].message

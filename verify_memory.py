@@ -134,6 +134,14 @@ db.commit()
 ctx = AM.chat_context(db, conv.id, exclude_last_user="رسالة رقم 30")
 check("السياق = ملخّص + نافذة حرفية بلا تكرار الرسالة الحالية",
       ctx["summary"] and len(ctx["turns"]) == 12 and ctx["turns"][-1]["content"] != "رسالة رقم 30")
+db.add_all([DBM.Message(conversation_id=conv.id, role="user", content="س" * 2000,
+                        created_at=base + timedelta(seconds=40 + i)) for i in range(300)])
+db.commit()
+big = FakeLLM()
+AM.compact(conv.id, big)
+sent = big.calls[0][1] if big.calls else ""
+check("محادثة ضخمة: التلخيص مسقوف الحجم (قيس 511 ألف توكن قبل الإصلاح)",
+      big.calls and len(sent) < AM._COMPACT_MAX_CHARS + 2000, len(sent))
 hist = AM.history_messages(ctx)
 check("الملخّص يُقدَّم رسالة نظام في المقدمة", hist[0]["role"] == "system" and "ملخّص" in hist[0]["content"])
 db.close()
@@ -144,6 +152,13 @@ team = [SimpleNamespace(id="emp1", account_username="emaad"),
 quiet = FakeLLM()
 check("بلا مؤشر دوام لا يُنفق نداء استخراج", AM.extract_memories("تمام شكراً لك", "", quiet, ["emaad"]) == []
       and not quiet.calls)
+# الحالة المقيسة حيّاً: سؤال «وش تقترح نركز عليه؟» حُفظ اقتراح المساعد تعليمةً دائمة
+check("سؤال المالك عن اقتراح لا يُنشئ ذكرى (ولا نداء)",
+      AM.extract_memories("وش أكثر شي ناجح عندك؟ وش تقترح نركز عليه؟", "أقترح منشوراً يومياً",
+                          quiet, ["emaad"]) == [] and not quiet.calls)
+approve = FakeLLM({"memories": []})
+AM.extract_memories("موافق، اعتمد المنشور اليومي من الحين", "تمام", approve, ["emaad"])
+check("موافقة صريحة على اقتراح تُرسل للاستخراج", len(approve.calls) == 1)
 ext = FakeLLM({"memories": [
     {"content": "عماد ينشر عن النفط كل صباح", "kind": "instruction", "importance": 4, "about": "@Emaad"},
     {"content": "اسم شركة المالك موج", "kind": "fact", "importance": 3, "about": "owner"},
