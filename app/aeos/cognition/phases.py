@@ -850,7 +850,10 @@ class PersonaGuardPhase(ICognitivePhase):
         # الذين قيّمهم محرّك القرار (الأعلى منفعةً أولاً) عبر نفس طبقتَي
         # الحراسة. بدونها: max_actions=1 + رفض واحد = دورة كاملة بلا أي فعل
         # رغم وجود مقترحات صالحة (شوهد مع liketoday5 ثلاث دورات متتالية).
+        from . import learning
+
         substituted: List[str] = []
+        alt_rejected: List[Dict[str, str]] = []
         if not any(d.action.capability != "wait" for d in kept):
             rejected_sigs = {
                 (decisions[i].action.capability,
@@ -872,12 +875,12 @@ class PersonaGuardPhase(ICognitivePhase):
                     continue
                 attempts += 1
                 cand_reasons: dict = {}
-                if self._deterministic_screen(context, [cand], [0], cand_reasons):
+                if self._deterministic_screen(context, [cand], [0], cand_reasons) or (
+                        context.llm and context.llm.available
+                        and self._llm_audit(context, [cand], [0], cand_reasons)):
                     rejected_sigs.add(sig)
-                    continue
-                if context.llm and context.llm.available and \
-                        self._llm_audit(context, [cand], [0], cand_reasons):
-                    rejected_sigs.add(sig)
+                    alt_rejected.append({"arm": learning.arm_of(cand.action),
+                                         "reason": str(cand_reasons.get(0, ""))})
                     continue
                 cand.explanation += " | بديل بعد رفض الحارس للاختيار الأول"
                 kept.append(cand)
@@ -891,6 +894,10 @@ class PersonaGuardPhase(ICognitivePhase):
             "rejected": removed,
             "reasons": {str(i): reasons.get(i, "") for i in sorted(reject)},
             "substituted": substituted,
+            # تغذية التعلّم: أي ذراع (فعل × مهارة) رُفض ولماذا — بدونها يتكرّر الرفض نفسه
+            "rejected_arms": [{"arm": learning.arm_of(decisions[i].action),
+                               "reason": str(reasons.get(i, ""))} for i in sorted(reject)]
+            + alt_rejected,
         }
         logger.info("persona guard rejected %d/%d actions: %s (reasons=%s, substituted=%s)",
                     len(reject), len(guarded_idx), removed, reasons, substituted)
@@ -1046,12 +1053,14 @@ class ExecutePhase(ICognitivePhase):
 
     def run(self, context: "ExecutionContext") -> None:
         from ..decision.engine import WeightedUtilityDecisionEngine
+        from . import learning
 
         decisions = deepcopy(context.scratch.get("decisions", []))
         plan = []
         for i, decision in enumerate(decisions):
             entry = deepcopy(decision.to_dict())
             params = entry["params"] or {}
+            entry["arm"] = learning.arm_of(decision.action)
             entry["action_id"] = f"{context.cycle_id or 'cycle'}:{i + 1}"
             entry["target"] = str(params.get("tweet_url") or params.get("profile_url")
                                   or params.get("handle") or "")
@@ -1070,7 +1079,7 @@ class ExecutePhase(ICognitivePhase):
         for decision, entry in zip(decisions, plan):
             action = decision.action
             outcome = {"action_id": entry["action_id"], "capability": action.capability,
-                       "target": entry["target"]}
+                       "target": entry["target"], "arm": entry["arm"]}
             context.scratch["active_action"] = deepcopy(entry)
             try:
                 skill_skip = ""
@@ -1170,19 +1179,31 @@ class LearnPhase(ICognitivePhase):
     name = "learn"
 
     def run(self, context: "ExecutionContext") -> None:
+        from . import learning
+
         evaluation = context.scratch.get("evaluation", {})
         results = context.scratch.get("execution_results", [])
-        if not results:
-            lesson = f"Cycle via {context.event.type.value}: chose to wait; no actions taken."
-        else:
-            done = ", ".join(
-                f"{r['capability']}({r.get('status') or ('ok' if r.get('success') else 'fail')})"
-                for r in results
-            )
-            lesson = (
-                f"Cycle via {context.event.type.value}: executed {done}. "
-                f"{evaluation.get('successes',0)} ok / {evaluation.get('failures',0)} failed."
-            )
+        # التجربة أولاً: كل ذراع (فعل × مهارة) قُبل/فشل/رُفض يُحدّث سياسة القرار للدورة التالية
+        try:
+            exp = learning.record_cycle(context)
+        except Exception:  # noqa: BLE001 - التعلّم لا يُسقط الدورة
+            logger.exception("experience recording failed")
+            exp = {"ok": [], "fail": [], "rejected": [], "suspended": []}
+        context.scratch["experience"] = exp
+        # درس مقروء من التجربة (كان قالباً ثابتاً «executed X(succeeded)» لا يُتعلَّم منه)
+        bits = []
+        if exp["ok"]:
+            bits.append("نجح: " + "، ".join(dict.fromkeys(exp["ok"])))
+        if exp["fail"]:
+            bits.append("فشل: " + "، ".join(dict.fromkeys(exp["fail"])))
+        if exp["rejected"]:
+            bits.append("رفض الحارس: " + "؛ ".join(
+                f"{r['arm']} ({r['reason'][:70]})" for r in exp["rejected"][:3]))
+        if exp["suspended"]:
+            bits.append("أوقفت مؤقتاً: " + "، ".join(
+                f"{s['arm']} حتى الدورة {s['until']}" for s in exp["suspended"]))
+        lesson = (f"دورة {context.event.type.value}: " + " · ".join(bits) if bits else
+                  f"Cycle via {context.event.type.value}: chose to wait; no actions taken.")
         # لا نكرّر الدرس نفسه: قيس 100 سجل «chose to wait» لموظف واحد تُغرق الذاكرة
         last = context.memory.recall(context.config.id, MemoryLayerType.REFLECTION, limit=1)
         if not (last and last[0].content == lesson):
@@ -1218,24 +1239,47 @@ class CritiquePhase(ICognitivePhase):
         except Exception as exc:  # noqa: BLE001 - التقييم لا يُسقط الدورة أبداً
             logger.exception("critique failed: %s", exc)
             return
+        from . import learning
+
+        # فاعلية الدروس: مشكلة اختفت بعد درسها = درس نافع؛ تكرّرت رغمه = غير نافع ويُصعَّد
+        escalated = learning.track_lessons(context.config, result["findings"].get("issues") or [])
+        for esc in escalated:
+            result.setdefault("directives", []).insert(
+                0, f"⚠️ الدرس «{esc['lesson'][:90]}» لم ينفع بعد {esc['seen_after']} دورات — "
+                   "غيّر النهج كلياً لا الصياغة.")
         C.store_critique(context.config, result)
+        curve = learning.record_score(context.config, float(result.get("score") or 0))
         context.scratch["critique"] = result
-        # توجيهات التقييم دروس طويلة المدى: تُدمج مع مكرّرها (فترتفع أهمية المتكرّر)
-        # وتحضر في ذاكرة الموظف حتى بعد أن تخرج من نافذة critique_history القصيرة.
+        # الدروس طويلة المدى: الصيغة المكرّرة لفكرة قائمة تقوّي الأصل ولا تُضاف نسخة
+        # (قيس: 5 صيغ لـ«انشر عن اليمن بعنوان صادم» محفوظة كخمسة دروس مستقلة).
         try:
             from ..memory import agent_memory as AM
 
+            scope = AM.employee_scope(context.config.id)
+            existing = AM.list_memories([scope], 60, kinds=("lesson",))
             for d in (result.get("directives") or [])[:3]:
-                AM.add(AM.employee_scope(context.config.id), str(d), kind="lesson",
-                       importance=3, meta={"source": "critique",
-                                           "cycle": context.config.runtime_state.cycles_completed})
+                dup = learning.near_duplicate(str(d), existing)
+                if dup:
+                    AM.reinforce(dup["id"], scope)
+                else:
+                    saved = AM.add(scope, str(d), kind="lesson", importance=3,
+                                   meta={"source": "critique",
+                                         "cycle": context.config.runtime_state.cycles_completed})
+                    if saved:
+                        existing.append(saved)
         except Exception:  # noqa: BLE001
             logger.debug("storing critique lessons failed", exc_info=True)
 
         account = getattr(context.config, "account_username", "") or "الموظف الذكي"
         lines = [f"🧪 **تقييم دورة @{account}: {result.get('score')}/10**"]
+        if curve.get("trend") in ("up", "down", "flat"):
+            arrow = {"up": "↑ يتحسّن", "down": "↓ يتراجع", "flat": "→ مستقر"}[curve["trend"]]
+            lines[0] += f" · المنحنى {curve['recent_avg']} (كان {curve['previous_avg']}) {arrow}"
         if result.get("verdict"):
             lines.append(f"_{result['verdict']}_")
+        exp = context.scratch.get("experience") or {}
+        for s in exp.get("suspended") or []:
+            lines.append(f"• تعلّمت: أوقفت «{s['arm']}» مؤقتاً حتى الدورة {s['until']} — رُفض مراراً")
         for d in (result.get("directives") or [])[:3]:
             lines.append(f"• سأصحّح في الدورة القادمة: {d}")
         context.emit_progress("\n".join(lines), intent="aeos_cycle_critique")

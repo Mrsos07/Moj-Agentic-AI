@@ -2,6 +2,12 @@
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
+# أسرار الخدمات الداخلية قبل أي استيراد يقرؤها أو يشغّل خادماً ابناً يرثها
+from app.core import internal_secrets as _internal_secrets  # noqa: E402
+_internal_secrets.ensure()
+# لا توكن ولا سرّ في أي سطر سجل (رابط، ترويسة، أو JWT ظاهر)
+from app.core.log_redaction import install as _install_log_redaction  # noqa: E402
+_install_log_redaction()
 
 from fastapi import (Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket,
                      WebSocketDisconnect)
@@ -166,6 +172,7 @@ app.include_router(aeos_router)
 import os
 default_allowed_origins = ",".join([
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://localhost:5173",
     "https://stopping-idly-endearing.ngrok-free.dev",
 ])
@@ -174,7 +181,22 @@ ALLOWED_ORIGINS = [
     for origin in os.getenv("ALLOWED_ORIGINS", default_allowed_origins).split(",")
     if origin.strip()
 ]
-ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX", r"https://.*\.ngrok-free\.dev").strip() or None
+# لا نمط عام افتراضياً: «https://.*\.ngrok-free\.dev» كان يسمح لأي صفحة على أي نطاق
+# ngrok (يملكه أي أحد مجاناً) بطلبات CORS باعتماد. نطاقك يُضاف صراحةً في ALLOWED_ORIGINS.
+ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX", "").strip() or None
+
+
+def _origin_allowed(origin: str) -> bool:
+    """أصل الطلب: القائمة المسموحة، أو النمط المضبوط صراحةً، أو هذا الجهاز (أي منفذ)."""
+    import re as _re
+    from urllib.parse import urlparse
+
+    origin = (origin or "").rstrip("/")
+    if origin in ALLOWED_ORIGINS:
+        return True
+    if ALLOWED_ORIGIN_REGEX and _re.fullmatch(ALLOWED_ORIGIN_REGEX, origin):
+        return True
+    return urlparse(origin).hostname in ("localhost", "127.0.0.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -831,12 +853,30 @@ async def websocket_endpoint(websocket: WebSocket):
     # ينتحل أي مستخدم ويوجّه موظفيه عبر المنسّق ويقرأ ذاكرته.
     from app.auth.ownership import owns_label, user_from_token
 
-    auth_user = await asyncio.to_thread(user_from_token, websocket.query_params.get("token", ""))
+    # صفحة من موقع آخر لا تفتح سوكتاً باسم المستخدم (Cross-Site WebSocket Hijacking)
+    origin = websocket.headers.get("origin", "")
     await manager.connect(websocket)
-    if auth_user is None:
-        await websocket.close(code=4401, reason="authentication required")
+    if origin and not _origin_allowed(origin):
+        await websocket.close(code=4403, reason="origin not allowed")
         manager.disconnect(websocket)
         return
+    # التوكن في **أول رسالة** لا في الرابط: الرابط يُكتب في سجل الخادم وسجلات البروكسي
+    # كاملاً (قيس: «WebSocket /ws/chat?token=eyJ…» في كل اتصال) — من يقرأ السجل يدخل الحساب.
+    auth_user = None
+    try:
+        first = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=15))
+        if isinstance(first, dict) and first.get("type") == "auth":
+            auth_user = await asyncio.to_thread(user_from_token, str(first.get("token") or ""))
+    except Exception:  # noqa: BLE001 - مهلة/JSON تالف/انقطاع = غير موثَّق
+        auth_user = None
+    if auth_user is None:
+        try:
+            await websocket.close(code=4401, reason="authentication required")
+        except Exception:  # noqa: BLE001
+            pass
+        manager.disconnect(websocket)
+        return
+    await manager.send_message({"type": "auth_ok"}, websocket)
     auth_uid = auth_user.id
     manager.set_user(websocket, auth_uid)
     manager.register_user(auth_uid, websocket)
@@ -901,7 +941,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if file_name.endswith('.csv'):
                         try:
                             import csv, io, threading
-                            from app.agents.tools import x_login_account, LOGINX_BASE_URL, LOGINX_API_KEY
+                            from app.agents.tools import x_login_account, LOGINX_BASE_URL, _loginx_key
                             
                             reader = csv.DictReader(io.StringIO(file_content))
                             accounts = []
@@ -933,11 +973,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             
                             # تسجيل دخول جماعي عبر API
                             import requests
-                            headers = {"X-API-Key": LOGINX_API_KEY, "Content-Type": "application/json"}
+                            headers = {"X-API-Key": _loginx_key(), "Content-Type": "application/json"}
                             try:
                                 resp = requests.post(
                                     f"{LOGINX_BASE_URL}/api/login/bulk",
-                                    json={"accounts": accounts},
+                                    # user_id: الحسابات تُسجَّل باسم رافع الملف فتظهر له وحده
+                                    json={"accounts": accounts, "user_id": user_id},
                                     headers=headers, timeout=10
                                 )
                                 data = resp.json()

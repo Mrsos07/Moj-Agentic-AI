@@ -70,7 +70,8 @@ def _good_cycle_ctx():
              "خطّاف قوي يفتح موضوعاً محدّداً عن أثر التصعيد على أسواق الطاقة بأرقام واضحة.",
              "الفكرة الثانية تبني على الأولى وتضيف معلومة ملموسة عن مضيق هرمز والإمدادات.",
              "الخلاصة العملية وسؤال يفتح نقاشاً حقيقياً مع الجمهور المتخصص. #طاقة"]}},
-        {"capability": "reply_to_user", "success": True,
+        # target كما يضعه ExecutePhase فعلاً — به يُعرف أن الرد كان على المنشن
+        {"capability": "reply_to_user", "success": True, "target": "https://x.com/a/status/1",
          "output": {"reply_text": "إضافة محدّدة على طرحك مع رقم مرجعي."}},
     ]
     ctx.scratch["evaluation"] = {"actions": 2, "successes": 2, "failures": 0}

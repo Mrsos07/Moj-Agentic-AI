@@ -207,6 +207,23 @@ def add(scope: str, content: str, kind: str = "fact", importance: int = 2,
         db.close()
 
 
+def reinforce(memory_id: int, scope: str, max_importance: int = 4) -> bool:
+    """درس تكرّر بصياغة أخرى: ارفع وزن الأصل بدل إضافة نسخة (أهمية حتى ``max_importance``)."""
+    M = _model()
+    db = _session()
+    try:
+        row = db.query(M).filter(M.id == int(memory_id), M.scope == scope).first()
+        if row is None:
+            return False
+        row.hits = int(row.hits or 0) + 1
+        row.importance = min(int(row.importance or 2) + 1, max_importance)
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
 def delete(memory_id: int, scopes: Optional[Iterable[str]] = None) -> bool:
     """احذف ذكرى — مقيّداً بالنطاقات المسموحة للطالب (لا يحذف ذاكرة غيره)."""
     M = _model()

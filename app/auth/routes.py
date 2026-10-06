@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
@@ -20,6 +20,56 @@ from app.auth.dependencies import require_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 security = HTTPBearer()
+
+
+class _LoginThrottle:
+    """حدّ محاولات الدخول الفاشلة (لم يكن أي حدّ: تخمين كلمات المرور بلا قيد).
+
+    5 محاولات فاشلة خلال 15 دقيقة لنفس البريد **أو** 20 من نفس العنوان ⇒ 429 حتى تنقضي
+    النافذة. النجاح يمسح عدّاد البريد. في الذاكرة (يُصفَّر بإعادة التشغيل) — يكفي لخادم
+    محلي واحد ولا يحتاج Redis.
+    """
+
+    WINDOW = 15 * 60
+    PER_EMAIL = 5
+    PER_IP = 20
+
+    def __init__(self) -> None:
+        import threading
+
+        self._fails: dict = {}
+        self._lock = threading.Lock()
+
+    def _recent(self, key: str, now: float) -> list:
+        hits = [t for t in self._fails.get(key, []) if now - t < self.WINDOW]
+        self._fails[key] = hits
+        return hits
+
+    def retry_after(self, email: str, ip: str) -> int:
+        import time
+
+        now = time.time()
+        with self._lock:
+            for key, cap in ((f"e:{email}", self.PER_EMAIL), (f"i:{ip}", self.PER_IP)):
+                hits = self._recent(key, now)
+                if len(hits) >= cap:
+                    return int(self.WINDOW - (now - hits[0])) + 1
+        return 0
+
+    def fail(self, email: str, ip: str) -> None:
+        import time
+
+        now = time.time()
+        with self._lock:
+            for key in (f"e:{email}", f"i:{ip}"):
+                self._recent(key, now).append(now)
+
+    def success(self, email: str) -> None:
+        with self._lock:
+            self._fails.pop(f"e:{email}", None)
+
+
+_throttle = _LoginThrottle()
 
 
 # Request/Response Models
@@ -109,24 +159,30 @@ class LoginResponse(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(request: LoginRequest, db: Session = Depends(get_db)):
+async def login(request: LoginRequest, http: Request, db: Session = Depends(get_db)):
     """تسجيل دخول - Login user and return JWT token with user data"""
+    email = str(request.email).strip().lower()
+    ip = http.client.host if http.client else "-"
+    wait = _throttle.retry_after(email, ip)
+    if wait:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="محاولات دخول كثيرة — حاول لاحقاً",
+            headers={"Retry-After": str(wait)},
+        )
     
     # Find user by email
     user = db.query(User).filter(User.email == request.email).first()
     
-    if not user:
+    # الرد نفسه لكل الحالات (بريد غير موجود / كلمة مرور خاطئة / حساب معطّل) — لا نكشف أيها
+    if not user or not verify_password(request.password, user.password_hash) \
+            or getattr(user, "is_active", True) is False:
+        _throttle.fail(email, ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
-    
-    # Verify password
-    if not verify_password(request.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
+    _throttle.success(email)
     
     # Create access token
     access_token = create_access_token(

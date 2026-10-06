@@ -123,10 +123,17 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
             repetition = max(repetition,
                              topic_overlap_ratio(now_words, normalize_topic_words(str(prev))))
 
-    mentions = len(context.scratch.get("mentions") or [])
+    mention_list = context.scratch.get("mentions") or []
+    mention_urls = {(m.get("url") or "").strip() for m in mention_list if m.get("url")}
+    mentions = len(mention_list)
+    # «تجاهل من خاطبك» يُقاس على المنشنات **المعلّقة** فقط: قائمة المنشنات تحوي ما
+    # رُدّ عليه في دورات سابقة، فكانت المشكلة تُسجَّل كل دورة رغم أنه لا أحد ينتظر
+    # رداً (قيس: ignored_mentions تكرّرت 90 مرة لموظف يردّ فعلاً).
+    pending = _pending_mentions(context, mention_list)
     mention_replies = sum(
         1 for r in results
         if r.get("success") and r.get("capability") == "reply_to_user"
+        and (r.get("target") or "").strip() in mention_urls
     )
     plan = context.scratch.get("content_plan") or {}
     published_caps = [r.get("capability") for r in results
@@ -156,9 +163,13 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
         "truncated_ending": bool(joined) and joined.rstrip().endswith(("…", "...")),
         "topic_repetition": round(repetition, 2),
         "mentions_seen": mentions,
+        "mentions_pending": pending,
         "mention_replies": mention_replies,
         "idle": not results or all(r.get("capability") == "wait" or r.get("status") == "skipped"
                                    for r in results),
+        "guard_blocked_reasons": [str(x.get("reason") or "")[:160]
+                                  for x in guard.get("rejected_arms") or []][:3],
+        "suspended_arms": list(context.scratch.get("suspended_arms") or []),
         "plan_pillar": plan.get("pillar", ""),
         "plan_format": plan.get("format", ""),
         "plan_followed": (not plan or not published_caps
@@ -167,6 +178,7 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
         "graph_facts_used": len(context.scratch.get("graph_facts") or []),
         "engagement_trend": _engagement_trend(context.config),
     }
+    findings["idle_reason"] = _idle_reason(context, findings) if findings["idle"] else ""
     findings["issues"] = _rule_based_issues(findings)
     # مخالفات خوارزمية X المقيسة على النصوص المنشورة فعلاً (روابط في المتن،
     # حشو إيموجي، أسئلة قوالب) — نفس عقد issues فتتحول توجيهات تلقائياً.
@@ -175,6 +187,43 @@ def deterministic_findings(context: "ExecutionContext") -> Dict[str, Any]:
 
         findings["issues"].extend(x_algorithm.virality_findings(texts))
     return findings
+
+
+def _pending_mentions(context: "ExecutionContext", mentions: List[dict]) -> int:
+    """منشنات تنتظر رداً فعلاً: لم يُتفاعل معها، ليست سبام، ولا تخالف المحظورات."""
+    if not mentions:
+        return 0
+    from ..skills.builtin import _engaged_urls, _is_ad_or_spam_text, _violates_persona_donts
+
+    engaged = _engaged_urls(context)
+    n = 0
+    for m in mentions:
+        url, text = (m.get("url") or "").strip(), (m.get("text") or "").strip()
+        if not url or url in engaged or _is_ad_or_spam_text(text) or _violates_persona_donts(text, context):
+            continue
+        n += 1
+    return n
+
+
+def _idle_reason(context: "ExecutionContext", f: Dict[str, Any]) -> str:
+    """لماذا مرّت الدورة بلا فعل؟ التشخيص يحدّد العلاج، لا «لا تنتظر» لكل حالة.
+
+    - ``guard_blocked``: كان هناك اختيار لكن الحارس رفضه (ورفض البدلاء).
+    - ``budget_done``: الحصص اليومية مكتملة — هذا نجاح لا تقصير، ولا يُعاقَب.
+    - ``no_opportunity``: لا اقتراح حقيقي أصلاً — مصادر أو تخصص يحتاج توسيعاً.
+    """
+    if f["guard_rejected"] or f.get("guard_blocked_reasons"):
+        return "guard_blocked"
+    from ..decision.engine import ENGAGEMENT_BUDGETS
+
+    rules = context.config.business_rules or {}
+    counters = context.config.runtime_state.counters
+    posts_done = int(counters.get("posts_today", 0)) >= int(rules.get("daily_post_target", 1))
+    eng_done = all(int(counters.get(c, 0)) >= int(rules.get(r, d))
+                   for c, r, d in ENGAGEMENT_BUDGETS.values() if int(rules.get(r, d)) > 0)
+    if posts_done and eng_done:
+        return "budget_done"
+    return "no_opportunity"
 
 
 #: قواعد حتمية: (مفتاح المشكلة، شرط، التوجيه التصحيحي)
@@ -195,8 +244,15 @@ def _rule_based_issues(f: Dict[str, Any]) -> List[Dict[str, str]]:
              f"فشل {f['failures']} من {f['actions']} إجراءات",
              "فضّل الأهداف المؤكّدة (روابط رأيتها فعلاً) وتجنّب الإجراءات التي "
              "فشلت في هذه الدورة.")
-    if f["idle"]:
-        _add("idle_cycle", "دورة بلا أي إجراء منتج",
+    reason = f.get("idle_reason", "")
+    if f["idle"] and reason == "guard_blocked":
+        why = (f.get("guard_blocked_reasons") or [""])[0]
+        _add("blocked_by_guard",
+             "الحارس رفض كل اختياراتك هذه الدورة" + (f": {why[:120]}" if why else ""),
+             "لا تقترح هذا النوع من المحتوى مجدداً — اختر ما يطابق نمط حسابك حرفياً"
+             + (f" (سبب الرفض: {why[:90]})" if why else "") + ".")
+    elif f["idle"] and reason == "no_opportunity":
+        _add("idle_cycle", "دورة بلا أي اقتراح صالح ضمن تخصصك",
              "لا تكتفِ بالانتظار: اختر أفضل فرصة متاحة ضمن تخصصك ونفّذها، "
              "ولو كانت تفاعلاً واحداً صغيراً.")
     if f["published_count"] and f["hashtags"] > 1:
@@ -215,9 +271,9 @@ def _rule_based_issues(f: Dict[str, Any]) -> List[Dict[str, str]]:
              f"تشابه موضوعك مع منشور سابق بنسبة {int(f['topic_repetition'] * 100)}%",
              "غيّر الموضوع أو قدّم زاوية جديدة تماماً؛ لا تُعِد ما نشرته سابقاً "
              "بصياغة أخرى.")
-    if f["mentions_seen"] and not f["mention_replies"]:
+    if f.get("mentions_pending", f["mentions_seen"]) and not f["mention_replies"]:
         _add("ignored_mentions",
-             f"وصلتك {f['mentions_seen']} منشنات/ردود ولم تُجب أحداً",
+             f"{f.get('mentions_pending', f['mentions_seen'])} منشنات تنتظر ردك ولم تُجب أحداً",
              "أجب أولاً على من خاطبك مباشرةً — الردّ على الجمهور أولوية على "
              "النشر الجديد.")
     if not f["plan_followed"]:
@@ -275,7 +331,9 @@ def build_critique(context: "ExecutionContext") -> Dict[str, Any]:
         f"- منشورات: {findings['published_count']} | أحرف: {findings['published_chars']} "
         f"| هاشتاقات: {findings['hashtags']}",
         f"- تشابه الموضوع مع السابق: {int(findings['topic_repetition'] * 100)}%",
-        f"- منشنات وصلت: {findings['mentions_seen']} | رددتَ على: {findings['mention_replies']}",
+        f"- منشنات تنتظر رداً: {findings['mentions_pending']} | رددتَ على: {findings['mention_replies']}",
+        f"- سبب الخمول (إن وُجد): {findings['idle_reason'] or 'لا خمول'}"
+        + (" — اكتمال الحصص ليس تقصيراً" if findings["idle_reason"] == "budget_done" else ""),
         f"- خطة الدورة: {findings['plan_pillar']} / {findings['plan_format']} "
         f"(نُفّذت: {'نعم' if findings['plan_followed'] else 'لا'})",
         f"- اتجاه التفاعل: {findings['engagement_trend']}",
@@ -344,8 +402,13 @@ def build_critique(context: "ExecutionContext") -> Dict[str, Any]:
     ) or {}
 
     if isinstance(data, dict) and data:
+        rule_score = critique["score"]
         critique.update(_clean_llm_critique(data, critique))
         critique["source"] = "llm+rules"
+        # درجة النموذج وحدها ضجيج (قيس: 2/10 لدورة نجحت كل أفعالها، ثم 6 ثم 1 ثم 6)،
+        # فلا يُبنى عليها منحنى تعلّم. الدرجة النهائية مزيج ثابت تهيمن عليه الأرقام.
+        critique["llm_score"], critique["rule_score"] = critique["score"], rule_score
+        critique["score"] = round(0.6 * rule_score + 0.4 * critique["llm_score"], 1)
     return critique
 
 
@@ -396,9 +459,10 @@ def _heuristic_score(f: Dict[str, Any]) -> float:
     score -= 3.0 * f["guard_rejection_rate"]
     score -= 3.0 * f["failure_rate"]
     score -= 2.0 * min(f["topic_repetition"], 1.0)
-    if f["idle"]:
+    # اكتمال الحصص اليومية ليس تقصيراً: دورة هادئة بعد بلوغ الأهداف لا تُعاقَب
+    if f["idle"] and f.get("idle_reason") != "budget_done":
         score -= 3.0
-    if f["mentions_seen"] and not f["mention_replies"]:
+    if f.get("mentions_pending", f["mentions_seen"]) and not f["mention_replies"]:
         score -= 1.5
     if f["published_count"] and f["hashtags"] > 1:
         score -= 0.5
@@ -463,6 +527,7 @@ _ISSUE_LABELS = {
     "guard_rejections": "اقتراحات خارج نطاق التخصص يرفضها الحارس",
     "execution_failures": "إجراءات تفشل عند التنفيذ",
     "idle_cycle": "دورات تمرّ بلا إنتاج",
+    "blocked_by_guard": "اقتراحات يرفضها الحارس فتضيع الدورة",
     "too_many_hashtags": "هاشتاقات زائدة",
     "truncated_post": "منشورات مقطوعة النهاية",
     "thin_content": "محتوى هزيل قصير",

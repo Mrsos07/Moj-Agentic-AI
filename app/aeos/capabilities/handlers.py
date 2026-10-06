@@ -1433,6 +1433,8 @@ def _record_strategy(context: "ExecutionContext", request: CapabilityRequest, *,
             pillar=str(request.params.get("pillar") or ""),
             format_id=str(request.params.get("format") or ""),
             parts=parts, has_media=has_media,
+            # الذراع (فعل × مهارة) ليُربط تفاعل المنشور الحقيقي لاحقاً بمن اقترحه
+            arm=str((context.scratch.get("active_action") or {}).get("arm") or ""),
         )
     except Exception as exc:  # noqa: BLE001 - never break publishing over bookkeeping
         logger.warning("recording strategy performance failed: %s", exc)

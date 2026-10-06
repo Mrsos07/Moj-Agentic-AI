@@ -253,9 +253,18 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         w_explore = float(rules.get("interaction_exploration", 0.10))
         fatigue_penalty = float(rules.get("handle_fatigue_penalty", 0.12))
 
+        from ..cognition import learning
+
         scored: List[Decision] = []
+        suspended: List[str] = []
         for action in proposals:
             if not self._allowed(action, context):
+                continue
+            # ما تعلّمه الموظف من دوراته: ذراع رفضه الحارس مراراً يُعلَّق مؤقتاً،
+            # والبقية تُرفع أو تُخفض بقيمتها المتعلَّمة (قبول/رفض/فشل/تفاعل حقيقي).
+            learned, learned_note = learning.adjustment(context.config, action)
+            if learned is None:
+                suspended.append(learning.arm_of(action))
                 continue
             params = action.params or {}
             cap = action.capability
@@ -263,6 +272,7 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
                 self.w_impact * action.expected_impact
                 + self.w_urgency * action.urgency
                 - self.w_risk * action.risk
+                + learned
             )
             # محاذاة الأهداف الحقيقية (نوع الهدف × أولويته × ما بقي منه) — وزنها
             # معتبر لا رمزي، وإلا لا تؤثّر أهداف المستخدم في أي قرار.
@@ -275,6 +285,8 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
             ]
             if alignment:
                 bits.append(f"goal_fit={alignment:.2f}")
+            if learned_note:
+                bits.append(learned_note)
 
             # ── ما تعلّمه الموظف فعلاً عن تفاعله (لا أرقاماً مكتوبة يدوياً) ──
             # كل الحدود مركزة حول ``base_rate``: الهدف/النوع المجهول = صفر
@@ -418,6 +430,7 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         # liketoday5: max_actions=1 ورُفض الرد لخروجه عن التخصص) كانت الدورة
         # تنتهي بلا أي فعل رغم وجود 6 مقترحات صالحة أخرى. الحارس يجرّب
         # البديل التالي بدل إهدار الدورة كاملة.
+        context.scratch["suspended_arms"] = sorted(set(suspended))
         chosen_ids = {id(d) for d in chosen}
         context.scratch["decision_alternates"] = [
             d for d in scored

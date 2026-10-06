@@ -210,9 +210,11 @@ check("حساباتي: كل مستخدم يرى ملفاته فقط", visible_la
 print("3) الـWebSocket يوثّق بالتوكن ولا يقبل الانتحال")
 from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
-for label, url in [("بلا توكن", "/ws/chat"), ("توكن مزوّر", "/ws/chat?token=not-a-jwt")]:
+for label, first in [("بلا رسالة توثيق", {"type": "ping"}),
+                     ("توكن مزوّر", {"type": "auth", "token": "not-a-jwt"})]:
     try:
-        with client.websocket_connect(url) as ws:
+        with client.websocket_connect("/ws/chat") as ws:
+            ws.send_json(first)
             ws.receive_json()
         check(f"{label} ← يُغلق 4401", False, "لم يُغلق")
     except WebSocketDisconnect as exc:
@@ -220,7 +222,16 @@ for label, url in [("بلا توكن", "/ws/chat"), ("توكن مزوّر", "/ws
 import app.main as MAIN  # noqa: E402
 
 tok_a = HA["Authorization"].split()[1]
-with client.websocket_connect(f"/ws/chat?token={tok_a}") as ws:
+try:
+    with client.websocket_connect(f"/ws/chat?token={tok_a}") as ws:
+        ws.send_json({"type": "ping"})
+        ws.receive_json()
+    check("توكن في الرابط لم يعد مقبولاً (كان يُكتب في السجل)", False, "قُبل")
+except WebSocketDisconnect as exc:
+    check("توكن في الرابط لم يعد مقبولاً (كان يُكتب في السجل)", exc.code == 4401, exc.code)
+with client.websocket_connect("/ws/chat") as ws:
+    ws.send_json({"type": "auth", "token": tok_a})
+    check("التوثيق بأول رسالة ← auth_ok", ws.receive_json().get("type") == "auth_ok")
     ws.send_json({"type": "ping", "user_id": B})
     pong = ws.receive_json()
     owners = set(MAIN.manager.user_ids.values())

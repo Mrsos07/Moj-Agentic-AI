@@ -650,6 +650,17 @@ def employee_critique(employee_id: str, current_user: User = Depends(get_current
             "account_username": cfg.account_username, **critique_report(cfg)}
 
 
+@router.get("/employees/{employee_id}/learning")
+def employee_learning(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """ماذا تعلّم الموظف من دوراته: منحنى الأداء، قيمة كل ذراع (فعل × مهارة) من القبول
+    والرفض والتفاعل الحقيقي، ما أُوقف مؤقتاً ولماذا، وفاعلية كل درس."""
+    from ..cognition import learning
+
+    cfg = _employee_or_404(employee_id, current_user)
+    return {"ok": True, "employee_id": employee_id, "account_username": cfg.account_username,
+            "summary": learning.summary_line(cfg), **learning.report(cfg)}
+
+
 @router.get("/employees/{employee_id}/content-strategy")
 def employee_content_strategy(employee_id: str,
                               current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
