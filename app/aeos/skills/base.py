@@ -27,6 +27,9 @@ class ProposedAction:
     expected_impact: float = 0.5    # 0..1
     urgency: float = 0.5            # 0..1
     risk: float = 0.2              # 0..1
+    #: المهارة التي اقترحته (يملؤها المخطِّط) — مفتاح التعلّم من التجربة: أي مهارة
+    #: تُقبل اقتراحاتها وتُثمر، وأيّها يرفضها الحارس دورةً بعد دورة.
+    source: str = ""
 
 
 class ISkill(abc.ABC):

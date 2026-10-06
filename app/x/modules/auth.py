@@ -3,10 +3,16 @@ from functools import wraps
 from flask import request, jsonify, session, redirect, url_for
 
 
+#: قيم منشورة في المستودع — لا تُقبل توكناً أبداً (ولو ضُبطت صراحةً)
+_WEAK = {'your-secure-token-here', 'change-me'}
+
+
 def get_tokens():
-    raw = os.getenv('XSUITE_API_TOKENS', 'your-secure-token-here')
-    tokens = [t.strip() for t in raw.split(',') if t.strip()]
-    return set(tokens)
+    # بلا قيمة افتراضية: الخادم يرث السرّ المولَّد من العملية الأم (app.core.internal_secrets).
+    # تشغيله وحده بلا سرّ = لا توكن صالح (رفض الكل) لا قبول توكن منشور على GitHub.
+    raw = os.getenv('XSUITE_API_TOKENS', '')
+    tokens = {t.strip() for t in raw.split(',') if t.strip()}
+    return tokens - _WEAK
 
 
 def require_api_token(fn):

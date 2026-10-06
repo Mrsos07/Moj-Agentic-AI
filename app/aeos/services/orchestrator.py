@@ -357,9 +357,14 @@ class _Tools:
         from . import employee_commands as C
         from . import insights as I
 
+        from ..cognition import learning
+
         cfg = self._cfg(args)
         text = C._handle_status(_platform(), cfg)
         text += "\n\n" + I.format_contents(cfg, I.recent_contents(cfg.id, 5))
+        learned = learning.summary_line(cfg)
+        if learned:
+            text += f"\n\n🧠 التعلّم الذاتي: {learned}"
         return {"report": text}
 
     def order_publish(self, args):

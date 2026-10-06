@@ -20,7 +20,11 @@ from typing import Dict, Any, Optional
 # ─── إعدادات ───────────────────────────────────────────────
 XSUITE_PORT = int(os.getenv("XSUITE_PORT", "5789"))
 XSUITE_BASE_URL = f"http://127.0.0.1:{XSUITE_PORT}"
-XSUITE_TOKEN = os.getenv("XSUITE_API_TOKENS", "your-secure-token-here")
+# سرّ مولَّد لكل تثبيت (كان الافتراضي المنشور «your-secure-token-here»). أول توكن فقط
+# إن ضبط المالك عدة توكنات مفصولة بفواصل.
+from app.core.internal_secrets import get as _secret  # noqa: E402
+
+XSUITE_TOKEN = _secret("XSUITE_API_TOKENS").split(",")[0].strip()
 XSUITE_DIR = Path(__file__).resolve().parent.parent / "x"   # app/x
 
 _HEADERS = {

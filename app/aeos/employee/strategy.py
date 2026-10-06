@@ -204,7 +204,7 @@ def _order_key(post: Dict[str, Any]):
 
 
 def record_published(config, *, url: str, text: str, pillar: str, format_id: str,
-                     parts: int = 1, has_media: bool = False) -> None:
+                     parts: int = 1, has_media: bool = False, arm: str = "") -> None:
     """سجّل منشوراً جديداً بمحوره وصيغته — الأساس الذي يُقاس عليه الأداء لاحقاً."""
     key = (url or "").strip() or f"nourl-{datetime.now(timezone.utc).timestamp()}"
     ledger = _ledger(config)
@@ -217,6 +217,7 @@ def record_published(config, *, url: str, text: str, pillar: str, format_id: str
         "format": format_id or "",
         "parts": int(parts or 1),
         "has_media": bool(has_media),
+        "arm": arm or "",
         "posted_at": now.isoformat(timespec="seconds"),
         "hour": now.hour,
         "likes": 0, "reposts": 0, "replies": 0, "views": 0, "engagement": 0,

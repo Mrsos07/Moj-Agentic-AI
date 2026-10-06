@@ -10,7 +10,57 @@ from werkzeug.utils import secure_filename
 from j4 import LDPlayerChromeAutomation, load_accounts
 
 app = Flask(__name__)
-app.secret_key = "x_automation_2026"
+
+
+def _strong_secret(name):
+    """السرّ من البيئة (يرثه من العملية الأم: data/internal_secrets.env). غيابه أو قيمة
+    منشورة ⇒ سرّ عشوائي لهذه العملية — لا مفتاح يعرفه كل من قرأ المستودع."""
+    import secrets as _secrets
+
+    val = os.getenv(name, "").strip()
+    return val if val and val not in ("x_automation_2026", "sk-loginx-2026-secret") \
+        else _secrets.token_urlsafe(32)
+
+
+# كان "x_automation_2026" ثابتاً في الكود العام
+app.secret_key = _strong_secret("LOGINX_SECRET_KEY")
+_API_KEY = _strong_secret("LOGINX_API_KEY")
+_KEY_COOKIE = "loginx_key"
+
+
+@app.before_request
+def _require_api_key():
+    """كل المسارات تتطلب المفتاح عدا فحص الصحة. كانت كلها مفتوحة، ومنها تنزيل ملف
+    كوكيز أي حساب (/cookies/download/<file>) = الاستيلاء الكامل على حساب X.
+    الواجهة البشرية: افتح ‎/?key=<LOGINX_API_KEY>‎ مرة فيُحفظ في كوكي HttpOnly."""
+    import hmac
+
+    if request.path == "/api/health":
+        return None
+    supplied = (request.headers.get("X-API-Key") or request.cookies.get(_KEY_COOKIE)
+                or request.args.get("key") or "")
+    if not supplied or not hmac.compare_digest(supplied, _API_KEY):
+        return jsonify({"success": False, "error": "unauthorized"}), 401
+    return None
+
+
+@app.after_request
+def _remember_key(resp):
+    if request.args.get("key") and resp.status_code < 400:
+        resp.set_cookie(_KEY_COOKIE, request.args["key"], httponly=True, samesite="Strict")
+    return resp
+
+
+def _safe_callback(url):
+    """callback إلى هذا الجهاز فقط: كان أي رابط يُقبل فيرسل الخادم نتائج الدخول
+    (ومعها user_id) إلى عنوان يختاره الطالب (SSRF)."""
+    from urllib.parse import urlparse
+
+    url = (url or "").strip()
+    if not url:
+        return None
+    p = urlparse(url)
+    return url if p.scheme in ("http", "https") and p.hostname in ("127.0.0.1", "localhost") else None
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 COOKIES_FOLDER = os.path.join(os.path.dirname(__file__), "CookiesBackup")
@@ -229,7 +279,7 @@ def api_login_single():
         password = (data.get("password") or "").strip()
         email = (data.get("email") or "").strip()
         user_id = data.get("user_id")  # int أو None
-        callback_url = (data.get("callback_url") or "").strip() or None
+        callback_url = _safe_callback(data.get("callback_url"))
 
         if not username or not password:
             return jsonify({"success": False, "error": "اسم المستخدم وكلمة المرور مطلوبان"}), 400
@@ -266,7 +316,7 @@ def api_login_bulk():
         data = request.get_json(silent=True) or {}
         accounts = data.get("accounts") or []
         user_id = data.get("user_id")
-        callback_url = (data.get("callback_url") or "").strip() or None
+        callback_url = _safe_callback(data.get("callback_url"))
 
         if not accounts or not isinstance(accounts, list):
             return jsonify({"success": False, "error": "قائمة الحسابات فارغة أو غير صالحة"}), 400

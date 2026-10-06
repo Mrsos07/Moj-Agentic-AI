@@ -240,13 +240,13 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // الخادم يوثّق الاتصال بالتوكن ويتجاهل أي user_id في الرسائل
-    const token = localStorage.getItem('token') || ''
-    const wsUrl = `${protocol}//${window.location.host}/ws/chat?token=${encodeURIComponent(token)}`
+    // التوكن في أول رسالة لا في الرابط: الرابط يُكتب كاملاً في سجلات الخادم والبروكسي
+    const wsUrl = `${protocol}//${window.location.host}/ws/chat`
     
     const websocket = new WebSocket(wsUrl)
 
     websocket.onopen = () => {
+      websocket.send(JSON.stringify({ type: 'auth', token: localStorage.getItem('token') || '' }))
       console.log('WebSocket connected')
       setIsConnected(true)
       retryRef.current = 0
@@ -258,7 +258,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       lastInboundRef.current = Date.now()
       const data = JSON.parse(event.data)
       // الـpong إشارة حياة فقط — لا شأن له بمنطق المحادثة
-      if (data?.type === 'pong') return
+      if (data?.type === 'pong' || data?.type === 'auth_ok') return
       handleWebSocketMessage(data)
     }
     

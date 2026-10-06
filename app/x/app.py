@@ -67,8 +67,17 @@ def cookie_label_to_path(cookie_label: str):
 
 
 
+def _strong_secret(name: str) -> str:
+    """السرّ من البيئة (تورّثه العملية الأم من data/internal_secrets.env). قيمة منشورة
+    في المستودع أو غيابه ⇒ سرّ عشوائي لهذه العملية: لا يُقبل افتراضي يعرفه الجميع."""
+    import secrets as _secrets
+
+    val = os.getenv(name, '').strip()
+    return val if val and val not in ('change-me', 'Mm112233@@') else _secrets.token_urlsafe(32)
+
+
 ADMIN_USER = os.getenv('XSUITE_ADMIN_USER', 'admin')
-ADMIN_PASS = os.getenv('XSUITE_ADMIN_PASS', 'Mm112233@@')
+ADMIN_PASS = _strong_secret('XSUITE_ADMIN_PASS')
 DEFAULT_HEADLESS = os.getenv('XSUITE_DEFAULT_HEADLESS', '0') == '1'
 
 # حالة المهام الجماعية لتسجيل الدخول
@@ -76,7 +85,9 @@ bulk_login_tasks = {}
 bulk_task_counter = 0
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', 'change-me')
+# كان 'change-me': من يعرفه (المستودع عام) يزوّر جلسة دخول للوحة ويتحكم بكل الحسابات
+app.secret_key = _strong_secret('XSUITE_SECRET_KEY')
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict')
 
 
 @app.before_request
@@ -94,7 +105,10 @@ def system_login():
 
     u = (request.form.get('username') or '').strip()
     p = (request.form.get('password') or '').strip()
-    if u == ADMIN_USER and p == ADMIN_PASS:
+    import hmac as _hmac
+
+    # مقارنة ثابتة الزمن (== تكشف طول التطابق بالتوقيت)
+    if _hmac.compare_digest(u, ADMIN_USER) and _hmac.compare_digest(p, ADMIN_PASS):
         session['logged_in'] = True
         return redirect(url_for('dashboard'))
     flash('بيانات الدخول غير صحيحة', 'error')
@@ -152,7 +166,7 @@ def follow_hub():
 @login_required
 def system_test_page():
     cookies = list_cookies()
-    api_token = os.getenv("API_TOKEN", "your-secure-token-here")
+    api_token = os.getenv("XSUITE_API_TOKENS", "").split(",")[0].strip()
     return render_template('system_test.html', title='اختبار النظام', header='اختبار النظام', subtitle='اختبار جميع عمليات API', active='system_test', cookies=cookies, api_token=api_token)
 
 

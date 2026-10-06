@@ -38,7 +38,9 @@ class SkillBasedPlanner(IPlanner):
         # 1) skill-driven proposals
         for skill in self._skills.resolve(context.config.installed_skills):
             try:
-                proposals.extend(skill.propose(context))
+                for p in skill.propose(context) or []:
+                    p.source = p.source or skill.name
+                    proposals.append(p)
             except Exception:  # noqa: BLE001
                 logger.exception("skill %s failed to propose", skill.name)
 

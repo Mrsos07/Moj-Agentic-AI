@@ -628,7 +628,13 @@ def x_bookmark(label: str, tweet_url: str, headless: bool = True) -> Dict[str, A
 
 # ── تسجيل دخول حساب X عبر LDPlayer (loginx) ──
 LOGINX_BASE_URL = "http://127.0.0.1:5000"
-LOGINX_API_KEY = "sk-loginx-2026-secret"
+
+
+def _loginx_key() -> str:
+    """مفتاح loginx المولَّد لكل تثبيت (كان «sk-loginx-2026-secret» ثابتاً في الكود العام)."""
+    from app.core.internal_secrets import get
+
+    return get("LOGINX_API_KEY")
 
 
 def x_login_account(username: str, password: str, email: str = "", headless: bool = False, user_id: Optional[int] = None) -> Dict[str, Any]:
@@ -648,7 +654,7 @@ def x_login_account(username: str, password: str, email: str = "", headless: boo
             return {"success": False, "message": "⚠️ اسم المستخدم وكلمة المرور مطلوبين"}
 
         # إرسال طلب التسجيل + callback_url لاستلام إشعار اكتمال في الشات
-        headers = {"X-API-Key": LOGINX_API_KEY, "Content-Type": "application/json"}
+        headers = {"X-API-Key": _loginx_key(), "Content-Type": "application/json"}
         # موج يشتغل افتراضياً على 8000 — يقبل callback من localhost فقط
         from app.auth.internal import signed_url
 
@@ -695,7 +701,7 @@ def x_login_status(session_id: str = "") -> Dict[str, Any]:
     import requests
     
     try:
-        headers = {"X-API-Key": LOGINX_API_KEY}
+        headers = {"X-API-Key": _loginx_key()}
         
         # إذا ما عطى session_id، نجيب آخر عملية
         if not session_id:
