@@ -1,0 +1,41 @@
+{
+  "slug": "content",
+  "label": "توليد المحتوى",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "ContentMCP",
+  "inject": [
+    "llm"
+  ],
+  "core": true,
+  "order": 30,
+  "description": "توليد نص وتلخيصه وإعادة صياغته عبر مزوّد الذكاء الاصطناعي.",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": true
+  },
+  "coordinator_tools": [
+    {
+      "name": "generate",
+      "description": "ولّد نصاً بتعليمات محددة.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
+    }
+  ]
+}

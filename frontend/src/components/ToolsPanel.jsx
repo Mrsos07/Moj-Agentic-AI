@@ -1,26 +1,66 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import authHeaders from '../authHeaders'
 
 /**
- * أدوات الموظف: البحث على الويب + الأدوات المدمجة + خوادم MCP الخارجية.
- * كل تغيير يُحفظ فوراً عبر /api/aeos/employees/{id}/tools (لا ينتظر «حفظ البرسونا»).
+ * أدوات الموظف على مستويين:
+ * 1) **أدوات النظام**: خوادم ثبّتها المطوّر (لوحة التحكم) وأتاحها للموظفين — المالك يربط ويفصل.
+ * 2) **أدوات هذا الموظف الخاصة**: خوادم MCP يضيفها المالك لموظفه وحده (HTTP عام فقط —
+ *    stdio والحزم تشغّل كوداً على الجهاز فهي أدوات نظام للمطوّر).
  */
 const inputCls = 'w-full text-xs px-2 py-1.5 rounded-lg border border-border-light dark:border-border-dark bg-transparent text-text-primary-light dark:text-text-primary-dark'
-
 const parseKV = (text) => Object.fromEntries(
   (text || '').split('\n').map(l => l.trim()).filter(l => l.includes('='))
     .map(l => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim()])
 )
-
-const emptyForm = { name: '', transport: 'stdio', command: '', args: '', env: '', url: '', headers: '', research_tool: '' }
+const emptyForm = { name: '', url: '', headers: '', description: '', research_tool: '' }
 
 const ToolsPanel = ({ employeeId, onNotify }) => {
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
-  const [form, setForm] = useState(null)
   const [trial, setTrial] = useState({})   // server -> {tool, args, out}
+  const [form, setForm] = useState(null)
+  const fileRef = useRef(null)
+
+  const addPrivate = async () => {
+    setBusy('add'); setError('')
+    try {
+      const res = await axios.post(`/api/aeos/employees/${employeeId}/tools/private`, {
+        name: form.name.trim(), url: form.url.trim(), headers: parseKV(form.headers),
+        description: form.description.trim(), research_tool: form.research_tool.trim(),
+      }, { headers: authHeaders(), timeout: 90000 })
+      onNotify?.(`🔌 أُضيفت أداة «${res.data.server.label}» (${res.data.server.tools.length} أداة) لهذا الموظف فقط.`)
+      setForm(null)
+      await load()
+    } catch (e) { setError(e?.response?.data?.detail || 'تعذّر الاتصال بالخادم') }
+    setBusy('')
+  }
+
+  const uploadPrivate = async () => {
+    const file = fileRef.current?.files?.[0]
+    if (!file) return
+    const fd = new FormData()
+    fd.append('file', file)
+    setBusy('upload'); setError('')
+    try {
+      const res = await axios.post(`/api/aeos/employees/${employeeId}/tools/private/upload`, fd,
+        { headers: authHeaders(), timeout: 120000 })
+      const bad = res.data.errors.map(e => `${e.name}: ${e.error}`).join('؛ ')
+      onNotify?.(`🔌 أُضيف ${res.data.saved.length} خادم لهذا الموظف${bad ? ` — تعذّر: ${bad}` : ''}`)
+      fileRef.current.value = ''
+      await load()
+    } catch (e) { setError(e?.response?.data?.detail || 'فشل الرفع') }
+    setBusy('')
+  }
+
+  const removePrivate = async (s) => {
+    if (!window.confirm(`حذف الأداة الخاصة «${s.label}» من هذا الموظف؟`)) return
+    setBusy(s.name)
+    try { await axios.delete(`/api/aeos/employees/${employeeId}/tools/private/${s.name}`, { headers: authHeaders() }); await load() }
+    catch (e) { setError(e?.response?.data?.detail || 'تعذّر الحذف') }
+    setBusy('')
+  }
 
   const load = useCallback(async () => {
     if (!employeeId) return
@@ -39,36 +79,6 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
       await axios.post(`/api/aeos/employees/${employeeId}/tools`, { server, attach: on }, { headers: authHeaders() })
       await load()
     } catch (e) { setError(e?.response?.data?.detail || 'تعذّر الحفظ') }
-    setBusy('')
-  }
-
-  const addServer = async () => {
-    setBusy('add')
-    setError('')
-    const body = {
-      name: form.name, transport: form.transport,
-      ...(form.transport === 'stdio'
-        ? { command: form.command.trim(), args: form.args.split('\n').map(a => a.trim()).filter(Boolean), env: parseKV(form.env) }
-        : { url: form.url.trim(), headers: parseKV(form.headers) }),
-      research_tool: form.research_tool.trim(),
-    }
-    try {
-      const res = await axios.post('/api/aeos/tools/external', body, { headers: authHeaders(), timeout: 90000 })
-      const s = res.data?.server
-      await axios.post(`/api/aeos/employees/${employeeId}/tools`, { server: s.name, attach: true }, { headers: authHeaders() })
-      onNotify?.(`🔌 تمّ ربط خادم MCP «${s.label}» (${s.tools.length} أداة) بالموظف.`)
-      setForm(null)
-      await load()
-    } catch (e) { setError(e?.response?.data?.detail || 'تعذّر الاتصال بالخادم') }
-    setBusy('')
-  }
-
-  const removeServer = async (name) => {
-    if (!window.confirm('حذف هذا الخادم من النظام؟ سيُفصل عن كل الموظفين.')) return
-    setBusy(name)
-    try { await axios.delete(`/api/aeos/tools/external/${name}`, { headers: authHeaders() }); await load() } catch (e) {
-      setError(e?.response?.data?.detail || 'تعذّر الحذف')
-    }
     setBusy('')
   }
 
@@ -113,18 +123,31 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
             </p>
           )}
 
-          {data.external.map(s => (
+          <div className="text-[11px] font-semibold text-text-primary-light dark:text-text-primary-dark pt-1">🧩 أدوات النظام</div>
+          {data.external.length === 0 && (
+            <p className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
+              لا توجد خوادم نظام متاحة للموظفين بعد. يثبّتها المطوّر من لوحة التحكم.
+            </p>
+          )}
+          {[...data.external, ...(data.private || []).map(p => ({ ...p, _private: true }))].map((s, i, all) => (
+            <div key={s.name}>
+            {s._private && !all[i - 1]?._private && (
+              <div className="text-[11px] font-semibold text-text-primary-light dark:text-text-primary-dark pt-2 pb-1">🔒 أدوات هذا الموظف الخاصة</div>
+            )}
             <div key={s.name} className="rounded-lg border border-border-light dark:border-border-dark p-2 space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs font-medium text-text-primary-light dark:text-text-primary-dark">
                   🔌 {s.label} <span className="text-text-secondary-light dark:text-text-secondary-dark">({s.transport} · {s.tools.length} أداة{s.research_tool ? ` · بحث: ${s.research_tool}` : ''})</span>
+                  {s.description && <div className="text-[10px] font-normal text-text-secondary-light dark:text-text-secondary-dark">{s.description}</div>}
                 </div>
                 <div className="flex gap-1.5 shrink-0">
                   <button type="button" disabled={busy === s.name} onClick={() => attach(s.name, !s.attached)} className={chip(s.attached)}>
                     {s.attached ? 'مربوط' : 'غير مربوط'}
                   </button>
-                  <button type="button" onClick={() => removeServer(s.name)}
-                    className="text-[11px] px-2 py-1 rounded-full border border-red-400/60 text-red-500">حذف</button>
+                  {s._private && (
+                    <button type="button" disabled={busy === s.name} onClick={() => removePrivate(s)}
+                      className="text-[11px] px-2 py-1 rounded-full border border-red-400/60 text-red-500">حذف</button>
+                  )}
                 </div>
               </div>
               <div className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
@@ -148,41 +171,36 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
                 </div>
               )}
             </div>
+            </div>
           ))}
 
+          {!(data.private || []).length && (
+            <div className="text-[11px] font-semibold text-text-primary-light dark:text-text-primary-dark pt-2">🔒 أدوات هذا الموظف الخاصة</div>
+          )}
           {!form ? (
-            <button type="button" onClick={() => setForm({ ...emptyForm })}
-              className="text-xs px-3 py-1.5 rounded-lg border border-dashed border-primary/50 text-primary">
-              ➕ إضافة خادم MCP خارجي
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => setForm({ ...emptyForm })}
+                className="text-xs px-3 py-1.5 rounded-lg border border-dashed border-primary/50 text-primary">➕ إضافة أداة MCP لهذا الموظف</button>
+              <label className="text-xs px-3 py-1.5 rounded-lg border border-dashed border-border-light dark:border-border-dark text-text-secondary-light dark:text-text-secondary-dark cursor-pointer">
+                {busy === 'upload' ? 'جارٍ الاتصال…' : '📄 رفع ملف إعداد JSON'}
+                <input ref={fileRef} type="file" accept=".json" className="hidden" onChange={uploadPrivate} />
+              </label>
+            </div>
           ) : (
             <div className="rounded-lg border border-primary/40 p-2 space-y-1.5">
               <div className="grid grid-cols-2 gap-1.5">
-                <input placeholder="اسم الخادم (مثال: brave)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} />
-                <select value={form.transport} onChange={(e) => setForm({ ...form, transport: e.target.value })} className={inputCls}>
-                  <option value="stdio">stdio (أمر محلي)</option>
-                  <option value="http">HTTP (Streamable)</option>
-                </select>
+                <input placeholder="اسم الأداة (مثال: weather)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} />
+                <input placeholder="https://example.com/mcp" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} className={inputCls} dir="ltr" />
               </div>
-              {form.transport === 'stdio' ? (
-                <>
-                  <input placeholder="الأمر: npx أو python أو مسار ملف تنفيذي" value={form.command} onChange={(e) => setForm({ ...form, command: e.target.value })} className={inputCls} dir="ltr" />
-                  <textarea rows={2} placeholder={'الوسائط (سطر لكل وسيط)\n-y\n@modelcontextprotocol/server-brave-search'} value={form.args} onChange={(e) => setForm({ ...form, args: e.target.value })} className={inputCls} dir="ltr" />
-                  <textarea rows={2} placeholder="متغيرات البيئة السرية (KEY=value سطر لكل متغير)" value={form.env} onChange={(e) => setForm({ ...form, env: e.target.value })} className={inputCls} dir="ltr" />
-                </>
-              ) : (
-                <>
-                  <input placeholder="https://example.com/mcp" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} className={inputCls} dir="ltr" />
-                  <textarea rows={2} placeholder="ترويسات سرية (Authorization=Bearer ...)" value={form.headers} onChange={(e) => setForm({ ...form, headers: e.target.value })} className={inputCls} dir="ltr" />
-                </>
-              )}
+              <input placeholder="وصف مختصر (اختياري)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputCls} />
+              <textarea rows={2} placeholder="ترويسات سرية (Authorization=Bearer ... سطر لكل ترويسة)" value={form.headers} onChange={(e) => setForm({ ...form, headers: e.target.value })} className={inputCls} dir="ltr" />
               <input placeholder="أداة البحث قبل الكتابة (اختياري، اسم الأداة)" value={form.research_tool} onChange={(e) => setForm({ ...form, research_tool: e.target.value })} className={inputCls} dir="ltr" />
               <p className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
-                يتصل النظام بالخادم فعلاً ويكتشف أدواته قبل الحفظ. الأسرار تُحفظ على الخادم ولا تُعرض مرة أخرى.
-                الموظف لا يستدعي أدوات الخادم من تلقاء نفسه إلا «أداة البحث» التي تحدّدها، وبنص الموضوع فقط.
+                خادم MCP عام عبر HTTP، لهذا الموظف وحده. يتصل النظام به ويكتشف أدواته قبل الحفظ، والأسرار لا تُعرض مرة أخرى.
+                العناوين الداخلية (هذا الجهاز أو الشبكة المحلية) وخوادم stdio غير مسموحة هنا — يثبّتها المطوّر كأدوات للنظام.
               </p>
               <div className="flex gap-2">
-                <button type="button" onClick={addServer} disabled={busy === 'add' || !form.name}
+                <button type="button" onClick={addPrivate} disabled={busy === 'add' || !form.name || !form.url}
                   className="px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-medium disabled:opacity-50">
                   {busy === 'add' ? 'جارٍ الاتصال…' : 'اتصال وحفظ'}
                 </button>

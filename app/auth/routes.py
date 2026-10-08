@@ -17,6 +17,7 @@ from app.auth.security import (
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from app.auth.dependencies import require_current_user
+from app.auth.roles import permissions_of, role_of
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 security = HTTPBearer()
@@ -89,6 +90,8 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     profile_picture: Optional[str] = None
     is_admin: bool = False
+    role: str = "user"
+    permissions: list = []
     is_active: bool = True
     created_at: str
     
@@ -205,7 +208,7 @@ async def login(request: LoginRequest, http: Request, db: Session = Depends(get_
             email=user.email,
             name=user.name,
             profile_picture=user.profile_picture,
-            is_admin=user.is_admin,
+            is_admin=user.is_admin, role=role_of(user), permissions=permissions_of(user),
             is_active=user.is_active,
             created_at=user.created_at.isoformat()
         )
@@ -280,7 +283,7 @@ async def get_current_user_info(current_user: User = Depends(require_current_use
         email=current_user.email,
         name=current_user.name,
         profile_picture=current_user.profile_picture,
-        is_admin=current_user.is_admin,
+        is_admin=current_user.is_admin, role=role_of(current_user), permissions=permissions_of(current_user),
         is_active=current_user.is_active,
         created_at=current_user.created_at.isoformat()
     )
@@ -338,7 +341,7 @@ async def update_profile(
         email=current_user.email,
         name=current_user.name,
         profile_picture=current_user.profile_picture,
-        is_admin=current_user.is_admin,
+        is_admin=current_user.is_admin, role=role_of(current_user), permissions=permissions_of(current_user),
         is_active=current_user.is_active,
         created_at=current_user.created_at.isoformat()
     )
@@ -360,7 +363,7 @@ async def upload_profile_picture(
         email=current_user.email,
         name=current_user.name,
         profile_picture=current_user.profile_picture,
-        is_admin=current_user.is_admin,
+        is_admin=current_user.is_admin, role=role_of(current_user), permissions=permissions_of(current_user),
         is_active=current_user.is_active,
         created_at=current_user.created_at.isoformat()
     )

@@ -1,0 +1,17 @@
+{
+  "slug": "x",
+  "label": "X — النشر والتفاعل",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "XPlatformMCP",
+  "inject": [],
+  "core": true,
+  "order": 10,
+  "description": "النشر والثريد والاقتباس والرد والإعجاب والمتابعة والجدولة عبر X Suite بكوكيز الحساب.",
+  "enabled": true,
+  "scope": {
+    "coordinator": false,
+    "employees": true
+  },
+  "note": "للموظفين فقط: كل فعل على X يمرّ بشخصية الموظف وحارسه وميزانياته."
+}

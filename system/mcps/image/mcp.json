@@ -1,0 +1,33 @@
+{
+  "slug": "image",
+  "label": "توليد الصور",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "ImageMCP",
+  "inject": [],
+  "core": false,
+  "order": 80,
+  "description": "صور أصلية للمحتوى عبر GPT Image 2.",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": true
+  },
+  "coordinator_tools": [
+    {
+      "name": "generate_image",
+      "description": "ولّد صورة أصلية من وصف (مدفوعة — عند طلب المالك فقط).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
+    }
+  ]
+}

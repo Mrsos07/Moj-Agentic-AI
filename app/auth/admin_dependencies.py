@@ -12,7 +12,9 @@ async def require_admin(
     """
     Dependency to require admin privileges
     """
-    if not current_user.is_admin:
+    from app.auth.roles import has
+
+    if not has(current_user, "admin.dashboard"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required"

@@ -47,12 +47,65 @@ def overview(cfg=None) -> Dict[str, Any]:
         builtin.append({"name": name, "label": label, "attached": on,
                         "available": bool(provider) if name == "search" else True})
     external = []
-    for c in X.list_configs():
+    for c in employee_servers():
         view = X.public_view(c)
         view["attached"] = view["name"] in attached
+        view["private"] = False
         external.append(view)
+    # أدوات هذا الموظف الخاصة (يضيفها مالكه، لا يراها غيره)
+    private = []
+    if cfg is not None:
+        from app.aeos.mcp import employee_mcp as EM
+
+        for c in EM.list_for(cfg.id):
+            view = EM.public_view(c, connected=registry().has(X.PREFIX + c["slug"]))
+            view["attached"] = view["name"] in attached
+            private.append(view)
     return {"search": {"provider": provider or None, "configured": bool(provider)},
-            "builtin": builtin, "external": external}
+            "builtin": builtin, "external": external, "private": private}
+
+
+def add_private(cfg, raw: Dict[str, Any], added_by: str = "") -> Dict[str, Any]:
+    """أداة MCP فرعية لهذا الموظف فقط: تُكتشف أدواتها، تُسجَّل، وتُربط به فوراً."""
+    from app.aeos.mcp import employee_mcp as EM
+    from app.aeos.mcp.servers.external_mcp import PREFIX
+
+    saved = EM.save(cfg.id, raw, registry(), added_by=added_by)
+    name = PREFIX + saved["slug"]
+    if name not in (cfg.mcp_servers or []):
+        cfg.mcp_servers = [*(cfg.mcp_servers or []), name]
+        _platform().repository.save(cfg)
+    return EM.public_view(saved, connected=True)
+
+
+def remove_private(cfg, name: str) -> bool:
+    from app.aeos.mcp import employee_mcp as EM
+    from app.aeos.mcp.servers.external_mcp import PREFIX
+
+    cur = EM.get(cfg.id, name)
+    if cur is None or not EM.delete(cfg.id, name, registry()):
+        return False
+    full = PREFIX + cur["slug"]
+    if full in (cfg.mcp_servers or []):
+        cfg.mcp_servers = [s for s in cfg.mcp_servers if s != full]
+        _platform().repository.save(cfg)
+    return True
+
+
+def _private_names(cfg) -> set:
+    from app.aeos.mcp import employee_mcp as EM
+    from app.aeos.mcp.servers.external_mcp import PREFIX
+
+    return {PREFIX + c["slug"] for c in EM.list_for(cfg.id)} if cfg is not None else set()
+
+
+def employee_servers() -> List[Dict[str, Any]]:
+    """خوادم النظام التي يجوز ربطها بالموظفين: مفعّلة ونطاقها يشمل الموظفين.
+    المالك **يربط** منها فقط؛ إضافة خادم للنظام للمطوّر وحده (لوحة التحكم)."""
+    from app.aeos.mcp.servers import external_mcp as X
+
+    return [c for c in X.list_configs(enabled_only=True)
+            if (c.get("scope") or {}).get("employees", True)]
 
 
 def set_attached(cfg, server: str, attach: bool) -> Dict[str, Any]:
@@ -61,9 +114,11 @@ def set_attached(cfg, server: str, attach: bool) -> Dict[str, Any]:
 
     if server in CORE_SERVERS:
         raise ValueError(f"'{server}' أساسي ولا يُفصل")
-    known = set(OPTIONAL_BUILTIN) | {X.PREFIX + c["slug"] for c in X.list_configs()}
-    if server not in known:
-        raise ValueError(f"خادم غير معروف: {server}. المتاح: {', '.join(sorted(known))}")
+    # المتاح للربط: خوادم النظام المسموحة للموظفين + أدوات **هذا** الموظف الخاصة فقط
+    known = set(OPTIONAL_BUILTIN) | {X.PREFIX + c["slug"] for c in employee_servers()} | _private_names(cfg)
+    # الفصل مسموح دائماً (ولو عُطّل الخادم لاحقاً)، الربط من المتاح للموظفين فقط
+    if server not in known and (attach or server not in (cfg.mcp_servers or [])):
+        raise ValueError(f"خادم غير متاح للموظفين: {server}. المتاح: {', '.join(sorted(known))}")
     if server == "search" and attach:
         from app.aeos.mcp.servers.core_mcp import search_provider
 
@@ -109,6 +164,9 @@ def call_tool(cfg, server: str, tool: str, arguments: Optional[Dict[str, Any]] =
         raise ValueError(f"الخادم '{server}' غير مربوط بالموظف @{cfg.account_username}")
     if not (server == "search" or server.startswith("ext_")):
         raise ValueError("الاستدعاء المباشر متاح للبحث والخوادم الخارجية فقط")
+    if server.startswith("ext_") and server not in (
+            {"ext_" + c["slug"] for c in employee_servers()} | _private_names(cfg)):
+        raise ValueError(f"الخادم '{server}' معطّل أو غير متاح لهذا الموظف")
     reg = registry()
     if not reg.has(server):
         raise ValueError(f"الخادم '{server}' غير مسجّل")

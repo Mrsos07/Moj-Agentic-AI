@@ -1,0 +1,33 @@
+{
+  "slug": "browser",
+  "label": "قراءة صفحات الويب",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "BrowserMCP",
+  "inject": [],
+  "core": false,
+  "order": 50,
+  "description": "يجلب صفحة ويب ويستخرج نصها.",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": true
+  },
+  "coordinator_tools": [
+    {
+      "name": "read_page",
+      "description": "اقرأ نص صفحة ويب من رابطها.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  ]
+}

@@ -36,6 +36,7 @@ from app.db.database import init_db, get_db
 from app.auth.routes import router as auth_router
 from app.api.intent_routes import router as intent_router
 from app.api.admin_routes import router as admin_router
+from app.api.admin_system_routes import router as admin_system_router
 from app.api.agent_routes import router as agent_router
 from app.api.conversation_routes import router as conversation_router
 from app.api.x_routes import router as x_router
@@ -142,6 +143,8 @@ app.include_router(intent_router)
 
 # Include admin routes
 app.include_router(admin_router)
+# لوحة تحكم النظام: خوادم MCP العامة ومهارات النظام (system/) — عرض للمسؤول، تعديل للمطوّر
+app.include_router(admin_system_router)
 
 # Include agent routes
 app.include_router(agent_router)

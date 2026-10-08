@@ -30,10 +30,6 @@ from .core.llm import build_llm_provider
 from .decision.engine import WeightedUtilityDecisionEngine
 from .employee.repository import SqlEmployeeRepository
 from .mcp.registry import MCPRegistry
-from .mcp.servers.core_mcp import BrowserMCP, ContentMCP, MemoryMCP, NewsMCP, SearchMCP
-from .mcp.servers.image_mcp import ImageMCP
-from .mcp.servers.playwright_x_mcp import PlaywrightXMCP
-from .mcp.servers.x_mcp import XPlatformMCP
 from .memory.graphiti_store import get_graphiti_store
 from .memory.manager import MemoryManager
 from .planner.planner import SkillBasedPlanner
@@ -86,23 +82,26 @@ class AEOSPlatform:
         workspaces = WorkspaceManager(vault)
         c.register_singleton("workspaces", workspaces)
 
-        # --- MCP servers (pluggable) ---
+        # --- MCP servers: كلها من المجلد الرئيسي system/mcps ---
+        # المدمجة (كود داخل العملية: X، القراءة، المحتوى، الذاكرة، المتصفح، الأخبار، البحث،
+        # الصور) ثم المرفوعة (stdio/HTTP/حزم) — قائمة واحدة، ولا تسجيل يدوي هنا.
         mcp = MCPRegistry()
-        mcp.register(XPlatformMCP())
-        mcp.register(PlaywrightXMCP())
-        mcp.register(ContentMCP(llm))
-        mcp.register(MemoryMCP(memory))
-        mcp.register(BrowserMCP())
-        mcp.register(NewsMCP())
-        mcp.register(SearchMCP())
-        mcp.register(ImageMCP())      # صور أصلية مولّدة للمحتوى البصري
-        # خوادم MCP خارجية أضافها المالك (data/external_mcp.json) — اتصال كسول
+        from .mcp.catalog import register_builtins
+
+        register_builtins(mcp, {"llm": llm, "memory": memory})
         try:
             from .mcp.servers.external_mcp import register_all
 
             register_all(mcp)
         except Exception:  # noqa: BLE001
             logger.exception("external MCP servers failed to load")
+        # أدوات الموظفين الخاصة (يضيفها المالك لموظف بعينه — HTTP عام فقط)
+        try:
+            from .mcp import employee_mcp
+
+            employee_mcp.register_all(mcp)
+        except Exception:  # noqa: BLE001
+            logger.exception("employee MCP servers failed to load")
         c.register_singleton(MCPRegistry, mcp)
 
         # --- capabilities ---
@@ -483,6 +482,13 @@ class AEOSPlatform:
             self._graph_memory.clear(employee_id)
         except Exception:  # noqa: BLE001
             pass
+        # أدواته الخاصة وأسرارها تُحذف معه
+        try:
+            from .mcp import employee_mcp
+
+            employee_mcp.purge(employee_id, self.container.resolve(MCPRegistry))
+        except Exception:  # noqa: BLE001
+            logger.exception("purging employee MCP servers failed")
         return bool(self._repo.delete(employee_id))
 
     def delete_agent(self, platform: str, account_username: str) -> bool:
