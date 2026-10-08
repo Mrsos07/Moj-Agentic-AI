@@ -11,8 +11,8 @@ import logging
 import re
 
 _PATTERNS = [
-    # ?token=… / &key=… / sig=… في أي رابط
-    (re.compile(r"(?i)\b(token|access_token|key|api_key|sig|password)=([^&\s\"']+)"), r"\1=***"),
+    # ?token=… / &key=… / sig=… / ?tavilyApiKey=… في أي رابط (اسم المعامل يحوي الكلمة)
+    (re.compile(r"(?i)([?&\s][\w.-]*(?:token|key|sig|secret|password|auth)[\w.-]*)=([^&\s\"']+)"), r"\1=***"),
     # ترويسة Authorization
     (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+"), r"\1 ***"),
     # أي JWT ظاهر (ثلاثة مقاطع base64url تبدأ بـ eyJ)

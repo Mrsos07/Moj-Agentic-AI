@@ -51,8 +51,10 @@ class MCPPatchIn(BaseModel):
     enabled: Optional[bool] = None
     scope: Optional[Dict[str, bool]] = None
     allowed_tools: Optional[List[str]] = None
+    research_tool: Optional[str] = None
     env: Optional[Dict[str, Optional[str]]] = None
     headers: Optional[Dict[str, Optional[str]]] = None
+    query_secrets: Optional[Dict[str, Optional[str]]] = None
 
 
 @router.get("/mcps")
@@ -60,16 +62,82 @@ def list_mcps(user: User = Depends(require("system.mcp.view"))) -> Dict[str, Any
     return {"ok": True, **_svc().mcp_overview()}
 
 
+class MCPAuthIn(BaseModel):
+    mode: str = "none"          # none | bearer | header | query | env
+    name: str = ""              # اسم الترويسة / معامل الرابط / متغيّر البيئة
+    key: str = ""
+
+
+class MCPFormIn(BaseModel):
+    name: str
+    label: str = ""
+    description: str = ""
+    transport: str = "http"     # http | stdio
+    url: str = ""
+    command: str = ""
+    args: List[str] = []
+    auth: MCPAuthIn = MCPAuthIn()
+    headers: Dict[str, str] = {}
+    env: Dict[str, str] = {}
+    allowed_tools: Optional[List[str]] = None
+    research_tool: str = ""
+    scope: Dict[str, bool] = {"coordinator": True, "employees": True}
+
+
+def _form_errors(fn):
+    try:
+        return fn()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - فشل الاتصال/البروتوكول/التشغيل
+        raise HTTPException(502, f"تعذّر الاتصال بالخادم: {exc}") from exc
+
+
+@router.post("/mcps/test-connection")
+def test_mcp_connection(body: MCPFormIn,
+                        user: User = Depends(require("system.mcp.manage"))) -> Dict[str, Any]:
+    """اختبار الاتصال من نموذج الإضافة السريعة — يكتشف الأدوات ولا يحفظ شيئاً."""
+    return {"ok": True, **_form_errors(lambda: _svc().test_form(body.model_dump()))}
+
+
+@router.post("/mcps")
+def add_mcp(body: MCPFormIn, user: User = Depends(require("system.mcp.manage"))) -> Dict[str, Any]:
+    """إضافة سريعة: الاسم + الاتصال (رابط HTTP أو أمر stdio) + المفتاح وطريقة إرساله.
+    يتصل ويكتشف الأدوات قبل الحفظ، ثم يصير الخادم مدمجاً ويتصل به منسّق كل مالك."""
+    return {"ok": True, "server": _form_errors(lambda: _svc().add_from_form(body.model_dump(),
+                                                                           added_by=user.email))}
+
+
+@router.get("/mcps/template")
+def mcp_template(user: User = Depends(require("system.mcp.view"))):
+    """قالب خادم MCP داخلي (Python قياسي، stdio) لتبنيه بنفسك ثم ترفعه كحزمة."""
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(_svc().SERVER_TEMPLATE, media_type="text/x-python; charset=utf-8",
+                             headers={"Content-Disposition": 'attachment; filename="server.py"'})
+
+
+def _parse_kv(text: str) -> Dict[str, str]:
+    out = {}
+    for line in (text or "").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            if k.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
 @router.post("/mcps/upload")
 async def upload_mcp(file: UploadFile = File(...), name: str = Form(""), description: str = Form(""),
-                     coordinator: bool = Form(True), employees: bool = Form(True),
+                     coordinator: bool = Form(True), employees: bool = Form(True), env: str = Form(""),
                      user: User = Depends(require("system.mcp.manage"))) -> Dict[str, Any]:
     """ملف إعداد JSON (``mcpServers`` أو خادم واحد) أو حزمة خادم ``.py``/``.zip``.
-    يتصل النظام بالخادم ويكتشف أدواته قبل الحفظ — خادم لا يعمل لا يُحفظ."""
+    يتصل النظام بالخادم ويكتشف أدواته قبل الحفظ — خادم لا يعمل لا يُحفظ.
+    ``env``: مفاتيح الحزمة الداخلية (سطر KEY=value لكل متغيّر) — تُحفظ خارج git."""
     data = await _read_upload(file)
     try:
         result = _svc().add_from_upload(file.filename or "", data, added_by=user.email, name=name,
-                                        description=description,
+                                        description=description, env=_parse_kv(env),
                                         scope={"coordinator": coordinator, "employees": employees})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

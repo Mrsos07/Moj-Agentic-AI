@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import axios from 'axios'
 import authHeaders from '../../authHeaders'
+import McpAddCard from './McpAddCard'
 
 /**
  * خوادم MCP العامة للنظام (system/mcps).
@@ -21,9 +22,7 @@ const Toggle = ({ on, disabled, onChange, label }) => (
 const McpAdmin = ({ canManage, notify }) => {
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState('')
-  const [upload, setUpload] = useState({ name: '', description: '', coordinator: true, employees: true })
-  const [secrets, setSecrets] = useState({})      // slug -> {KEY: value}
-  const fileRef = useRef(null)
+  const [secrets, setSecrets] = useState({})      // slug -> {"kind:KEY": value}
 
   const load = useCallback(async () => {
     try {
@@ -33,25 +32,6 @@ const McpAdmin = ({ canManage, notify }) => {
   }, [notify])
 
   useEffect(() => { load() }, [load])
-
-  const doUpload = async () => {
-    const file = fileRef.current?.files?.[0]
-    if (!file) return notify('اختر ملفاً أولاً', 'error')
-    const form = new FormData()
-    form.append('file', file)
-    Object.entries(upload).forEach(([k, v]) => form.append(k, String(v)))
-    setBusy('upload')
-    try {
-      const res = await axios.post('/api/admin/system/mcps/upload', form, { headers: authHeaders(), timeout: 120000 })
-      const ok = res.data.saved.map(s => `${s.label} (${s.tools.length} أداة)`).join('، ')
-      const bad = res.data.errors.map(e => `${e.name}: ${e.error}`).join('؛ ')
-      notify(`✅ أُضيف: ${ok}${bad ? ` — ⚠️ فشل: ${bad}` : ''}`, bad ? 'error' : 'success')
-      fileRef.current.value = ''
-      setUpload({ name: '', description: '', coordinator: true, employees: true })
-      await load()
-    } catch (e) { notify(e?.response?.data?.detail || 'فشل الرفع', 'error') }
-    setBusy('')
-  }
 
   const patch = async (slug, body, msg) => {
     setBusy(slug)
@@ -96,32 +76,7 @@ const McpAdmin = ({ canManage, notify }) => {
   return (
     <div className="space-y-6">
       {canManage ? (
-        <div className={card}>
-          <h3 className={`text-lg font-semibold mb-1 ${strong}`}>➕ إضافة خادم MCP للنظام</h3>
-          <p className={`text-xs mb-4 ${muted}`}>
-            ملف إعداد <code>.json</code> بصيغة <code dir="ltr">{'{"mcpServers": {...}}'}</code> (مثل Claude Desktop/Cursor)،
-            أو حزمة خادم <code>.py</code> / <code>.zip</code> (فيها <code>server.py</code> أو <code>mcp.json</code> يحدّد <code>entry</code>).
-            يتصل النظام بالخادم ويكتشف أدواته قبل الحفظ، ثم يصير <b>مدمجاً</b> في <code dir="ltr">system/mcps/</code> ويتصل به منسّق كل مالك فوراً.
-            الأسرار تُحفظ خارج المستودع ولا تُعرض مرة أخرى.
-          </p>
-          <div className="grid md:grid-cols-2 gap-3">
-            <input ref={fileRef} type="file" accept=".json,.py,.zip" className={input} />
-            <input placeholder="الاسم (اختياري — يُؤخذ من الملف)" value={upload.name}
-              onChange={(e) => setUpload({ ...upload, name: e.target.value })} className={input} />
-            <input placeholder="وصف مختصر: ماذا يقدّم هذا الخادم؟" value={upload.description}
-              onChange={(e) => setUpload({ ...upload, description: e.target.value })} className={`${input} md:col-span-2`} />
-          </div>
-          <div className="flex flex-wrap items-center gap-5 mt-3">
-            <Toggle on={upload.coordinator} onChange={(v) => setUpload({ ...upload, coordinator: v })}
-              label="مرتبط بالمنسّق العام لكل مستخدم تلقائياً" />
-            <Toggle on={upload.employees} onChange={(v) => setUpload({ ...upload, employees: v })}
-              label="متاح للربط بالموظفين الأذكياء" />
-            <button type="button" onClick={doUpload} disabled={busy === 'upload'}
-              className="mr-auto px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium disabled:opacity-50">
-              {busy === 'upload' ? 'جارٍ التشغيل والاتصال…' : 'رفع واتصال'}
-            </button>
-          </div>
-        </div>
+        <McpAddCard notify={notify} onAdded={load} />
       ) : (
         <div className={`${card} text-sm ${muted}`}>🔒 إضافة الخوادم وتعديلها وحذفها لصلاحية <b>المطوّر</b> فقط. لديك صلاحية العرض.</div>
       )}
@@ -207,12 +162,14 @@ const McpAdmin = ({ canManage, notify }) => {
                 </div>
               </div>
 
-              {canManage && (s.env_keys.length > 0 || s.header_keys.length > 0) && (
+              {canManage && (s.env_keys.length > 0 || s.header_keys.length > 0 || (s.query_keys || []).length > 0) && (
                 <div>
-                  <p className={`text-xs mb-1 ${muted}`}>تحديث الأسرار (اتركه فارغاً لإبقاء القيمة الحالية):</p>
+                  <p className={`text-xs mb-1 ${muted}`}>تحديث المفاتيح (اتركه فارغاً لإبقاء القيمة الحالية):</p>
                   <div className="grid md:grid-cols-2 gap-2">
-                    {[...s.env_keys.map(k => ['env', k]), ...s.header_keys.map(k => ['headers', k])].map(([kind, k]) => (
-                      <input key={`${kind}:${k}`} type="password" placeholder={`${k} (${kind === 'env' ? 'متغير بيئة' : 'ترويسة'})`} dir="ltr"
+                    {[...s.env_keys.map(k => ['env', k]), ...s.header_keys.map(k => ['headers', k]),
+                      ...(s.query_keys || []).map(k => ['query_secrets', k])].map(([kind, k]) => (
+                      <input key={`${kind}:${k}`} type="password" autoComplete="off" dir="ltr"
+                        placeholder={`${k} (${kind === 'env' ? 'متغيّر بيئة' : kind === 'headers' ? 'ترويسة' : 'معامل رابط'})`}
                         value={secrets[s.slug]?.[`${kind}:${k}`] || ''}
                         onChange={(e) => setSecrets(p => ({ ...p, [s.slug]: { ...p[s.slug], [`${kind}:${k}`]: e.target.value } }))}
                         className={input} />
@@ -221,7 +178,7 @@ const McpAdmin = ({ canManage, notify }) => {
                   <button type="button" disabled={busy === s.slug}
                     onClick={() => {
                       const vals = secrets[s.slug] || {}
-                      const body = { env: {}, headers: {} }
+                      const body = { env: {}, headers: {}, query_secrets: {} }
                       Object.entries(vals).forEach(([key, v]) => { if (v) { const [kind, k] = key.split(':'); body[kind][k] = v } })
                       patch(s.slug, body, 'حُدّثت الأسرار وأُعيد الاتصال').then(() => setSecrets(p => ({ ...p, [s.slug]: {} })))
                     }}
