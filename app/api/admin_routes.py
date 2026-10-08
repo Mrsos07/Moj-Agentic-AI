@@ -35,11 +35,14 @@ class UserListResponse(BaseModel):
     name: Optional[str] = None
     profile_picture: Optional[str] = None
     is_admin: bool
+    role: str = "user"
+    permissions: List[str] = []
     is_active: bool
     created_at: str
     x_accounts_count: int
     conversations_count: int
     social_accounts_count: int
+    employees_count: int = 0
     
     class Config:
         from_attributes = True
@@ -72,8 +75,25 @@ class DashboardStats(BaseModel):
 
 class UpdateUserRequest(BaseModel):
     is_admin: Optional[bool] = None
+    role: Optional[str] = None
     is_active: Optional[bool] = None
     name: Optional[str] = None
+
+
+def _user_row(db: Session, user: User) -> "UserListResponse":
+    """صف المستخدم كاملاً (كان update_user يعيد صفاً ناقص الحقول الإلزامية ⇒ خطأ 500)."""
+    from app.auth.roles import permissions_of, role_of
+    from app.db.models import AIEmployee
+
+    return UserListResponse(
+        id=user.id, email=user.email, name=user.name, profile_picture=user.profile_picture,
+        is_admin=user.is_admin, role=role_of(user), permissions=permissions_of(user),
+        is_active=user.is_active, created_at=user.created_at.isoformat(),
+        x_accounts_count=len(user.x_accounts),
+        conversations_count=db.query(Conversation).filter(Conversation.user_id == user.id).count(),
+        social_accounts_count=db.query(SocialAccount).filter(SocialAccount.user_id == user.id).count(),
+        employees_count=db.query(AIEmployee).filter(AIEmployee.user_id == user.id).count(),
+    )
 
 
 class MessageResponse(BaseModel):
@@ -89,7 +109,7 @@ async def get_dashboard_stats(
     total_users = db.query(User).count()
     active_users = db.query(User).filter(User.is_active == True).count()
     inactive_users = db.query(User).filter(User.is_active == False).count()
-    admin_users = db.query(User).filter(User.is_admin == True).count()
+    admin_users = db.query(User).filter(User.role.in_(("admin", "developer"))).count()
     total_x_accounts = db.query(XAccount).count()
     
     today = datetime.utcnow().date()
@@ -115,33 +135,7 @@ async def get_all_users(
     limit: int = 100
 ):
     users = db.query(User).offset(skip).limit(limit).all()
-    
-    result = []
-    for user in users:
-        # عدد المحادثات
-        conversations_count = db.query(Conversation).filter(
-            Conversation.user_id == user.id
-        ).count()
-        
-        # عدد الحسابات الاجتماعية
-        social_accounts_count = db.query(SocialAccount).filter(
-            SocialAccount.user_id == user.id
-        ).count()
-        
-        result.append(UserListResponse(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            profile_picture=user.profile_picture,
-            is_admin=user.is_admin,
-            is_active=user.is_active,
-            created_at=user.created_at.isoformat(),
-            x_accounts_count=len(user.x_accounts),
-            conversations_count=conversations_count,
-            social_accounts_count=social_accounts_count
-        ))
-    
-    return result
+    return [_user_row(db, user) for user in users]
 
 
 @router.put("/users/{user_id}", response_model=UserListResponse)
@@ -164,8 +158,22 @@ async def update_user(
             detail="Cannot deactivate your own account"
         )
     
-    if request.is_admin is not None:
-        user.is_admin = request.is_admin
+    from app.auth.roles import ROLES, has, role_of, set_role
+
+    # is_admin القديم يُترجم إلى دور (للواجهة القديمة)
+    new_role = request.role
+    if new_role is None and request.is_admin is not None:
+        new_role = "admin" if request.is_admin else "user"
+    if new_role is not None and new_role != role_of(user):
+        if new_role not in ROLES:
+            raise HTTPException(status_code=400, detail=f"دور غير معروف: {new_role}")
+        if user.id == admin_user.id:
+            raise HTTPException(status_code=400, detail="لا يمكنك تغيير دورك بنفسك")
+        # منح «المطوّر» أو سحبه للمطوّر وحده: المسؤول لا يرقّي نفسه أو غيره لصلاحية تشغيل كود
+        touches_dev = "developer" in (new_role, role_of(user))
+        if touches_dev and not has(admin_user, "admin.roles.grant_developer"):
+            raise HTTPException(status_code=403, detail="منح دور المطوّر أو سحبه للمطوّر فقط")
+        set_role(user, new_role)
     if request.is_active is not None:
         user.is_active = request.is_active
     if request.name is not None:
@@ -173,17 +181,15 @@ async def update_user(
     
     db.commit()
     db.refresh(user)
-    
-    return UserListResponse(
-        id=user.id,
-        email=user.email,
-        name=user.name,
-        profile_picture=user.profile_picture,
-        is_admin=user.is_admin,
-        is_active=user.is_active,
-        created_at=user.created_at.isoformat(),
-        x_accounts_count=len(user.x_accounts)
-    )
+    return _user_row(db, user)
+
+
+@router.get("/permissions")
+async def get_permissions(admin_user: User = Depends(require_admin)):
+    """مصفوفة الأدوار والصلاحيات + صلاحيات المستخدم الحالي."""
+    from app.auth.roles import matrix, permissions_of, role_of
+
+    return {**matrix(), "me": {"role": role_of(admin_user), "permissions": permissions_of(admin_user)}}
 
 
 @router.get("/users/{user_id}", response_model=UserDetailResponse)

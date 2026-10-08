@@ -1,0 +1,19 @@
+{
+  "slug": "memory",
+  "label": "ذاكرة الموظف",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "MemoryMCP",
+  "inject": [
+    "memory"
+  ],
+  "core": true,
+  "order": 40,
+  "description": "حفظ واسترجاع طبقات ذاكرة الدورة لكل موظف.",
+  "enabled": true,
+  "scope": {
+    "coordinator": false,
+    "employees": true
+  },
+  "note": "ليست للمنسّق: أدواتها بمعرّف موظف، والمنسّق له أدوات ذاكرته المعزولة (remember/recall_memory)."
+}

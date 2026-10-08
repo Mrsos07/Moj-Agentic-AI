@@ -195,9 +195,11 @@ else:
         "    m.run(transport='streamable-http', host='127.0.0.1', port=int(sys.argv[1]))\n"
         "else:\n    m.run()\n", encoding="utf-8")
 
-    os.environ["EXTERNAL_MCP_CONFIG"] = str(Path(tempfile.gettempdir()) / "aeos_ext_mcp_test.json")
-    X._CONFIG_PATH = Path(os.environ["EXTERNAL_MCP_CONFIG"])
-    X._CONFIG_PATH.unlink(missing_ok=True)
+    # الكتالوج (system/mcps) والأسرار والمخزن القديم في مجلد مؤقت — لا يلمس بيانات النظام
+    _tmp_cat = Path(tempfile.mkdtemp(prefix="aeos_mcp_cat_"))
+    X._CATALOG_DIR = _tmp_cat / "mcps"
+    X._SECRETS_PATH = _tmp_cat / "secrets.json"
+    X._LEGACY_PATH = _tmp_cat / "legacy.json"
 
     def run_suite(label, raw):
         reg = MCPRegistry()
@@ -244,7 +246,9 @@ else:
                            "allowed_tools": ["search_notes"], "research_tool": "search_notes"})
     finally:
         proc.terminate()
-    X._CONFIG_PATH.unlink(missing_ok=True)
+    import shutil as _shutil
+
+    _shutil.rmtree(_tmp_cat, ignore_errors=True)
 
 print()
 if FAILED:

@@ -1,0 +1,129 @@
+{
+  "slug": "playwright_x",
+  "label": "X — القراءة (Playwright)",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "PlaywrightXMCP",
+  "inject": [],
+  "core": true,
+  "order": 20,
+  "description": "قراءة التايم لاين والترندات والبحث والمنشنات وملفات الحسابات وأداء المنشورات بكوكيز الحساب.",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": true
+  },
+  "owner_param": "account",
+  "coordinator_tools": [
+    {
+      "name": "read_trends",
+      "description": "اقرأ ترندات X الحالية لحساب المالك.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "يوزر حساب X للمالك الذي تُقرأ البيانات به (من حساباته فقط)"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account"
+        ]
+      }
+    },
+    {
+      "name": "read_timeline",
+      "description": "اقرأ أحدث تغريدات التايم لاين لحساب المالك.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "يوزر حساب X للمالك الذي تُقرأ البيانات به (من حساباته فقط)"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account"
+        ]
+      }
+    },
+    {
+      "name": "search_tweets",
+      "description": "ابحث في تغريدات X.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "يوزر حساب X للمالك الذي تُقرأ البيانات به (من حساباته فقط)"
+          },
+          "query": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "top",
+              "live"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account",
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "read_user_profile",
+      "description": "اقرأ ملف حساب X وأحدث تغريداته.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "يوزر حساب X للمالك الذي تُقرأ البيانات به (من حساباته فقط)"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account",
+          "handle"
+        ]
+      }
+    },
+    {
+      "name": "read_notifications",
+      "description": "اقرأ المنشنات والردود الموجّهة لحساب المالك.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "يوزر حساب X للمالك الذي تُقرأ البيانات به (من حساباته فقط)"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account"
+        ]
+      }
+    }
+  ]
+}

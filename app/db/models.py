@@ -14,6 +14,8 @@ class User(Base):
     name = Column(String(255), nullable=True)
     profile_picture = Column(String(500), nullable=True)
     is_admin = Column(Boolean, default=False, nullable=False)
+    #: user | admin | developer (app.auth.roles) — is_admin يبقى متزامناً للتوافق
+    role = Column(String(20), default="user", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     

@@ -11,11 +11,12 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.auth.ownership import is_admin, label_or_404, owns_employee
 from app.auth.ownership import require_user as get_current_user
+from app.auth.roles import require as require_perm
 from app.db.models import User
 
 from ..bootstrap import get_platform
@@ -948,8 +949,11 @@ def tools_overview(employee_id: str = "",
 
 @router.post("/tools/external")
 def add_external_tool(body: ExternalMCPIn,
-                      current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
-    """يتصل بالخادم فعلاً ويكتشف أدواته قبل الحفظ — لا يُحفظ خادم لا يعمل."""
+                      current_user: User = Depends(require_perm("system.mcp.manage"))) -> Dict[str, Any]:
+    """يتصل بالخادم فعلاً ويكتشف أدواته قبل الحفظ — لا يُحفظ خادم لا يعمل.
+
+    للمطوّر فقط: كان أي مستخدم مسجّل يضيف خادم stdio (أمر يُشغَّل على هذا الجهاز)
+    للنظام كله. الواجهة المعتمدة الآن لوحة التحكم (/api/admin/system/mcps)."""
     from ..services import tools_service as TS
 
     try:
@@ -962,7 +966,7 @@ def add_external_tool(body: ExternalMCPIn,
 
 @router.delete("/tools/external/{name}")
 def delete_external_tool(name: str,
-                         current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+                         current_user: User = Depends(require_perm("system.mcp.manage"))) -> Dict[str, Any]:
     from ..services import tools_service as TS
 
     if not TS.remove_external(name):
@@ -980,6 +984,71 @@ def attach_employee_tool(employee_id: str, body: ToolAttachIn,
         return {"ok": True, **TS.set_attached(cfg, body.server, body.attach)}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+class PrivateMCPIn(BaseModel):
+    name: str
+    url: str
+    headers: Dict[str, str] = {}
+    description: str = ""
+    allowed_tools: Optional[List[str]] = None
+    research_tool: str = ""
+    research_arg: str = ""
+
+
+def _private_errors(fn):
+    try:
+        return fn()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - فشل الاتصال/البروتوكول
+        raise HTTPException(502, f"تعذّر الاتصال بالخادم: {exc}") from exc
+
+
+@router.post("/employees/{employee_id}/tools/private")
+def add_private_tool(employee_id: str, body: PrivateMCPIn,
+                     current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """أداة MCP فرعية **لهذا الموظف فقط** يضيفها مالكه: خادم HTTP عام، يُتصل به وتُكتشف
+    أدواته قبل الحفظ، ثم يُربط بالموظف. stdio والحزم لأدوات النظام (المطوّر)."""
+    from ..services import tools_service as TS
+
+    cfg = _employee_or_404(employee_id, current_user)
+    raw = {**body.model_dump(), "transport": "http"}
+    return {"ok": True, "server": _private_errors(lambda: TS.add_private(cfg, raw, current_user.email))}
+
+
+@router.post("/employees/{employee_id}/tools/private/upload")
+async def upload_private_tool(employee_id: str, file: UploadFile = File(...),
+                              current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """ملف إعداد JSON (صيغة mcpServers أو خادم واحد) — خوادم HTTP فقط."""
+    from ..mcp import employee_mcp as EM
+    from ..services import tools_service as TS
+
+    cfg = _employee_or_404(employee_id, current_user)
+    data = await file.read(512 * 1024 + 1)
+    if len(data) > 512 * 1024:
+        raise HTTPException(413, "ملف الإعداد أكبر من 512KB")
+    raws = _private_errors(lambda: EM.parse_upload(data))
+    saved, errors = [], []
+    for raw in raws:
+        try:
+            saved.append(TS.add_private(cfg, raw, current_user.email))
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"name": raw.get("name") or "?", "error": str(exc)[:300]})
+    if not saved:
+        raise HTTPException(400, "لم يُضف أي خادم: " + "؛ ".join(f"{e['name']}: {e['error']}" for e in errors))
+    return {"ok": True, "saved": saved, "errors": errors}
+
+
+@router.delete("/employees/{employee_id}/tools/private/{name}")
+def delete_private_tool(employee_id: str, name: str,
+                        current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    from ..services import tools_service as TS
+
+    cfg = _employee_or_404(employee_id, current_user)
+    if not TS.remove_private(cfg, name):
+        raise HTTPException(404, "server not found")
+    return {"ok": True, "deleted": name}
 
 
 @router.post("/employees/{employee_id}/tools/call")

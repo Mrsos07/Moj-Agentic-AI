@@ -563,3 +563,25 @@ independent structural causes — none of them fixable by telling the model to
   Optional UI checks use a separate Vite port and a fresh headless Chrome with mocked APIs:
   call `verify_custom_skill.check_skill_browser('http://127.0.0.1:3017/')` after starting
   `npm run dev -- --host 127.0.0.1 --port 3017 --strictPort` in `frontend`.
+
+## All MCP servers and skills live in `system/` (since 2026-10-07)
+- `system/mcps/<slug>/` = every MCP server: the 8 built-ins (`kind: builtin` in mcp.json +
+  `server.py`, loaded in-process by `app/aeos/mcp/catalog.py`) and uploaded ones (stdio/HTTP/
+  package via `external_mcp.py`). `system/skills/<name>/` = every skill: `kind: coordinator`
+  (SKILL.md for the coordinator) and `kind: employee` (SKILL.md + `skill.py`, ordered by `order`).
+- **Edit the code in `system/`**, not in `app/aeos/mcp/servers/*_mcp.py` or the skill class names
+  in `app/aeos/skills/builtin.py`: those are aliases. `app/core/system_loader.py` loads each file
+  once under `moj_system.*`, so old imports get the SAME module/class objects.
+- Employee skills call shared helpers through `_h.` (= `app.aeos.skills.builtin`) so patching a
+  helper in a test reaches every skill. A new helper goes in builtin.py and is used as `_h.name`.
+- The coordinator gets every enabled server with `scope.coordinator` EXCEPT `x` (X actions go
+  through employees) and `memory`. `playwright_x` reads need `account` and are checked with
+  `label_owner_ids` (real ownership — no admin override).
+- Only the `developer` role (`app/auth/roles.py`) may add/edit/delete MCPs and skills.
+  Verify: `.\venv\Scripts\python.exe verify_system_admin.py`.
+- Second level — **employee-private MCP** (`app/aeos/mcp/employee_mcp.py`): any owner may add
+  one to their own employee, but HTTP only and public addresses only (`check_public_url`, re-run
+  on every call; `_HttpTransport` never follows redirects). Never relax this to stdio/packages or
+  private IPs for owners: registration is open, so that would be remote code execution / SSRF to
+  X Suite and loginx. Registry name `ext_e<id>_<slug>`; secrets in `data/employee_mcps/`;
+  `AEOSPlatform.delete_employee` purges them. Employee-private skills = `custom_skills`.

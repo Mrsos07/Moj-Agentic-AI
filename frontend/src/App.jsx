@@ -26,6 +26,19 @@ function App() {
     if (savedUser) {
       setUser(JSON.parse(savedUser))
     }
+    // الدور قد يتغيّر من لوحة التحكم: حدّث بيانات المستخدم من الخادم بدل نسخة المتصفح القديمة
+    const token = localStorage.getItem('token')
+    if (token) {
+      fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => (r.ok ? r.json() : null))
+        .then(fresh => {
+          if (fresh?.id) {
+            setUser(fresh)
+            localStorage.setItem('user', JSON.stringify(fresh))
+          }
+        })
+        .catch(() => {})
+    }
   }, [])
 
   const handleLogin = (userData) => {

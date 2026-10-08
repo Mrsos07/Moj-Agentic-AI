@@ -49,6 +49,8 @@ def _apply_lightweight_migrations():
     migrations = [
         # (table_name, column_name, column_definition)
         ("social_accounts", "category", "VARCHAR(50)"),
+        # الأدوار: من كان is_admin يصير «admin» (انظر الترقية بعد الحلقة)
+        ("users", "role", "VARCHAR(20) NOT NULL DEFAULT 'user'"),
     ]
 
     with engine.connect() as con:
@@ -67,6 +69,9 @@ def _apply_lightweight_migrations():
                         f"CREATE INDEX IF NOT EXISTS ix_{table}_{column} ON {table}({column})"
                     )
                 con.commit()
+                if (table, column) == ("users", "role"):
+                    con.exec_driver_sql("UPDATE users SET role='admin' WHERE is_admin=1")
+                    con.commit()
                 print(f"[Migration] ✅ أضفت العمود {column} إلى {table}")
             except Exception as e:
                 print(f"[Migration] ⚠️ فشل ترقية {table}.{column}: {e}")

@@ -1,0 +1,36 @@
+{
+  "slug": "news",
+  "label": "الأخبار (RSS)",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "NewsMCP",
+  "inject": [],
+  "core": false,
+  "order": 60,
+  "description": "أحدث عناصر خلاصة RSS / أخبار قوقل حسب التخصص.",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": true
+  },
+  "coordinator_tools": [
+    {
+      "name": "fetch_feed",
+      "description": "اجلب أحدث أخبار خلاصة RSS (مثلاً رابط بحث أخبار قوقل).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "feed_url": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "feed_url"
+        ]
+      }
+    }
+  ]
+}

@@ -292,6 +292,9 @@ flowchart TB
 
 ## 5) الأدوات وخوادم MCP
 
+كل الخوادم أدناه مجلدات في **`system/mcps/`** (المجلد الرئيسي)، يحمّلها `app/aeos/mcp/catalog.py`
+عند الإقلاع: الأصلية (`kind: builtin`) داخل العملية، والمرفوعة عبر بروتوكول MCP.
+
 ```mermaid
 flowchart LR
     CAP["Capabilities"] --> REG["MCPRegistry<br/>توجيه الأداة للخادم"]
@@ -304,7 +307,7 @@ flowchart LR
     REG --> C4["news — Google News RSS"]
     REG --> C5["search — Tavily/Brave/SerpAPI<br/>(فشل صريح بلا مفتاح)"]
     REG --> C6["image — GPT Image 2"]
-    REG --> EXT["ext_* — MCP خارجي<br/>عميل JSON-RPC داخلي<br/>stdio / Streamable HTTP"]
+    REG --> EXT["ext_* — مرفوع (مدمج)<br/>عميل JSON-RPC داخلي<br/>stdio / Streamable HTTP"]
 
     EXT --> WL["قائمة بيضاء للأدوات<br/>+ «أداة بحث» يعيّنها المالك<br/>أسرار في data/ خارج git"]
 
@@ -313,6 +316,54 @@ flowchart LR
     C1 --> OR["OpenRouter"]
     C6 --> OR
 ```
+
+### قدرات النظام العامة ولوحة التحكم
+
+```mermaid
+flowchart LR
+    DEV["المطوّر<br/>(دور developer)"] -->|"رفع .json / .py / .zip / SKILL.md"| ADM["/api/admin/system/*<br/>app.auth.roles"]
+    ADMIN["المسؤول"] -->|"عرض فقط"| ADM
+    subgraph SYS["system/ — المجلد الرئيسي"]
+        MB["mcps/ أصلية (8)<br/>mcp.json kind: builtin + server.py"]
+        MU["mcps/ مرفوعة<br/>mcp.json + كود الحزمة"]
+        SC["skills/ kind: coordinator<br/>SKILL.md"]
+        SE["skills/ kind: employee (11)<br/>SKILL.md + skill.py"]
+    end
+    ADM --> MU
+    ADM --> SC
+    ADM --> SEC["data/system_mcp_secrets.json<br/>data/system_state.json<br/>(خارج git)"]
+    MB -->|"catalog.register_builtins"| REG["MCPRegistry"]
+    MU -->|"اتصال + اكتشاف الأدوات قبل الحفظ"| REG
+    REG -->|"scope.coordinator<br/>عدا x و memory"| CO["منسّق كل مالك<br/>أدوات mcp__&lt;slug&gt;__&lt;tool&gt;"]
+    SC -->|"الاسم والوصف دائماً<br/>التعليمات عبر use_system_skill"| CO
+    REG -->|"scope.employees"| EMP["الموظفون<br/>المالك يربط ولا يضيف"]
+    SE -->|"SkillRegistry بترتيب order"| EMP
+```
+
+- **من يفعل ماذا:** `user` يدير موظفيه فقط · `admin` يفتح اللوحة ويدير المستخدمين ويعرض القدرات · `developer` وحده يضيف/يعدّل/يحذف خوادم MCP ومهارات النظام ويمنح دور المطوّر. الفرض في الخادم (`app/auth/roles.py`)، والواجهة تُخفي الأزرار فقط.
+- **لماذا المطوّر وحده؟** خادم stdio يشغّل أمراً على الجهاز، والحزمة كود يُنفَّذ. قبل هذا كان أي مستخدم مسجّل يضيف خادماً للنظام كله عبر `POST /api/aeos/tools/external`.
+- **حماية الرفع:** لا `..` ولا مسارات مطلقة داخل الـzip، وحدّ للحجم وعدد الملفات، والحزمة التي لا تعمل لا تُحفظ ويُحذف مجلدها.
+- **الترحيل:** المخزن القديم `data/external_mcp.json` يُنقل تلقائياً إلى `system/mcps/` مرة واحدة.
+- **مدمج أصلي ومدمج مرفوع:** بعد الرفع لا فرق في المكانة (قائمة واحدة، تحميل عند الإقلاع، اتصال منسّق كل مالك). الفرق تقني: الأصلي كود داخل العملية ويُعدَّل في `server.py`، والمرفوع عملية/رابط ويُعدَّل من اللوحة. اسم خادم أصلي لا يُقبل لخادم مرفوع، والأصلي لا يُعدَّل ولا يُحذف من اللوحة.
+- **حدود المنسّق:** يتصل بكل الخوادم عدا `x` (الفعل على X يمرّ بالموظف: شخصيته وحارسه وميزانياته) و`memory` (ذاكرة الموظفين). قراءة X بحسابات مالكه فقط — بلا استثناء للمسؤول.
+- **الأسماء القديمة:** `app/aeos/mcp/servers/*_mcp.py` و`builtin.OnThisDaySkill`… أسماء بديلة للوحدات نفسها في `system/` (`app/core/system_loader.py` يحمّل كل ملف مرة واحدة).
+
+### أدوات الموظف الخاصة (المستوى الثاني)
+
+```mermaid
+flowchart LR
+    OWN["مالك الموظف"] -->|"نموذج أو ملف JSON<br/>/employees/{id}/tools/private"| CHK{"HTTP فقط؟<br/>عنوان عام بعد DNS؟"}
+    CHK -->|"لا"| REJ["400 — stdio والعناوين الداخلية<br/>أدوات نظام للمطوّر"]
+    CHK -->|"نعم"| DISC["اتصال + اكتشاف الأدوات<br/>بلا تتبّع تحويلات"]
+    DISC --> STORE["data/employee_mcps/&lt;id&gt;.json<br/>(خارج git)"]
+    DISC --> REG["MCPRegistry<br/>ext_e&lt;id&gt;_&lt;slug&gt;"]
+    REG -->|"يُربط به وحده"| EMP["ذلك الموظف<br/>(بحث قبل الكتابة · use_tool)"]
+    DEL["حذف الموظف"] -->|"employee_mcp.purge"| STORE
+```
+
+- لا يربطها مالك آخر بموظفه، ولا يستدعيها موظف آخر، وليست من أدوات المنسّق النظامية.
+- فحص العنوان يتكرر عند **كل** استدعاء (`EmployeeMCPServer`) — تغيّر DNS بعد الإضافة لا يفتح ثغرة.
+- مهارات الموظف الخاصة: `business_rules.custom_skills` (`app/aeos/skills/custom.py`) — من الشات أو البطاقة أو ملف.
 
 ---
 

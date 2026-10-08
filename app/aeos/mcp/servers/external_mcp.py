@@ -39,8 +39,17 @@ PROTOCOL_VERSION = "2025-06-18"
 PREFIX = "ext_"
 _DEFAULT_TIMEOUT = 30.0
 _MAX_RESULT_CHARS = 6000
-_CONFIG_PATH = Path(os.getenv("EXTERNAL_MCP_CONFIG") or
-                    Path(__file__).resolve().parents[4] / "data" / "external_mcp.json")
+_ROOT = Path(__file__).resolve().parents[4]
+#: خوادم MCP العامة للنظام: مجلد لكل خادم فيه ``mcp.json`` (بلا قيم أسرار) + كود الحزمة
+#: إن كان مرفوعاً كحزمة. يديرها **المطوّر** من لوحة التحكم (app.auth.roles).
+_CATALOG_DIR = Path(os.getenv("SYSTEM_MCP_DIR") or _ROOT / "system" / "mcps")
+#: قيم الأسرار (env/headers) خارج المستودع
+_SECRETS_PATH = Path(os.getenv("SYSTEM_MCP_SECRETS") or _ROOT / "data" / "system_mcp_secrets.json")
+#: المخزن القديم (ملف JSON واحد يضيف إليه أي مستخدم) — يُرحَّل مرة واحدة إلى الكتالوج
+_LEGACY_PATH = Path(os.getenv("EXTERNAL_MCP_CONFIG") or _ROOT / "data" / "external_mcp.json")
+MANIFEST = "mcp.json"
+#: رموز تُحلّ وقت التشغيل في manifest الحزم (لا مسارات مطلقة في المستودع)
+PY_TOKEN, PKG_TOKEN = "{python}", "{package}"
 
 
 class MCPError(RuntimeError):
@@ -49,12 +58,13 @@ class MCPError(RuntimeError):
 
 # ─────────────────────────── transports ───────────────────────────
 class _StdioTransport:
-    def __init__(self, command: str, args: List[str], env: Dict[str, str]) -> None:
+    def __init__(self, command: str, args: List[str], env: Dict[str, str],
+                 cwd: Optional[str] = None) -> None:
         exe = shutil.which(command) or command  # Windows: npx → npx.cmd
         self._proc = subprocess.Popen(
             [exe, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, env={**os.environ, **env},
-            text=True, encoding="utf-8", bufsize=1,
+            text=True, encoding="utf-8", bufsize=1, cwd=cwd or None,
         )
         self._pending: Dict[int, Dict[str, Any]] = {}
         self._cond = threading.Condition()
@@ -119,8 +129,12 @@ class _HttpTransport:
             headers["Mcp-Session-Id"] = self._session_id
         if self.protocol:
             headers["MCP-Protocol-Version"] = self.protocol
+        # بلا تتبّع تحويلات: خادم عام كان يستطيع تحويل الطلب لعنوان داخلي فيتجاوز فحص
+        # العنوان (SSRF عبر redirect). خادم MCP لا يحتاج تحويلاً أصلاً.
         resp = requests.post(self._url, json=msg, headers=headers, timeout=timeout,
-                             stream=True)
+                             stream=True, allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            raise MCPError(f"HTTP {resp.status_code}: تحويلات الخادم غير مسموحة")
         if resp.status_code >= 400:
             raise MCPError(f"HTTP {resp.status_code}")
         sid = resp.headers.get("Mcp-Session-Id")
@@ -190,8 +204,8 @@ class MCPClient:
         if cfg.get("transport") == "http":
             self._t = _HttpTransport(cfg["url"], cfg.get("headers") or {})
         else:
-            self._t = _StdioTransport(cfg["command"], list(cfg.get("args") or []),
-                                      dict(cfg.get("env") or {}))
+            command, args, cwd = runtime_command(cfg)
+            self._t = _StdioTransport(command, args, dict(cfg.get("env") or {}), cwd)
         res = self._rpc("initialize", {
             "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
             "clientInfo": {"name": "moj-aeos", "version": "1.0"},
@@ -240,6 +254,24 @@ def result_text(result: Dict[str, Any]) -> str:
     if not parts and result.get("structuredContent") is not None:
         parts = [json.dumps(result["structuredContent"], ensure_ascii=False)]
     return "\n".join(p for p in parts if p)[:_MAX_RESULT_CHARS]
+
+
+def package_dir(slug_: str) -> Path:
+    return _CATALOG_DIR / slug_
+
+
+def runtime_command(cfg: Dict[str, Any]) -> "tuple[str, List[str], Optional[str]]":
+    """حلّ رموز manifest الحزم: ``{python}`` = مفسّر البيئة الحالية، ``{package}`` = مجلد
+    الحزمة. ولا يُسمح لمجلد العمل بالخروج عن الكتالوج."""
+    import sys
+
+    pkg = package_dir(cfg["slug"])
+    command = sys.executable if cfg.get("command") == PY_TOKEN else cfg["command"]
+    args = [str(a).replace(PKG_TOKEN, str(pkg)) for a in cfg.get("args") or []]
+    cwd = None
+    if cfg.get("cwd") == PKG_TOKEN:
+        cwd = str(pkg)
+    return command, args, cwd
 
 
 # ─────────────────────────── server adapter ───────────────────────────
@@ -300,33 +332,116 @@ class ExternalMCPServer(IMCPServer):
 _store_lock = threading.Lock()
 
 
-def _read() -> List[Dict[str, Any]]:
+def _json(path: Path, default):
     try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8")) or []
+        return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return []
+        return default
     except Exception:  # noqa: BLE001
-        logger.exception("external MCP config unreadable")
-        return []
+        logger.exception("unreadable: %s", path)
+        return default
+
+
+def _atomic_write(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _migrate_legacy() -> None:
+    """المخزن القديم (data/external_mcp.json) ← الكتالوج، مرة واحدة دون فقد أي خادم."""
+    legacy = _json(_LEGACY_PATH, None) if _LEGACY_PATH.exists() else None
+    if not legacy:
+        return
+    existing = {p.parent.name for p in _CATALOG_DIR.glob(f"*/{MANIFEST}")}
+    items = [c for c in legacy if isinstance(c, dict) and c.get("slug") and c["slug"] not in existing]
+    if items:
+        _write_items(items)
+    try:
+        _LEGACY_PATH.replace(_LEGACY_PATH.with_suffix(".json.migrated"))
+    except OSError:
+        logger.warning("could not rename legacy MCP store")
+
+
+def _read() -> List[Dict[str, Any]]:
+    """كل خوادم الكتالوج مع أسرارها مدمجة (للاستخدام الداخلي فقط — لا تُعاد للواجهة)."""
+    if _LEGACY_PATH.exists():
+        with _store_lock:
+            _migrate_legacy()
+    secrets = _json(_SECRETS_PATH, {}) or {}
+    out = []
+    for manifest in sorted(_CATALOG_DIR.glob(f"*/{MANIFEST}")):
+        cfg = _json(manifest, None)
+        # الخوادم المدمجة (kind: builtin) تحمّلها app/aeos/mcp/catalog.py داخل العملية
+        if not isinstance(cfg, dict) or not cfg.get("slug") or cfg.get("kind") == "builtin":
+            continue
+        sec = secrets.get(cfg["slug"]) or {}
+        cfg["env"] = {k: sec.get("env", {}).get(k, "") for k in cfg.pop("env_keys", [])}
+        cfg["headers"] = {k: sec.get("headers", {}).get(k, "") for k in cfg.pop("header_keys", [])}
+        cfg.setdefault("enabled", True)
+        cfg.setdefault("scope", {"coordinator": True, "employees": True})
+        out.append(cfg)
+    return out
+
+
+def _write_items(items: List[Dict[str, Any]]) -> None:
+    """اكتب manifest كل خادم (أسماء المفاتيح فقط) والقيم إلى ملف الأسرار."""
+    secrets = _json(_SECRETS_PATH, {}) or {}
+    for cfg in items:
+        manifest = {k: v for k, v in cfg.items() if k not in ("env", "headers")}
+        manifest["env_keys"] = sorted((cfg.get("env") or {}).keys())
+        manifest["header_keys"] = sorted((cfg.get("headers") or {}).keys())
+        _atomic_write(package_dir(cfg["slug"]) / MANIFEST, manifest)
+        secrets[cfg["slug"]] = {"env": dict(cfg.get("env") or {}),
+                                "headers": dict(cfg.get("headers") or {})}
+    _atomic_write(_SECRETS_PATH, secrets)
+    try:
+        os.chmod(_SECRETS_PATH, 0o600)
+    except OSError:
+        pass
 
 
 def _write(items: List[Dict[str, Any]]) -> None:
-    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(_CONFIG_PATH)
+    """استبدل الكتالوج بالقائمة: ما ليس فيها يُحذف manifest-ه (ومجلده إن كان حزمة)."""
+    keep = {c["slug"] for c in items}
+    for manifest in _CATALOG_DIR.glob(f"*/{MANIFEST}"):
+        if manifest.parent.name not in keep and not is_builtin(manifest.parent.name):
+            _remove_dir(manifest.parent)
+    secrets = {k: v for k, v in (_json(_SECRETS_PATH, {}) or {}).items() if k in keep}
+    _atomic_write(_SECRETS_PATH, secrets)
+    if items:
+        _write_items(items)
 
 
-def list_configs() -> List[Dict[str, Any]]:
-    return _read()
+def is_builtin(slug_: str) -> bool:
+    m = _json(package_dir(slug_) / MANIFEST, None)
+    return isinstance(m, dict) and m.get("kind") == "builtin"
+
+
+def _remove_dir(path: Path) -> None:
+    """احذف مجلد خادم — فقط إن كان داخل الكتالوج فعلاً، وليس خادماً مدمجاً أبداً."""
+    path = path.resolve()
+    if path.parent == _CATALOG_DIR.resolve() and path.is_dir() and not is_builtin(path.name):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def list_configs(enabled_only: bool = False) -> List[Dict[str, Any]]:
+    items = _read()
+    return [c for c in items if c.get("enabled", True)] if enabled_only else items
 
 
 def public_view(cfg: Dict[str, Any], connected: Optional[bool] = None) -> Dict[str, Any]:
     """للواجهة/الشات: بلا قيم الأسرار (أسماء المفاتيح فقط)."""
     return {
-        "name": PREFIX + cfg["slug"], "label": cfg.get("label") or cfg["slug"],
+        "name": PREFIX + cfg["slug"], "slug": cfg["slug"], "label": cfg.get("label") or cfg["slug"],
+        "description": cfg.get("description", ""),
         "transport": cfg.get("transport"), "command": cfg.get("command", ""),
         "args": cfg.get("args") or [], "url": cfg.get("url", ""),
+        "source": cfg.get("source", "config"), "entry": cfg.get("entry", ""),
+        "enabled": bool(cfg.get("enabled", True)),
+        "scope": cfg.get("scope") or {"coordinator": True, "employees": True},
+        "added_by": cfg.get("added_by", ""), "added_at": cfg.get("added_at", ""),
         "env_keys": sorted((cfg.get("env") or {}).keys()),
         "header_keys": sorted((cfg.get("headers") or {}).keys()),
         "tools": [{"name": t["name"], "description": (t.get("description") or "")[:200]}
@@ -344,6 +459,8 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     s = slug(raw.get("name") or raw.get("label") or "")
     if not s:
         raise ValueError("name is required")
+    if is_builtin(s):
+        raise ValueError(f"'{s}' اسم خادم مدمج في النظام — اختر اسماً آخر")
     transport = (raw.get("transport") or ("http" if raw.get("url") else "stdio")).lower()
     if transport not in ("stdio", "http"):
         raise ValueError("transport must be stdio or http")
@@ -356,6 +473,11 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         cfg["command"] = command
         cfg["args"] = [str(a) for a in (raw.get("args") or [])][:30]
         cfg["env"] = {str(k): str(v) for k, v in (raw.get("env") or {}).items()}
+        cwd = raw.get("cwd")
+        if cwd not in (None, "", PKG_TOKEN):   # مجلد العمل: مجلد الحزمة فقط، لا مسار حرّ
+            raise ValueError("cwd is set automatically for uploaded packages only")
+        if cwd == PKG_TOKEN:
+            cfg["cwd"] = PKG_TOKEN
     else:
         url = str(raw.get("url") or "").strip()
         if not re.match(r"^https?://", url):
@@ -366,6 +488,14 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     cfg["allowed_tools"] = None if allowed is None else [str(t) for t in allowed]
     cfg["research_tool"] = str(raw.get("research_tool") or "").strip()
     cfg["research_arg"] = str(raw.get("research_arg") or "").strip()
+    cfg["description"] = str(raw.get("description") or "")[:300]
+    cfg["enabled"] = bool(raw.get("enabled", True))
+    scope = raw.get("scope") if isinstance(raw.get("scope"), dict) else {}
+    cfg["scope"] = {"coordinator": bool(scope.get("coordinator", True)),
+                    "employees": bool(scope.get("employees", True))}
+    for k in ("source", "entry", "added_by", "added_at"):
+        if raw.get(k):
+            cfg[k] = str(raw[k])[:120]
     return cfg
 
 
@@ -400,14 +530,58 @@ def discover(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def _sync_registry(cfg: Dict[str, Any], registry) -> None:
+    if registry is None:
+        return
+    registry.unregister(PREFIX + cfg["slug"])
+    if cfg.get("enabled", True):
+        registry.register(ExternalMCPServer(cfg))
+
+
 def save(raw: Dict[str, Any], registry=None) -> Dict[str, Any]:
     cfg = discover(normalize_config(raw))
     with _store_lock:
-        items = [c for c in _read() if c["slug"] != cfg["slug"]] + [cfg]
-        _write(items)
-    if registry is not None:
-        registry.unregister(PREFIX + cfg["slug"])
-        registry.register(ExternalMCPServer(cfg))
+        _write_items([cfg])
+    _sync_registry(cfg, registry)
+    return cfg
+
+
+def get(name: str) -> Optional[Dict[str, Any]]:
+    s = slug(name[len(PREFIX):] if name.startswith(PREFIX) else name)
+    return next((c for c in _read() if c["slug"] == s), None)
+
+
+def update(name: str, patch: Dict[str, Any], registry=None, rediscover: bool = False) -> Dict[str, Any]:
+    """تعديل خادم قائم: التفعيل، الوصف، النطاق، القائمة البيضاء، قيم الأسرار. الأسرار
+    الفارغة في الطلب تعني «أبقِ القيمة الحالية» (الواجهة لا تعرض القيم أصلاً)."""
+    cur = get(name)
+    if cur is None:
+        raise KeyError(name)
+    cfg = dict(cur)
+    for k in ("label", "description", "enabled", "allowed_tools", "research_tool", "research_arg"):
+        if k in patch:
+            cfg[k] = patch[k]
+    if isinstance(patch.get("scope"), dict):
+        cfg["scope"] = {**cfg.get("scope", {}), **{k: bool(v) for k, v in patch["scope"].items()
+                                                   if k in ("coordinator", "employees")}}
+    for field in ("env", "headers"):
+        if isinstance(patch.get(field), dict):
+            merged = dict(cfg.get(field) or {})
+            for k, v in patch[field].items():
+                if v is None:
+                    merged.pop(k, None)          # حذف مفتاح
+                elif str(v) != "":
+                    merged[str(k)] = str(v)      # قيمة جديدة
+                else:
+                    merged.setdefault(str(k), "")
+            cfg[field] = merged
+    cfg = normalize_config({**cfg, "name": cfg["slug"]})
+    cfg["tools"], cfg["server_info"] = cur.get("tools") or [], cur.get("server_info") or {}
+    if rediscover or any(k in patch for k in ("env", "headers")):
+        cfg = discover(cfg)
+    with _store_lock:
+        _write_items([cfg])
+    _sync_registry(cfg, registry)
     return cfg
 
 
@@ -424,10 +598,120 @@ def delete(name: str, registry=None) -> bool:
     return True
 
 
+# ─────────────────────────── upload parsing (developer) ───────────────────────────
+_MAX_PACKAGE_BYTES = 20 * 1024 * 1024
+_MAX_PACKAGE_FILES = 500
+
+
+def parse_config_file(data: bytes) -> List[Dict[str, Any]]:
+    """ملف إعداد JSON: صيغة ``mcpServers`` القياسية (Claude Desktop/Cursor) أو كائن واحد
+    أو قائمة. يعيد مدخلات خام تمرّ بعدها بـ normalize_config كأي إضافة."""
+    try:
+        doc = json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"ملف JSON غير صالح: {exc}") from exc
+    if isinstance(doc, dict) and isinstance(doc.get("mcpServers"), dict):
+        items = [{"name": name, **(spec or {})} for name, spec in doc["mcpServers"].items()]
+    elif isinstance(doc, list):
+        items = doc
+    elif isinstance(doc, dict):
+        items = [doc]
+    else:
+        raise ValueError("الصيغة المدعومة: {\"mcpServers\": {...}} أو كائن خادم أو قائمة")
+    out = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise ValueError("كل خادم يجب أن يكون كائناً")
+        t = str(raw.get("type") or raw.get("transport") or "").lower()
+        if t in ("sse",):
+            raise ValueError(f"{raw.get('name')}: نقل SSE القديم غير مدعوم — استخدم Streamable HTTP")
+        if t in ("http", "streamable-http", "streamable_http"):
+            raw = {**raw, "transport": "http"}
+        out.append(raw)
+    if not out:
+        raise ValueError("الملف لا يحوي أي خادم")
+    return out
+
+
+def install_package(filename: str, data: bytes, name: str = "") -> Dict[str, Any]:
+    """حزمة خادم (.py أو .zip) ← مجلد في الكتالوج + إعداد stdio يشغّلها بمفسّر البيئة.
+
+    الحزمة كودٌ سيُنفَّذ على هذا الجهاز، فالرفع للمطوّر وحده (app.auth.roles)، ومع ذلك:
+    لا مسارات مطلقة ولا ``..`` داخل الـzip، وحدّ للحجم وعدد الملفات، ولا كتابة خارج مجلدها.
+    إن احتوى الـzip ملف ``mcp.json`` أُخذت منه الإعدادات (entry/args/env/description).
+    """
+    import io
+    import zipfile
+
+    if len(data) > _MAX_PACKAGE_BYTES:
+        raise ValueError("الحزمة أكبر من 20MB")
+    base = Path(filename or "").name
+    stem, ext = os.path.splitext(base)
+    s = slug(name or stem)
+    if not s:
+        raise ValueError("اسم الخادم مطلوب")
+    target = package_dir(s)
+    if is_builtin(s):
+        raise ValueError(f"'{s}' اسم خادم مدمج في النظام — اختر اسماً آخر")
+    if (target / MANIFEST).exists():
+        raise ValueError(f"خادم باسم '{s}' موجود — احذفه أولاً أو غيّر الاسم")
+    meta: Dict[str, Any] = {}
+    tmp = _CATALOG_DIR / f".upload_{s}"
+    _remove_dir(tmp)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        if ext.lower() == ".py":
+            (tmp / "server.py").write_bytes(data)
+            entry = "server.py"
+        elif ext.lower() == ".zip":
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                infos = [i for i in zf.infolist() if not i.is_dir()]
+                if len(infos) > _MAX_PACKAGE_FILES:
+                    raise ValueError("الحزمة تحوي ملفات كثيرة جداً")
+                if sum(i.file_size for i in infos) > _MAX_PACKAGE_BYTES * 3:
+                    raise ValueError("حجم الحزمة بعد فكّها كبير جداً")
+                # مجلد جذر واحد داخل الـzip (شائع) يُتجاهل
+                names = [i.filename.replace("\\", "/") for i in infos]
+                roots = {n.split("/", 1)[0] for n in names}
+                strip = (roots.pop() + "/") if len(roots) == 1 and all("/" in n for n in names) else ""
+                for info, n in zip(infos, names):
+                    rel = n[len(strip):] if strip and n.startswith(strip) else n
+                    dest = (tmp / rel).resolve()
+                    if not rel or rel.startswith("/") or ".." in Path(rel).parts \
+                            or tmp.resolve() not in dest.parents:
+                        raise ValueError(f"مسار غير آمن داخل الحزمة: {n}")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(zf.read(info))
+            meta = _json(tmp / MANIFEST, {}) if (tmp / MANIFEST).exists() else {}
+            entry = str(meta.get("entry") or "")
+            if not entry:
+                entry = next((c for c in ("server.py", "main.py", "__main__.py") if (tmp / c).exists()), "")
+            if not entry:
+                pys = [p.name for p in tmp.glob("*.py")]
+                entry = pys[0] if len(pys) == 1 else ""
+            if not entry or not (tmp / entry).is_file() or ".." in Path(entry).parts:
+                raise ValueError("لم أجد ملف التشغيل: ضع server.py أو حدّد entry في mcp.json داخل الحزمة")
+        else:
+            raise ValueError("الحزمة: ملف .py أو .zip")
+        if target.exists():
+            _remove_dir(target)
+        tmp.replace(target)
+    except Exception:
+        _remove_dir(tmp)
+        raise
+    return {
+        "name": s, "label": meta.get("label") or name or stem,
+        "description": meta.get("description", ""), "transport": "stdio",
+        "command": PY_TOKEN, "args": [f"{PKG_TOKEN}/{entry}", *[str(a) for a in meta.get("args") or []]],
+        "cwd": PKG_TOKEN, "env": meta.get("env") or {}, "source": "package", "entry": entry,
+        "allowed_tools": meta.get("allowed_tools"), "scope": meta.get("scope") or {},
+    }
+
+
 def register_all(registry) -> int:
-    """عند الإقلاع: سجّل الخوادم المحفوظة (الاتصال كسول — عند أول استدعاء)."""
+    """عند الإقلاع: سجّل الخوادم المفعّلة (الاتصال كسول — عند أول استدعاء)."""
     n = 0
-    for cfg in _read():
+    for cfg in list_configs(enabled_only=True):
         try:
             registry.register(ExternalMCPServer(cfg))
             n += 1

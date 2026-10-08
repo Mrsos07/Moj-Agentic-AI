@@ -1,0 +1,17 @@
+{
+  "slug": "search",
+  "label": "بحث الويب",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "SearchMCP",
+  "inject": [],
+  "core": false,
+  "order": 70,
+  "description": "بحث ويب حقيقي عبر Tavily أو Brave أو SerpAPI (يفشل صراحةً بلا مفتاح).",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": true
+  },
+  "note": "المنسّق يستخدمه عبر أداته web_search."
+}
