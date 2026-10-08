@@ -693,8 +693,12 @@ class _Tools:
         r = TS.registry().call(MCPRequest(employee_id="", tool=full, params=args, context=context))
         if not r.success:
             raise RuntimeError(r.error)
-        return {"server": server, "tool": tool,
-                "result": r.data.get("text") or r.data.get("structured") or r.data}
+        out = r.data.get("text") or r.data.get("structured") or r.data
+        if not isinstance(out, str):
+            out = json.dumps(out, ensure_ascii=False, default=str)
+        # القصّ قبل التحويل لـJSON: قصّ النص المُسلسَل بعده يعطي المنسّق JSON مكسوراً
+        # (قيس مع نتائج بحث Tavily الطويلة)
+        return {"server": server, "tool": tool, "result": out[:_MAX_TOOL_RESULT - 300]}
 
     def call(self, name: str, raw_args: str) -> str:
         if name.startswith(SYSTEM_MCP_PREFIX) and self.only_employee is None:

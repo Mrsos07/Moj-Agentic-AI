@@ -67,9 +67,10 @@ def _employee_usage() -> Dict[str, int]:
 
 
 def add_from_upload(filename: str, data: bytes, *, added_by: str, name: str = "",
-                    description: str = "", scope: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+                    description: str = "", scope: Optional[Dict[str, bool]] = None,
+                    env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """ملف JSON (خادم أو عدة خوادم) أو حزمة .py/.zip. نجاح جزئي ممكن: كل خادم يُتحقق
-    منه وحده، والفاشل يُعاد بسببه دون إسقاط الناجح."""
+    منه وحده، والفاشل يُعاد بسببه دون إسقاط الناجح. ``env``: مفاتيح الحزمة (متغيّرات بيئة)."""
     lower = (filename or "").lower()
     meta = {"added_by": added_by, "added_at": _now()}
     if scope:
@@ -90,6 +91,7 @@ def add_from_upload(filename: str, data: bytes, *, added_by: str, name: str = ""
         return {"saved": saved, "errors": errors}
     if lower.endswith((".py", ".zip")):
         raw = X.install_package(filename, data, name=name)
+        raw["env"] = {**(raw.get("env") or {}), **(env or {})}
         try:
             cfg = X.save({**raw, **meta}, TS.registry())
         except Exception:
@@ -97,6 +99,119 @@ def add_from_upload(filename: str, data: bytes, *, added_by: str, name: str = ""
             raise
         return {"saved": [X.public_view(cfg, connected=True)], "errors": []}
     raise ValueError("الملف: إعداد .json أو حزمة خادم .py/.zip")
+
+
+AUTH_MODES = ("none", "bearer", "header", "query", "env")
+
+
+def raw_from_form(form: Dict[str, Any]) -> Dict[str, Any]:
+    """نموذج الإضافة السريعة ← إعداد خادم. المفتاح يوضع حيث يتوقعه الخادم:
+    bearer: ترويسة Authorization · header: ترويسة باسم تختاره (X-API-Key…) ·
+    query: معامل في الرابط (يُحفظ كسرّ لا في الرابط) · env: متغيّر بيئة لخادم stdio."""
+    transport = str(form.get("transport") or "http").lower()
+    raw: Dict[str, Any] = {
+        "name": form.get("name"), "label": form.get("label") or form.get("name"),
+        "description": form.get("description") or "", "transport": transport,
+        "allowed_tools": form.get("allowed_tools"), "research_tool": form.get("research_tool") or "",
+        "scope": form.get("scope") or {"coordinator": True, "employees": True},
+        "headers": dict(form.get("headers") or {}), "env": dict(form.get("env") or {}),
+    }
+    if transport == "http":
+        raw["url"] = form.get("url")
+    else:
+        raw["command"] = form.get("command")
+        raw["args"] = [a for a in (form.get("args") or []) if str(a).strip()]
+    auth = form.get("auth") or {}
+    mode = str(auth.get("mode") or "none").lower()
+    key = str(auth.get("key") or "").strip()
+    pname = str(auth.get("name") or "").strip()
+    if mode not in AUTH_MODES:
+        raise ValueError(f"طريقة المفتاح: {', '.join(AUTH_MODES)}")
+    if mode != "none" and not key:
+        raise ValueError("أدخل المفتاح أو اختر «بلا مفتاح»")
+    if mode == "bearer":
+        raw["headers"]["Authorization"] = key if key.lower().startswith("bearer ") else f"Bearer {key}"
+    elif mode in ("header", "query", "env"):
+        if not pname:
+            raise ValueError("اكتب اسم الترويسة/المعامل/المتغيّر الذي يُرسل فيه المفتاح")
+        if mode == "env" and transport != "stdio":
+            raise ValueError("متغيّر البيئة لخوادم stdio — لخادم HTTP استخدم ترويسة أو معاملاً")
+        target = {"header": "headers", "query": "query_secrets", "env": "env"}[mode]
+        raw.setdefault(target, {})[pname] = key
+    return raw
+
+
+def test_form(form: Dict[str, Any]) -> Dict[str, Any]:
+    """اختبار الاتصال قبل الحفظ: يتصل ويكتشف الأدوات ولا يحفظ شيئاً."""
+    cfg = X.discover(X.normalize_config(raw_from_form(form)))
+    return {"server_info": cfg.get("server_info") or {},
+            "tools": [{"name": t["name"], "description": (t.get("description") or "")[:200]}
+                      for t in cfg["tools"]]}
+
+
+def add_from_form(form: Dict[str, Any], *, added_by: str) -> Dict[str, Any]:
+    raw = {**raw_from_form(form), "added_by": added_by, "added_at": _now(), "source": "config"}
+    return X.public_view(X.save(raw, TS.registry()), connected=True)
+
+
+#: قالب خادم MCP داخلي تبنيه بنفسك (stdio، مكتبة Python القياسية فقط) — ارفعه كحزمة .py
+SERVER_TEMPLATE = '''"""
+خادم MCP داخلي لنظام موج — قالب (stdio، بلا مكتبات خارجية).
+
+أضف أدواتك في TOOLS ودالة لكل أداة في HANDLERS، ثم ارفع الملف من لوحة التحكم ← خوادم MCP
+← «رفع خادم داخلي». المفاتيح التي تضيفها عند الرفع تصلك كمتغيّرات بيئة (os.environ).
+لا تطبع شيئاً على stdout غير رسائل البروتوكول (استخدم sys.stderr للتشخيص).
+"""
+import json
+import os
+import sys
+
+# UTF-8 للبروتوكول دائماً (على ويندوز الافتراضي cp1252 فينهار الخادم عند أول نص عربي)
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
+TOOLS = [
+    {"name": "hello", "description": "مثال: يرحّب بالاسم",
+     "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+]
+
+
+def hello(args):
+    return f"أهلاً {args.get('name', '')}"
+
+
+HANDLERS = {"hello": hello}
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\\n")
+    sys.stdout.flush()
+
+
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        continue
+    mid, method = msg.get("id"), msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+            "serverInfo": {"name": "my-internal-server", "version": "1.0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
+    elif method == "tools/call":
+        p = msg.get("params") or {}
+        fn = HANDLERS.get(p.get("name"))
+        try:
+            text, err = (fn(p.get("arguments") or {}), False) if fn else (f"unknown tool {p.get('name')}", True)
+        except Exception as exc:  # noqa: BLE001
+            text, err = f"error: {exc}", True
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "content": [{"type": "text", "text": str(text)}], "isError": err}})
+    elif mid is not None:
+        send({"jsonrpc": "2.0", "id": mid, "result": {}})
+'''
 
 
 def _guard_builtin(slug: str) -> None:

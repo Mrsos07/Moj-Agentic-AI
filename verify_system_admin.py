@@ -392,7 +392,9 @@ class _H(BaseHTTPRequestHandler):
                 "type": "object", "properties": {"query": {"type": "string"}}}}]}
         elif method == "tools/call":
             auth = self.headers.get("Authorization", "")
-            res = {"content": [{"type": "text", "text": f"found:{msg['params']['arguments'].get('query')}|{auth}"}]}
+            xk = self.headers.get("X-API-Key", "")
+            res = {"content": [{"type": "text", "text":
+                                f"found:{msg['params']['arguments'].get('query')}|{auth}|xk={xk}|path={self.path}"}]}
         body = json.dumps({"jsonrpc": "2.0", "id": mid, "result": res}).encode() if mid is not None else b""
         self.send_response(200 if mid is not None else 202)
         self.send_header("Content-Type", "application/json")
@@ -470,6 +472,62 @@ check("المالك يحذف أداته ← تُفصل وتُلغى من الس�
       and not BOOT._platform.registry.has(srv_name))
 n = EM.purge(emp_cfg.id, BOOT._platform.registry)
 check("حذف الموظف ← تُمحى أدواته الخاصة وأسرارها", n == 1 and not (EM._DIR / f"{EM._tag(emp_cfg.id)}.json").exists())
+
+print("11) لوحة التحكم: إضافة سريعة بالمفتاح ونوع الاتصال + خادم داخلي يبنيه المطوّر")
+
+
+def _sys_call(slug, query="q"):
+    return O._Tools(U, "x").call(f"mcp__{slug}__lookup", json.dumps({"query": query}))
+
+
+form = {"name": "quick_bearer", "transport": "http", "url": URL, "auth": {"mode": "bearer", "key": "k-bearer-1"}}
+r = client.post("/api/admin/system/mcps/test-connection", headers=HD, json=form)
+check("اختبار الاتصال قبل الحفظ ← يكتشف الأدوات ولا يحفظ", r.status_code == 200
+      and [t["name"] for t in r.json()["tools"]] == ["lookup"] and not (X._CATALOG_DIR / "quick_bearer").exists(), r.text[:150])
+check("المسؤول لا يضيف ولا يختبر (403)",
+      client.post("/api/admin/system/mcps", headers=HA, json=form).status_code == 403
+      and client.post("/api/admin/system/mcps/test-connection", headers=HA, json=form).status_code == 403)
+r = client.post("/api/admin/system/mcps", headers=HD, json={**form, "allowed_tools": ["lookup"], "research_tool": "lookup"})
+check("إضافة سريعة (Bearer) ← مثبّت ومدمج فوراً", r.status_code == 200 and BOOT._platform.registry.has("ext_quick_bearer"), r.text[:150])
+check("المنسّق يستخدمه والمفتاح يصل في Authorization", "Bearer k-bearer-1" in _sys_call("quick_bearer"))
+check("المفتاح لا يُعاد للواجهة ولا يُكتب في mcp.json",
+      "k-bearer-1" not in r.text and "k-bearer-1" not in (X._CATALOG_DIR / "quick_bearer" / "mcp.json").read_text(encoding="utf-8"))
+
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "quick_header", "url": URL,
+                                                             "auth": {"mode": "header", "name": "X-API-Key", "key": "k-hdr-2"}})
+check("ترويسة مخصّصة (X-API-Key)", r.status_code == 200 and "xk=k-hdr-2" in _sys_call("quick_header"), r.text[:150])
+
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "quick_query", "url": URL,
+                                                             "auth": {"mode": "query", "name": "apiKey", "key": "k-q-3"}})
+man = (X._CATALOG_DIR / "quick_query" / "mcp.json").read_text(encoding="utf-8")
+check("معامل في الرابط ← يصل للخادم ولا يُحفظ في الرابط", r.status_code == 200 and "apiKey=k-q-3" in _sys_call("quick_query")
+      and "k-q-3" not in man and '"query_keys": [\n    "apiKey"' in man, man[:300])
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "pasted", "url": URL + "?tavilyApiKey=k-paste-4&lang=ar",
+                                                             "auth": {"mode": "none"}})
+man = (X._CATALOG_DIR / "pasted" / "mcp.json").read_text(encoding="utf-8")
+out = _sys_call("pasted")
+check("رابط بمفتاح ملصوق (مثل Tavily) ← يُنزع المفتاح تلقائياً ويُحفظ كسرّ",
+      r.status_code == 200 and "k-paste-4" not in man and "lang=ar" in man and "tavilyApiKey=k-paste-4" in out, man[:250])
+r = client.patch("/api/admin/system/mcps/quick_query", headers=HD, json={"query_secrets": {"apiKey": "k-q-NEW"}})
+check("تحديث مفتاح معامل الرابط من اللوحة", r.status_code == 200 and "apiKey=k-q-NEW" in _sys_call("quick_query"))
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "bad", "url": URL, "auth": {"mode": "bearer", "key": ""}})
+check("طريقة مفتاح بلا مفتاح ← رسالة واضحة (400)", r.status_code == 400 and "المفتاح" in r.json()["detail"])
+r = client.post("/api/admin/system/mcps/test-connection", headers=HD, json={"name": "dead", "url": "http://127.0.0.1:1/mcp"})
+check("خادم لا يرد ← 502 بسبب واضح ولا يُحفظ", r.status_code == 502 and not (X._CATALOG_DIR / "dead").exists())
+
+tpl = client.get("/api/admin/system/mcps/template", headers=HD)
+check("قالب الخادم الداخلي يُنزَّل", tpl.status_code == 200 and "tools/list" in tpl.text and "HANDLERS" in tpl.text)
+r = client.post("/api/admin/system/mcps/upload", headers=HD, files={"file": ("my_tool.py", tpl.text.encode("utf-8"), "text/x-python")})
+check("القالب نفسه خادم يعمل: يُرفع ويُثبّت ويستجيب", r.status_code == 200 and r.json()["saved"][0]["tools"][0]["name"] == "hello"
+      and "أهلاً سعود" in O._Tools(U, "x").call("mcp__my_tool__hello", '{"name": "سعود"}'), r.text[:200])
+r = client.post("/api/admin/system/mcps/upload", headers=HD, data={"env": "ECHO_KEY=pkg-secret-5"},
+                files={"file": ("env_srv.py", SERVER_PY.encode(), "text/x-python")})
+check("خادم داخلي بمفاتيح (متغيّرات بيئة) ← تصله وقت التشغيل ولا تُكتب في mcp.json",
+      r.status_code == 200 and "env:pkg-secret-5" in O._Tools(U, "x").call("mcp__env_srv__secret_env", "{}")
+      and "pkg-secret-5" not in (X._CATALOG_DIR / "env_srv" / "mcp.json").read_text(encoding="utf-8"))
+from app.core.log_redaction import redact  # noqa: E402
+
+check("مفتاح معامل الرابط محجوب من السجلات", "k-paste-4" not in redact(f"POST {URL}?tavilyApiKey=k-paste-4"))
 _srv.shutdown()
 
 print()

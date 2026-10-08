@@ -48,6 +48,11 @@ _SECRETS_PATH = Path(os.getenv("SYSTEM_MCP_SECRETS") or _ROOT / "data" / "system
 #: المخزن القديم (ملف JSON واحد يضيف إليه أي مستخدم) — يُرحَّل مرة واحدة إلى الكتالوج
 _LEGACY_PATH = Path(os.getenv("EXTERNAL_MCP_CONFIG") or _ROOT / "data" / "external_mcp.json")
 MANIFEST = "mcp.json"
+#: حقول الأسرار ← اسم قائمة مفاتيحها في manifest. القيم في _SECRETS_PATH فقط.
+#: query_secrets: معاملات الرابط السرية (مثل ?tavilyApiKey=…) — تُنزع من الرابط المحفوظ
+#: وتُضاف وقت الاتصال، وإلا انتهى المفتاح في mcp.json المرفوع إلى git.
+SECRET_FIELDS = {"env": "env_keys", "headers": "header_keys", "query_secrets": "query_keys"}
+_SECRET_PARAM_RE = re.compile(r"(?i)(key|token|secret|password|passwd|auth|sig|credential)")
 #: رموز تُحلّ وقت التشغيل في manifest الحزم (لا مسارات مطلقة في المستودع)
 PY_TOKEN, PKG_TOKEN = "{python}", "{package}"
 
@@ -61,9 +66,12 @@ class _StdioTransport:
     def __init__(self, command: str, args: List[str], env: Dict[str, str],
                  cwd: Optional[str] = None) -> None:
         exe = shutil.which(command) or command  # Windows: npx → npx.cmd
+        # UTF-8 افتراضياً للعملية الابنة: على ويندوز stdout = cp1252، فخادم Python يطبع عربياً
+        # (json.dumps(..., ensure_ascii=False)) ينهار بـ UnicodeEncodeError ويموت قبل أول رد.
         self._proc = subprocess.Popen(
             [exe, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env={**os.environ, **env},
+            stderr=subprocess.DEVNULL,
+            env={"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **os.environ, **env},
             text=True, encoding="utf-8", bufsize=1, cwd=cwd or None,
         )
         self._pending: Dict[int, Dict[str, Any]] = {}
@@ -202,7 +210,7 @@ class MCPClient:
     def _connect(self) -> None:
         cfg = self._cfg
         if cfg.get("transport") == "http":
-            self._t = _HttpTransport(cfg["url"], cfg.get("headers") or {})
+            self._t = _HttpTransport(runtime_url(cfg), cfg.get("headers") or {})
         else:
             command, args, cwd = runtime_command(cfg)
             self._t = _StdioTransport(command, args, dict(cfg.get("env") or {}), cwd)
@@ -254,6 +262,29 @@ def result_text(result: Dict[str, Any]) -> str:
     if not parts and result.get("structuredContent") is not None:
         parts = [json.dumps(result["structuredContent"], ensure_ascii=False)]
     return "\n".join(p for p in parts if p)[:_MAX_RESULT_CHARS]
+
+
+def split_secret_params(url: str) -> "tuple[str, Dict[str, str]]":
+    """انزع معاملات الرابط التي تبدو أسراراً (apiKey، token…) — الرابط يُحفظ بدونها."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    keep, secret = [], {}
+    for k, v in parse_qsl(parts.query, keep_blank_values=True):
+        (secret.__setitem__(k, v) if _SECRET_PARAM_RE.search(k) else keep.append((k, v)))
+    return urlunsplit(parts._replace(query=urlencode(keep))), secret
+
+
+def runtime_url(cfg: Dict[str, Any]) -> str:
+    """الرابط وقت الاتصال = المحفوظ + معاملاته السرية (لا يُكتب في أي ملف أو سجل)."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    extra = cfg.get("query_secrets") or {}
+    if not extra:
+        return cfg["url"]
+    parts = urlsplit(cfg["url"])
+    query = parse_qsl(parts.query, keep_blank_values=True) + list(extra.items())
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 def package_dir(slug_: str) -> Path:
@@ -377,8 +408,8 @@ def _read() -> List[Dict[str, Any]]:
         if not isinstance(cfg, dict) or not cfg.get("slug") or cfg.get("kind") == "builtin":
             continue
         sec = secrets.get(cfg["slug"]) or {}
-        cfg["env"] = {k: sec.get("env", {}).get(k, "") for k in cfg.pop("env_keys", [])}
-        cfg["headers"] = {k: sec.get("headers", {}).get(k, "") for k in cfg.pop("header_keys", [])}
+        for field, keys in SECRET_FIELDS.items():
+            cfg[field] = {k: sec.get(field, {}).get(k, "") for k in cfg.pop(keys, [])}
         cfg.setdefault("enabled", True)
         cfg.setdefault("scope", {"coordinator": True, "employees": True})
         out.append(cfg)
@@ -389,12 +420,11 @@ def _write_items(items: List[Dict[str, Any]]) -> None:
     """اكتب manifest كل خادم (أسماء المفاتيح فقط) والقيم إلى ملف الأسرار."""
     secrets = _json(_SECRETS_PATH, {}) or {}
     for cfg in items:
-        manifest = {k: v for k, v in cfg.items() if k not in ("env", "headers")}
-        manifest["env_keys"] = sorted((cfg.get("env") or {}).keys())
-        manifest["header_keys"] = sorted((cfg.get("headers") or {}).keys())
+        manifest = {k: v for k, v in cfg.items() if k not in SECRET_FIELDS}
+        for field, keys in SECRET_FIELDS.items():
+            manifest[keys] = sorted((cfg.get(field) or {}).keys())
         _atomic_write(package_dir(cfg["slug"]) / MANIFEST, manifest)
-        secrets[cfg["slug"]] = {"env": dict(cfg.get("env") or {}),
-                                "headers": dict(cfg.get("headers") or {})}
+        secrets[cfg["slug"]] = {field: dict(cfg.get(field) or {}) for field in SECRET_FIELDS}
     _atomic_write(_SECRETS_PATH, secrets)
     try:
         os.chmod(_SECRETS_PATH, 0o600)
@@ -444,6 +474,7 @@ def public_view(cfg: Dict[str, Any], connected: Optional[bool] = None) -> Dict[s
         "added_by": cfg.get("added_by", ""), "added_at": cfg.get("added_at", ""),
         "env_keys": sorted((cfg.get("env") or {}).keys()),
         "header_keys": sorted((cfg.get("headers") or {}).keys()),
+        "query_keys": sorted((cfg.get("query_secrets") or {}).keys()),
         "tools": [{"name": t["name"], "description": (t.get("description") or "")[:200]}
                   for t in cfg.get("tools") or []],
         "allowed_tools": cfg.get("allowed_tools"),
@@ -482,8 +513,10 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         url = str(raw.get("url") or "").strip()
         if not re.match(r"^https?://", url):
             raise ValueError("url must start with http:// or https://")
+        url, found = split_secret_params(url)
         cfg["url"] = url
         cfg["headers"] = {str(k): str(v) for k, v in (raw.get("headers") or {}).items()}
+        cfg["query_secrets"] = {**found, **{str(k): str(v) for k, v in (raw.get("query_secrets") or {}).items()}}
     allowed = raw.get("allowed_tools")
     cfg["allowed_tools"] = None if allowed is None else [str(t) for t in allowed]
     cfg["research_tool"] = str(raw.get("research_tool") or "").strip()
@@ -564,7 +597,7 @@ def update(name: str, patch: Dict[str, Any], registry=None, rediscover: bool = F
     if isinstance(patch.get("scope"), dict):
         cfg["scope"] = {**cfg.get("scope", {}), **{k: bool(v) for k, v in patch["scope"].items()
                                                    if k in ("coordinator", "employees")}}
-    for field in ("env", "headers"):
+    for field in SECRET_FIELDS:
         if isinstance(patch.get(field), dict):
             merged = dict(cfg.get(field) or {})
             for k, v in patch[field].items():
@@ -577,7 +610,7 @@ def update(name: str, patch: Dict[str, Any], registry=None, rediscover: bool = F
             cfg[field] = merged
     cfg = normalize_config({**cfg, "name": cfg["slug"]})
     cfg["tools"], cfg["server_info"] = cur.get("tools") or [], cur.get("server_info") or {}
-    if rediscover or any(k in patch for k in ("env", "headers")):
+    if rediscover or any(k in patch for k in SECRET_FIELDS):
         cfg = discover(cfg)
     with _store_lock:
         _write_items([cfg])
