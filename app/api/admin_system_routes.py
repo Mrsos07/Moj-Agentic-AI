@@ -93,6 +93,27 @@ def _form_errors(fn):
         raise HTTPException(502, f"تعذّر الاتصال بالخادم: {exc}") from exc
 
 
+class SnippetIn(BaseModel):
+    text: str
+
+
+@router.post("/mcps/parse-snippet")
+def parse_mcp_snippet(body: SnippetIn,
+                      user: User = Depends(require("system.mcp.manage"))) -> Dict[str, Any]:
+    """مقتطف اتصال من المزوّد (curl / Python / CLI / JSON) ← حقول نموذج الإضافة السريعة.
+    قراءة نحوية فقط — لا يُنفَّذ أي أمر أو كود من المقتطف."""
+    from app.aeos.mcp import snippet_import as SI
+
+    if len(body.text) > 20000:
+        raise HTTPException(413, "المقتطف أطول من 20 ألف حرف")
+    try:
+        parsed = SI.parse(body.text)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "detected": parsed["detected"], "warnings": parsed["warnings"],
+            "forms": [SI.to_form(s) for s in parsed["servers"]]}
+
+
 @router.post("/mcps/test-connection")
 def test_mcp_connection(body: MCPFormIn,
                         user: User = Depends(require("system.mcp.manage"))) -> Dict[str, Any]:

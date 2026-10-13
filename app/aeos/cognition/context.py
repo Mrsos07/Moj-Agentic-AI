@@ -180,6 +180,16 @@ class ExecutionContext:
                     "من تفاعل جمهورك الفعلي وتجاربك السابقة، لا من هذه التعليمات — "
                     "التزم بها في صياغة كل منشور ورد وتفاعل): " + " ".join(emo_lines)
                 )
+        # الأدوات المتاحة للموظف (مهارة system_tools تكتشفها كل دورة؛ وإلا تُحسب هنا مرة)
+        if "tool_briefing" not in self.scratch:
+            try:
+                from ..employee.tool_use import briefing
+
+                self.scratch["tool_briefing"] = briefing(self.config)
+            except Exception:  # noqa: BLE001
+                self.scratch["tool_briefing"] = ""
+        if self.scratch.get("tool_briefing"):
+            parts.append(self.scratch["tool_briefing"])
         # توجيهات حارس التقييم من الدورة السابقة — التحسين الذاتي المستمر.
         # تأتي أخيراً (بعد الهوية والحالة) لأنها طبقة تهذيب لا تُخالف الهوية.
         try:

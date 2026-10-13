@@ -47,6 +47,33 @@ const McpAddCard = ({ notify, onAdded }) => {
   const [research, setResearch] = useState('')
   const [busy, setBusy] = useState('')
   const [pkg, setPkg] = useState({ name: '', description: '', env: '', coordinator: true, employees: true })
+  const [snippet, setSnippet] = useState('')
+  const [snipInfo, setSnipInfo] = useState(null)   // {detected, warnings, forms, index}
+
+  const DETECTED = { curl: 'أمر curl', python: 'كود Python', json: 'إعداد JSON', 'claude-cli': 'أمر claude mcp add',
+    'mcp-remote': 'أمر mcp-remote (يُتصل بالرابط مباشرة)', stdio: 'أمر تشغيل محلي (stdio)', url: 'رابط' }
+
+  const applyForm = (f) => {
+    setQ({
+      ...emptyQuick, name: f.name, description: f.description || '', transport: f.transport,
+      url: f.url || '', command: f.command || '', args: (f.args || []).join('\n'),
+      authMode: f.auth.mode, authName: f.auth.name || '', authKey: f.auth.key || '',
+      extra: Object.entries(f.transport === 'http' ? f.headers || {} : f.env || {}).map(([k, v]) => `${k}=${v}`).join('\n'),
+    })
+    setFound(null)
+  }
+
+  const importSnippet = async () => {
+    setBusy('snippet')
+    try {
+      const res = await axios.post('/api/admin/system/mcps/parse-snippet', { text: snippet }, { headers: authHeaders() })
+      setSnipInfo({ ...res.data, index: 0 })
+      applyForm(res.data.forms[0])
+      const f = res.data.forms[0]
+      notify(`✅ تعرّفت على ${DETECTED[res.data.detected] || res.data.detected} — ${res.data.forms.length > 1 ? `${res.data.forms.length} خوادم، ` : ''}راجع الحقول${f.needs_key ? ' وأدخل المفتاح' : ''} ثم «اختبار الاتصال»`, 'success')
+    } catch (e) { notify(e?.response?.data?.detail || 'تعذّر قراءة المقتطف', 'error') }
+    setBusy('')
+  }
   const pkgRef = useRef(null)
   const cfgRef = useRef(null)
 
@@ -138,6 +165,26 @@ const McpAddCard = ({ notify, onAdded }) => {
 
       {mode === 'quick' && (
         <div className="space-y-3">
+          <div className="rounded-lg border border-dashed border-primary/40 p-3 space-y-2">
+            <p className={`text-xs ${strong}`}>📋 المزوّد يعطيك طريقة الاتصال كأمر <b>curl</b> أو كود <b>Python</b>؟ الصقه هنا وتُملأ الحقول تلقائياً</p>
+            <textarea rows={4} dir="ltr" value={snippet} onChange={(e) => setSnippet(e.target.value)}
+              placeholder={'curl -X POST https://mcp.example.com/mcp -H "Authorization: Bearer ..."\n— أو —\nasync with streamablehttp_client("https://...", headers={...})\n— أو —\nclaude mcp add --transport http name https://... --header "..."  |  npx -y pkg  |  {"mcpServers": {...}}'}
+              className={`${input} font-mono text-xs`} />
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={importSnippet} disabled={busy === 'snippet' || !snippet.trim()}
+                className="text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white disabled:opacity-50">
+                {busy === 'snippet' ? 'جارٍ القراءة…' : 'استخراج الإعداد'}
+              </button>
+              <span className={`text-[11px] ${muted}`}>قراءة فقط — لا يُنفَّذ أي أمر أو كود من المقتطف.</span>
+              {snipInfo?.forms?.length > 1 && (
+                <select value={snipInfo.index} onChange={(e) => { const i = Number(e.target.value); setSnipInfo({ ...snipInfo, index: i }); applyForm(snipInfo.forms[i]) }}
+                  className="text-xs px-2 py-1 rounded-lg border border-border-light dark:border-border-dark bg-transparent">
+                  {snipInfo.forms.map((f, i) => <option key={i} value={i}>{f.name || `خادم ${i + 1}`} ({f.transport})</option>)}
+                </select>
+              )}
+            </div>
+            {snipInfo?.warnings?.map((w, i) => <p key={i} className="text-[11px] text-amber-600 dark:text-amber-400">⚠️ {w}</p>)}
+          </div>
           <div className="grid md:grid-cols-2 gap-3">
             <div><span className={label}>الاسم</span>
               <input placeholder="مثال: tavily" value={q.name} onChange={(e) => set({ name: e.target.value })} className={input} /></div>

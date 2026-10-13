@@ -24,8 +24,10 @@ _SNIPPET = 320
 
 
 def sources_for(context: "ExecutionContext") -> List[str]:
-    """مصادر البحث المتاحة لهذا الموظف (مربوطة به ومُهيّأة فعلاً)."""
+    """مصادر البحث المتاحة لهذا الموظف: البحث المدمج + كل خادم فيه أداة قراءة صنّفها
+    tool_use تلقائياً (لا حاجة لتعيين «أداة بحث» ولا لربط يدوي لخوادم النظام)."""
     from ..mcp.servers.core_mcp import search_provider
+    from . import tool_use
 
     servers = list(context.config.mcp_servers or [])
     rules = context.config.business_rules or {}
@@ -35,39 +37,40 @@ def sources_for(context: "ExecutionContext") -> List[str]:
     if (search_provider()[0] and context.mcp.has("search")
             and ("search" in servers or rules.get("web_search", True))):
         out.append("search")
-    for name in servers:
-        if name.startswith("ext_") and context.mcp.has(name):
-            srv = context.mcp.get(name)
-            if getattr(srv, "cfg", {}).get("research_tool"):
-                out.append(name)
+    for t in tool_use.available(context.config):
+        if t["server"] not in out and context.mcp.has(t["server"]):
+            out.append(t["server"])
     return out
 
 
-def gather(context: "ExecutionContext", query: str) -> List[Dict[str, Any]]:
+def gather(context: "ExecutionContext", query: str, material: str = "") -> List[Dict[str, Any]]:
     from ..mcp.base import MCPRequest
+    from . import tool_use
 
     query = re.sub(r"\s+", " ", query or "").strip()[:200]
     if not query:
         return []
     items: List[Dict[str, Any]] = []
-    for name in sources_for(context):
+    searched: tuple = ()
+    if "search" in sources_for(context):
         try:
-            if name == "search":
-                r = context.mcp.call(MCPRequest(
-                    employee_id=context.config.id, tool="web_search",
-                    params={"query": query, "limit": _MAX_ITEMS}, context={"server": "search"}))
-                if r.success:
-                    items += [{"source": r.data.get("provider", "web"), **i}
-                              for i in r.data.get("results") or []]
-                else:
-                    logger.info("web search failed: %s", r.error)
+            r = context.mcp.call(MCPRequest(
+                employee_id=context.config.id, tool="web_search",
+                params={"query": query, "limit": _MAX_ITEMS}, context={"server": "search"}))
+            if r.success:
+                items += [{"source": r.data.get("provider", "web"), **i}
+                          for i in r.data.get("results") or []]
+                searched = (str(r.data.get("provider") or ""),)
             else:
-                text = context.mcp.get(name).research(query)
-                if text:
-                    items.append({"source": name, "title": "", "url": "", "snippet": text})
+                logger.info("web search failed: %s", r.error)
         except Exception:  # noqa: BLE001 - البحث تحسين لا شرط للنشر
-            logger.exception("research via %s failed", name)
-    return items[:_MAX_ITEMS + 1]
+            logger.exception("built-in web search failed")
+    try:
+        # كل أدوات MCP المتاحة للموظف (نظام + خاصة) — مصنّفة تلقائياً
+        items += tool_use.gather(context, query, material, skip_search_hosts=searched)
+    except Exception:  # noqa: BLE001
+        logger.exception("MCP tool research failed")
+    return items[:_MAX_ITEMS + 2]
 
 
 def block(items: List[Dict[str, Any]]) -> str:
@@ -84,12 +87,13 @@ def block(items: List[Dict[str, Any]]) -> str:
     )
 
 
-def augment_brief(brief: str, query: str, context: "ExecutionContext") -> str:
-    """أضف كتلة البحث للبريف إن كان البحث مفعّلاً ومتاحاً ووُجدت نتائج."""
+def augment_brief(brief: str, query: str, context: "ExecutionContext", material: str = "") -> str:
+    """أضف كتلة البحث للبريف إن كان البحث مفعّلاً ومتاحاً ووُجدت نتائج.
+    ``material``: نص الموضوع/التغريدة — يُقرأ منه أول رابط خارجي بأداة «قراءة صفحات»."""
     rules = context.config.business_rules or {}
     if not query or not bool(rules.get("research_before_writing", True)):
         return brief
-    items = gather(context, query)
+    items = gather(context, query, material or brief)
     if not items:
         return brief
     context.scratch["research"] = {"query": query, "items": items}
