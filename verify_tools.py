@@ -7,8 +7,11 @@
 فيُختبر العميل أمام البروتوكول الفعلي لا أمام محاكاة كتبناها نحن. الـSDK لا
 يُثبَّت في venv التطبيق (يرقّي 13 حزمة)، لذا نمرّر بايثون بيئة منفصلة:
 
-    py -3.12 -m venv %TEMP%\\mcp_testenv
-    %TEMP%\\mcp_testenv\\Scripts\\python -m pip install mcp==2.2.0
+    py -3.12 -m venv %LOCALAPPDATA%\\Moj-Agentic-AI\\mcp_testenv
+    %LOCALAPPDATA%\\Moj-Agentic-AI\\mcp_testenv\\Scripts\\python -m pip install mcp==2.2.0
+
+لا تضعها في %TEMP%: تنظيف ويندوز التلقائي حذف ملفات منها فصار ``mcp`` حزمة ناقصة
+(``cannot import name 'MCPServer' … (unknown location)``) وفشل الاختبار بلا أي تغيير في الكود.
 """
 from __future__ import annotations
 
@@ -36,7 +39,8 @@ def check(name, cond, detail=""):
 
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--mcp-python", default=str(Path(tempfile.gettempdir()) / "mcp_testenv" / "Scripts" / "python.exe"))
+_MCP_ENV = Path(os.getenv("LOCALAPPDATA") or tempfile.gettempdir()) / "Moj-Agentic-AI" / "mcp_testenv"
+ap.add_argument("--mcp-python", default=str(_MCP_ENV / "Scripts" / "python.exe"))
 args = ap.parse_args()
 
 # ───────────────────────── 1) الكلمات على حدود الكلمة ─────────────────────────

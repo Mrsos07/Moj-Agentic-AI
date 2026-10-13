@@ -585,3 +585,16 @@ independent structural causes — none of them fixable by telling the model to
   private IPs for owners: registration is open, so that would be remote code execution / SSRF to
   X Suite and loginx. Registry name `ext_e<id>_<slug>`; secrets in `data/employee_mcps/`;
   `AEOSPlatform.delete_employee` purges them. Employee-private skills = `custom_skills`.
+- Dashboard «paste curl / Python / CLI / JSON» (`app/aeos/mcp/snippet_import.py`) only PARSES
+  (shlex + ast, no exec/eval) into the quick-add form; keep it that way. Doc placeholders
+  (`your_..._api_key`, `<KEY>`, `os.environ[...]`) become an empty key + a warning.
+- Employees use MCP tools automatically (`system/skills/system_tools` always_on +
+  `app/aeos/employee/tool_use.py`): every enabled system server with `scope.employees` is ON for
+  every employee unless the owner opts out (`business_rules.tools_opt_out`); tools are classified
+  by name/description/schema (search/extract/news), write-like names (delete/post/send…) are never
+  auto-called, and calls happen only at write time (posts, quotes; replies if
+  `research_before_replies`). 6h query cache; built-in search via Tavily suppresses a duplicate
+  Tavily-MCP search.
+- `verify_tools.py` needs the official SDK in a separate env at
+  `%LOCALAPPDATA%\Moj-Agentic-AI\mcp_testenv` (`pip install mcp==2.2.0`). Not `%TEMP%`: Windows
+  cleanup half-deleted it once and the test failed with `cannot import name 'MCPServer'`.

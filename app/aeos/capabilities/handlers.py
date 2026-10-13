@@ -764,6 +764,9 @@ class ReplyToUserCapability(ICapability):
                 + x_algorithm.algo_prompt_block("reply")
             )
             prompt = _trend_prompt(request.params, prompt)
+            # أدوات الموظف (Tavily…) قبل الرد — معطّل افتراضياً: الردود كثيرة ورصيد المزوّد محدود
+            if not brief and (context.config.business_rules or {}).get("research_before_replies", False):
+                prompt = _with_tool_research(prompt, original, context)
             gen = context.mcp.call(MCPRequest(
                 employee_id=context.config.id, tool="generate",
                 params={"prompt": prompt,
@@ -1422,6 +1425,20 @@ def _maybe_generate_image(context: "ExecutionContext", text: str,
     return url
 
 
+def _with_tool_research(prompt: str, original: str, context: "ExecutionContext") -> str:
+    """ألحق نتائج أدوات الموظف (بحث بنص التغريدة + قراءة رابطها الخارجي إن وُجد).
+    فشل الأدوات لا يُسقط الفعل: يُكتب الرد/الاقتباس بدونها."""
+    from ..employee import research
+
+    try:
+        query = re.sub(r"https?://\S+|[@#]\S+", " ", original or "")
+        query = re.sub(r"\s+", " ", query).strip()[:160]
+        return research.augment_brief(prompt, query, context, material=original)
+    except Exception:  # noqa: BLE001
+        logger.exception("tool research before engagement failed")
+        return prompt
+
+
 def _record_strategy(context: "ExecutionContext", request: CapabilityRequest, *,
                      url: str, text: str, parts: int, has_media: bool) -> None:
     """اربط المنشور بمحوره وصيغته في سجل الأداء (أساس التعلّم لاحقاً)."""
@@ -1565,10 +1582,13 @@ class QuotePostCapability(ICapability):
             persona = context.config.persona
             lang = getattr(persona, "language", "ar") or "ar"
             dialect = getattr(persona, "dialect", "") or ""
+            # الاقتباس يضيف «زاوية أو معلومة»: أدوات الموظف (Tavily…) تعطيه المعلومة فعلاً
+            research_block = (_with_tool_research("", original, context)
+                              if (context.config.business_rules or {}).get("research_before_quotes", True) else "")
             gen = context.mcp.call(MCPRequest(
                 employee_id=context.config.id, tool="generate",
                 params={
-                    "prompt": _trend_prompt(request.params, (
+                    "prompt": _trend_prompt(request.params, research_block + (
                         f"هذه تغريدة في مجالك:\n«{original}»\n\n"
                         f"اكتب تعليق اقتباس (Quote) قصيراً باللغة ({lang})"
                         + (f" وبلهجة {dialect}" if dialect else "") + ":\n"

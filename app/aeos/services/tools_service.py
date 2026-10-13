@@ -49,7 +49,8 @@ def overview(cfg=None) -> Dict[str, Any]:
     external = []
     for c in employee_servers():
         view = X.public_view(c)
-        view["attached"] = view["name"] in attached
+        # خوادم النظام متاحة تلقائياً لكل موظف ما لم يفصلها مالكه صراحةً
+        view["attached"] = cfg is not None and _system_server_on(cfg, view["name"])
         view["private"] = False
         external.append(view)
     # أدوات هذا الموظف الخاصة (يضيفها مالكه، لا يراها غيره)
@@ -92,6 +93,11 @@ def remove_private(cfg, name: str) -> bool:
     return True
 
 
+def _system_server_on(cfg, name: str) -> bool:
+    """خادم نظام (نطاق الموظفين) مفعّل لهذا الموظف؟ نعم افتراضياً — الفصل اختيار صريح."""
+    return name not in set((cfg.business_rules or {}).get("tools_opt_out") or [])
+
+
 def _private_names(cfg) -> set:
     from app.aeos.mcp import employee_mcp as EM
     from app.aeos.mcp.servers.external_mcp import PREFIX
@@ -131,6 +137,12 @@ def set_attached(cfg, server: str, attach: bool) -> Dict[str, Any]:
     cfg.mcp_servers = servers
     if server == "search":  # الموظفون القدامى بلا «search» محفوظ: العلَم هو المرجع
         cfg.business_rules = {**(cfg.business_rules or {}), "web_search": bool(attach)}
+    if server in {X.PREFIX + c["slug"] for c in employee_servers()}:
+        # خوادم النظام مفعّلة تلقائياً: الفصل يُسجَّل «إلغاء اشتراك» لهذا الموظف، والربط يلغيه
+        opt_out = [s for s in (cfg.business_rules or {}).get("tools_opt_out") or [] if s != server]
+        if not attach:
+            opt_out.append(server)
+        cfg.business_rules = {**(cfg.business_rules or {}), "tools_opt_out": opt_out}
     _platform().repository.save(cfg)
     return {"employee": cfg.account_username, "server": server, "attached": attach}
 
@@ -159,13 +171,15 @@ def call_tool(cfg, server: str, tool: str, arguments: Optional[Dict[str, Any]] =
     """استدعاء يطلبه **المالك** صراحةً لأداة مربوطة بالموظف (لا يُستدعى من محتوى X)."""
     from app.aeos.mcp.base import MCPRequest
 
-    if server not in (cfg.mcp_servers or []) and not (
-            server == "search" and (cfg.business_rules or {}).get("web_search", True)):
+    system_names = {"ext_" + c["slug"] for c in employee_servers()}
+    on = (server in (cfg.mcp_servers or [])
+          or (server == "search" and (cfg.business_rules or {}).get("web_search", True))
+          or (server in system_names and _system_server_on(cfg, server)))
+    if not on:
         raise ValueError(f"الخادم '{server}' غير مربوط بالموظف @{cfg.account_username}")
     if not (server == "search" or server.startswith("ext_")):
         raise ValueError("الاستدعاء المباشر متاح للبحث والخوادم الخارجية فقط")
-    if server.startswith("ext_") and server not in (
-            {"ext_" + c["slug"] for c in employee_servers()} | _private_names(cfg)):
+    if server.startswith("ext_") and server not in (system_names | _private_names(cfg)):
         raise ValueError(f"الخادم '{server}' معطّل أو غير متاح لهذا الموظف")
     reg = registry()
     if not reg.has(server):

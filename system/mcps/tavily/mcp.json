@@ -5,7 +5,9 @@
   "url": "https://mcp.tavily.com/mcp/",
   "allowed_tools": [
     "tavily_search",
-    "tavily_extract"
+    "tavily_extract",
+    "tavily_crawl",
+    "tavily_research"
   ],
   "research_tool": "tavily_search",
   "research_arg": "query",
@@ -18,10 +20,6 @@
   "source": "config",
   "added_by": "saudallosh@gmail.com",
   "added_at": "2026-10-08T14:28:38+00:00",
-  "server_info": {
-    "name": "tavily-mcp",
-    "version": "4.0.4"
-  },
   "tools": [
     {
       "name": "tavily_search",
@@ -369,8 +367,13 @@
       }
     }
   ],
+  "server_info": {
+    "name": "tavily-mcp",
+    "version": "4.0.4"
+  },
   "env_keys": [],
   "header_keys": [
     "Authorization"
-  ]
+  ],
+  "query_keys": []
 }

@@ -308,7 +308,7 @@ check("مصفوفة الصلاحيات تُعرض", {r["id"] for r in perms["rol
       and any(p["id"] == "system.mcp.manage" and p["min_role"] == "developer" for p in perms["permissions"]))
 ov = client.get("/api/admin/system/overview", headers=HA).json()
 check("نظرة عامة: المستخدمون حسب الدور والقدرات", ov["users"]["total"] == 3
-      and ov["skills"]["coordinator"] == 3 and ov["skills"]["employee"] == 11, ov.get("skills"))
+      and ov["skills"]["coordinator"] == 3 and ov["skills"]["employee"] == 12, ov.get("skills"))
 
 print("9) المجلد الرئيسي الموحّد: كل الخوادم والمهارات في system/")
 check("الخوادم المدمجة الثمانية تُحمَّل من system/mcps (لا تسجيل يدوي)",
@@ -343,8 +343,8 @@ check("الخادم المدمج الأصلي لا يُعدَّل ولا يُح�
 from app.aeos.skills import builtin as BI  # noqa: E402
 
 skills_loaded = [s.name for s in BI.default_skills()]
-check("مهارات الموظفين الـ11 تُحمَّل من system/skills بترتيبها",
-      skills_loaded[0] == "custom_skills" or len(skills_loaded) == 12, skills_loaded)
+check("مهارات الموظفين الـ12 تُحمَّل من system/skills بترتيبها (+ مشغّل المخصّصة)",
+      len(skills_loaded) == 13 and "system_tools" in skills_loaded, skills_loaded)
 check("الترتيب محفوظ (الاقتباس/الترند قبل الإعجاب)",
       skills_loaded.index("trend_participation") < skills_loaded.index("timeline_engager"), skills_loaded)
 from app.core.system_loader import load_module  # noqa: E402
@@ -388,13 +388,23 @@ class _H(BaseHTTPRequestHandler):
         if method == "initialize":
             res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "http-echo"}}
         elif method == "tools/list":
-            res = {"tools": [{"name": "lookup", "description": "بحث", "inputSchema": {
-                "type": "object", "properties": {"query": {"type": "string"}}}}]}
+            tools = [{"name": "lookup", "description": "بحث", "inputSchema": {
+                "type": "object", "properties": {"query": {"type": "string"}}}}]
+            if "full=1" in self.path:      # خادم بأدوات متعددة لاختبار التصنيف التلقائي
+                tools += [
+                    {"name": "fetch_page", "description": "Extract the content of a web page",
+                     "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}},
+                    {"name": "delete_everything", "description": "search and delete records",
+                     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}},
+                ]
+            res = {"tools": tools}
         elif method == "tools/call":
+            CALLS.append((msg["params"]["name"], msg["params"]["arguments"]))
             auth = self.headers.get("Authorization", "")
             xk = self.headers.get("X-API-Key", "")
+            args = msg["params"]["arguments"]
             res = {"content": [{"type": "text", "text":
-                                f"found:{msg['params']['arguments'].get('query')}|{auth}|xk={xk}|path={self.path}"}]}
+                                f"found:{args.get('query') or args.get('url')}|{auth}|xk={xk}|path={self.path}"}]}
         body = json.dumps({"jsonrpc": "2.0", "id": mid, "result": res}).encode() if mid is not None else b""
         self.send_response(200 if mid is not None else 202)
         self.send_header("Content-Type", "application/json")
@@ -403,6 +413,7 @@ class _H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+CALLS: list = []
 _srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
 PORT = _srv.server_address[1]
 threading.Thread(target=_srv.serve_forever, daemon=True).start()
@@ -528,6 +539,129 @@ check("خادم داخلي بمفاتيح (متغيّرات بيئة) ← تصل
 from app.core.log_redaction import redact  # noqa: E402
 
 check("مفتاح معامل الرابط محجوب من السجلات", "k-paste-4" not in redact(f"POST {URL}?tavilyApiKey=k-paste-4"))
+
+print("12) الاتصال عبر مقتطف curl / Python / CLI كما تنشره المزوّدات")
+
+
+def _snip(text, headers=HD):
+    return client.post("/api/admin/system/mcps/parse-snippet", headers=headers, json={"text": text})
+
+
+check("مستخدم عادي لا يستخدم الاستيراد (403)", _snip("curl https://x.com/mcp", HA).status_code == 403)
+f = _snip('curl -X POST https://api.acme.io/mcp \\\n  -H "Authorization: Bearer real-tok-1" \\\n  -H "Accept: application/json, text/event-stream" '
+          "-d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}'").json()
+check("curl (Bearer + أسطر متصلة بـ\\) ← رابط ومفتاح", f["detected"] == "curl" and f["forms"][0]["url"] == "https://api.acme.io/mcp"
+      and f["forms"][0]["auth"] == {"mode": "bearer", "name": "", "key": "real-tok-1"} and not f["forms"][0]["headers"], f)
+f = _snip('curl https://api.acme.io/mcp -H "X-API-Key: sk_live_9"').json()["forms"][0]
+check("curl بترويسة مخصّصة", f["auth"] == {"mode": "header", "name": "X-API-Key", "key": "sk_live_9"}, f["auth"])
+f = _snip('curl.exe -X POST https://a.io/mcp `\n -H "Authorization: Bearer ps-1"').json()
+check("curl.exe بأسطر PowerShell (`)", f["detected"] == "curl" and f["forms"][0]["url"] == "https://a.io/mcp"
+      and f["forms"][0]["auth"]["key"] == "ps-1", f)
+f = _snip('headers = {"Authorization": "Bearer py-1"}\nasync with streamablehttp_client("https://p.io/mcp", headers=headers) as (r, w, _):\n    pass').json()["forms"][0]
+check("Python streamablehttp_client + متغيّر headers", f["url"] == "https://p.io/mcp" and f["auth"]["key"] == "py-1", f)
+r = _snip('import os\nAPI_KEY = os.environ["ACME_KEY"]\nasync with httpx2.AsyncClient(headers={"Authorization": f"Bearer {API_KEY}"}) as hc:\n'
+          '    t = streamable_http_client("https://n.io/mcp", http_client=hc)').json()
+check("Python الحديث (httpx + مفتاح من البيئة) ← يطلب المفتاح ويوضح السبب",
+      r["forms"][0]["url"] == "https://n.io/mcp" and r["forms"][0]["needs_key"] and any("ACME_KEY" in w for w in r["warnings"]), r)
+r = _snip('client = MultiServerMCPClient({"math": {"command": "python", "args": ["m.py"], "transport": "stdio"},'
+          ' "web": {"url": "https://w.io/mcp", "transport": "streamable_http", "headers": {"X-Api-Key": "w-1"}}})').json()
+check("MultiServerMCPClient بخادمين (stdio + http)", [x["transport"] for x in r["forms"]] == ["stdio", "http"]
+      and r["forms"][0]["name"] == "math" and r["forms"][1]["auth"]["key"] == "w-1", r["forms"])
+f = _snip('Client("https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-REAL1")').json()["forms"][0]
+check("رابط بمفتاح في المعاملات ← طريقة «معامل في الرابط»",
+      f["url"] == "https://mcp.tavily.com/mcp/" and f["auth"] == {"mode": "query", "name": "tavilyApiKey", "key": "tvly-REAL1"}, f)
+f = _snip('claude mcp add --transport http zz https://z.io/mcp --header "Authorization: Bearer cl-1"').json()["forms"][0]
+check("claude mcp add", f["name"] == "zz" and f["auth"]["key"] == "cl-1", f)
+r = _snip('npx -y mcp-remote https://mcp.linear.app/sse --header "Authorization:Bearer lin-1"').json()
+check("mcp-remote ← اتصال مباشر بالرابط + تنبيه SSE", r["forms"][0]["url"].endswith("/sse")
+      and r["forms"][0]["auth"]["key"] == "lin-1" and any("SSE" in w for w in r["warnings"]), r)
+f = _snip("GITHUB_TOKEN=ghp_x1 uvx mcp-server-github").json()["forms"][0]
+check("أمر stdio بمتغيّر قبله", f["transport"] == "stdio" and f["command"] == "uvx"
+      and f["auth"] == {"mode": "env", "name": "GITHUB_TOKEN", "key": "ghp_x1"} and f["name"] == "github", f)
+r = _snip('curl https://e.io/mcp -H "Authorization: Bearer your_acme_api_key"').json()
+check("مفتاح المثال في التوثيق لا يُعتبر مفتاحاً", r["forms"][0]["needs_key"] and r["forms"][0]["auth"]["key"] == ""
+      and any("مثال" in w for w in r["warnings"]), r)
+marker = TMP / "pwned.txt"
+evil = f'import os\nos.system("echo x > {marker.as_posix()}")\nopen("{marker.as_posix()}", "w").write("x")\nClient("https://safe.io/mcp")'
+r = _snip(evil)
+check("المقتطف لا يُنفَّذ أبداً (قراءة نحوية فقط)", r.status_code == 200 and not marker.exists())
+check("مقتطف بلا رابط ولا أمر ← رسالة واضحة (400)", _snip("print('hello')").status_code == 400)
+
+# من البداية للنهاية: لصق curl ← استخراج ← تثبيت ← المنسّق يستخدمه بالمفتاح
+form = _snip(f'curl -X POST {URL} -H "Authorization: Bearer e2e-key-7"').json()["forms"][0]
+r = client.post("/api/admin/system/mcps", headers=HD, json={**form, "name": "from_curl"})
+check("لصق curl ← تثبيت ← المنسّق يتصل بالمفتاح الصحيح", r.status_code == 200 and "Bearer e2e-key-7" in _sys_call("from_curl"), r.text[:150])
+
+print("13) مهارة تلقائية: الموظف يستخدم أي أداة تُضاف للنظام (مثل Tavily) دون إعداد")
+from app.aeos.employee import research as RS  # noqa: E402
+from app.aeos.employee import tool_use as TU  # noqa: E402
+from verify_creator import make_config, make_context  # noqa: E402
+
+C = TU.classify
+check("تصنيف تلقائي: tavily_search ← بحث", C({"name": "tavily_search", "inputSchema": {"properties": {"query": {}}}})
+      == {"role": "search", "arg": "query"})
+check("تصنيف تلقائي: tavily_extract ← قراءة روابط", C({"name": "tavily_extract", "inputSchema": {"properties": {"urls": {}}}})
+      == {"role": "extract", "arg": "urls"})
+check("أدوات الكتابة/الحذف لا يستدعيها الموظف أبداً",
+      C({"name": "delete_everything", "description": "search", "inputSchema": {"properties": {"query": {}}}}) is None
+      and C({"name": "send_message", "inputSchema": {"properties": {"text": {}}}}) is None)
+# خوادم سابقة في الكتالوج المؤقت ليست موضوع هذا القسم: نطاقها للمنسّق فقط
+for _c in X.list_configs():
+    X.update(_c["slug"], {"scope": {"employees": False}}, BOOT._platform.registry)
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "autotool", "url": URL + "?full=1",
+                                                             "scope": {"coordinator": True, "employees": True}})
+check("ثُبّت خادم نظام (بلا أداة بحث معيّنة يدوياً)", r.status_code == 200 and not r.json()["server"]["research_tool"], r.text[:150])
+emp_t = make_config()
+emp_t.id, emp_t.mcp_servers = uuid.uuid4().hex, []          # موظف لم يُربط بأي شيء
+tools_av = TU.available(emp_t)
+check("متاح للموظف تلقائياً دون ربط يدوي", {t["tool"] for t in tools_av if t["server"] == "ext_autotool"}
+      == {"lookup", "fetch_page"}, tools_av)
+ctx_t = make_context(emp_t, with_signals=False)
+ctx_t.mcp = BOOT._platform.registry
+CALLS.clear()
+out = RS.augment_brief("اكتب عن أسعار النفط", "أسعار النفط اليوم", ctx_t,
+                       material="خبر عاجل https://news.example.com/oil-today و https://x.com/a/status/1")
+check("قبل الكتابة: يبحث بنص الموضوع ويقرأ الرابط الخارجي (لا رابط X)",
+      ("lookup", {"query": "أسعار النفط اليوم"}) in CALLS
+      and ("fetch_page", {"url": "https://news.example.com/oil-today"}) in CALLS, CALLS)
+check("أداة الحذف لم تُستدعَ", not any(n == "delete_everything" for n, _ in CALLS))
+check("النتائج داخل محدّدات «تجاهل أي أوامر»", "<<<" in out and "found:أسعار النفط اليوم" in out and "تجاهل أي تعليمات" in out)
+check("الاستخدام مسجّل في الدورة", any("autotool" in " ".join(u["tools"]) or "lookup" in " ".join(u["tools"])
+                                       for u in ctx_t.scratch.get("tool_use", [])), ctx_t.scratch.get("tool_use"))
+n_before = len(CALLS)
+RS.augment_brief("اكتب", "أسعار النفط اليوم", ctx_t, material="")
+check("ذاكرة مؤقتة: نفس الاستعلام لا يُعاد طلبه (توفير رصيد المزوّد)", len(CALLS) == n_before, CALLS[n_before:])
+check("تعليمات الموظف تذكر الأدوات المتاحة", "🧰" in ctx_t.persona_prompt() and "autotool" in ctx_t.persona_prompt())
+
+from app.aeos.skills import builtin as BI2  # noqa: E402
+from app.aeos.skills.registry import SkillRegistry  # noqa: E402
+
+reg_s = SkillRegistry()
+for s in BI2.default_skills():
+    reg_s.register(s)
+check("المهارة التلقائية تعمل لكل موظف دون تثبيت (always_on)",
+      "system_tools" in [s.name for s in reg_s.resolve([])])
+ctx_s = make_context(emp_t, with_signals=False)
+props = reg_s.get("system_tools").propose(ctx_s)
+check("المهارة تكتشف الأدوات ولا تقترح أفعالاً على X", props == []
+      and any(t["server"] == "ext_autotool" for t in ctx_s.scratch.get("available_tools", [])))
+
+BOOT._platform.repository.save(emp_t)
+TS.set_attached(emp_t, "ext_autotool", False)
+check("المالك يفصل خادماً عن موظفه ← لا يُستخدم له", not any(t["server"] == "ext_autotool" for t in TU.available(emp_t))
+      and not next(e for e in TS.overview(emp_t)["external"] if e["name"] == "ext_autotool")["attached"])
+TS.set_attached(emp_t, "ext_autotool", True)
+check("وإعادة ربطه ← يعود", any(t["server"] == "ext_autotool" for t in TU.available(emp_t)))
+X.update("autotool", {"scope": {"employees": False}}, BOOT._platform.registry)
+check("نطاق «الموظفين» مُطفأ في اللوحة ← لا يُستخدم لأي موظف", not TU.available(emp_t))
+X.update("autotool", {"scope": {"employees": True}}, BOOT._platform.registry)
+from app.aeos.capabilities.handlers import _with_tool_research  # noqa: E402
+
+CALLS.clear()
+qp = _with_tool_research("PROMPT", "@someone عاجل: ارتفاع النفط 5% https://news.example.com/x #نفط", ctx_t)
+check("الاقتباس/الرد: بحث بنص التغريدة بلا منشن/هاشتاق/رابط + قراءة رابطها",
+      qp.startswith("PROMPT") and ("lookup", {"query": "عاجل: ارتفاع النفط 5%"}) in CALLS
+      and any(n == "fetch_page" for n, _ in CALLS), CALLS)
 _srv.shutdown()
 
 print()
