@@ -298,7 +298,7 @@ async def get_candidate_detail(
 
 @router.get("/signals")
 async def list_signals(
-    platform: Optional[str] = Query(None, description="Filter: reddit, x, google_trends, tiktok"),
+    platform: Optional[str] = Query(None, description="Filter by source (tavily)"),
     has_media: Optional[bool] = Query(None, description="Filter by media presence"),
     processed: Optional[bool] = Query(None, description="Filter by processed status"),
     hours: Optional[int] = Query(None, description="Only signals from last N hours"),
@@ -436,7 +436,7 @@ async def list_watchlist(
 
 @router.post("/run")
 async def trigger_pipeline(
-    platform: str = Query("reddit", description="Platform: reddit, google_trends, x, tiktok"),
+    platform: str = Query("tavily", description="Source: tavily (the only one)"),
     current_user: User = Depends(require_current_user),
 ):
     """Manually trigger the trend detection pipeline for a specific platform"""
@@ -451,7 +451,7 @@ async def trigger_all_pipelines(
     current_user: User = Depends(require_current_user),
 ):
     """Trigger pipeline for ALL configured collectors sequentially"""
-    platforms = ["reddit", "google_trends", "x", "tiktok"]
+    platforms = list(trend_scheduler.collectors)
     results = {}
     for p in platforms:
         result = await trend_scheduler.run_pipeline_once(platform=p)

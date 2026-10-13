@@ -204,7 +204,7 @@ const McpAddCard = ({ notify, onAdded }) => {
               <div><span className={label}>الأمر</span>
                 <input placeholder="npx" value={q.command} onChange={(e) => set({ command: e.target.value })} className={input} dir="ltr" /></div>
               <div><span className={label}>الوسائط (سطر لكل وسيط)</span>
-                <textarea rows={2} placeholder={'-y\n@modelcontextprotocol/server-brave-search'} value={q.args} onChange={(e) => set({ args: e.target.value })} className={input} dir="ltr" /></div>
+                <textarea rows={2} placeholder={'-y\ntavily-mcp'} value={q.args} onChange={(e) => set({ args: e.target.value })} className={input} dir="ltr" /></div>
             </div>
           )}
 

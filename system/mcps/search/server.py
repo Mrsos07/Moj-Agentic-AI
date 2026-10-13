@@ -1,40 +1,51 @@
 # خادم MCP مدمج في النظام — المصدر الوحيد لهذا الخادم (system/mcps).
 # يحمّله app/aeos/mcp/catalog.py عند الإقلاع؛ المسار القديم في app/aeos/mcp/servers اسم بديل.
 """
-SearchMCP — بحث ويب حقيقي (Tavily / Brave / SerpAPI).
+SearchMCP — بحث ويب حقيقي عبر Tavily (المزوّد الوحيد في النظام).
+
+كان يدعم Brave وSerpAPI أيضاً؛ أُزيلا ليبقى مزوّد بحث واحد ومفتاح واحد (TAVILY_API_KEY)
+يخدم البحث المدمج وكاشف الترندات وخادم Tavily البعيد معاً.
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import List
-from app.aeos.core.interfaces import ILLMProvider
+
 from app.aeos.mcp.base import IMCPServer, MCPRequest, MCPResponse
+
 logger = logging.getLogger("aeos.mcp.core")
 
-
-#: مزوّدو البحث المدعومون: متغير البيئة الذي يفعّل كلاً منهم
-SEARCH_PROVIDER_KEYS = {
-    "tavily": "TAVILY_API_KEY",
-    "brave": "BRAVE_SEARCH_API_KEY",
-    "serpapi": "SERPAPI_KEY",
-}
+#: المزوّد ← متغيّر البيئة الذي يفعّله (اسم القاموس محفوظ للتوافق مع من يستورده)
+SEARCH_PROVIDER_KEYS = {"tavily": "TAVILY_API_KEY"}
+TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 
 def search_provider() -> tuple:
-    """(اسم المزوّد، المفتاح) — ``SEARCH_PROVIDER`` صريحاً، وإلا أول مفتاح موجود."""
-    import os
+    """(«tavily»، المفتاح) إن وُجد المفتاح، وإلا («»، «»)."""
+    key = (os.getenv("TAVILY_API_KEY") or "").strip()
+    return ("tavily", key) if key else ("", "")
 
-    wanted = (os.getenv("SEARCH_PROVIDER") or "").strip().lower()
-    order = [wanted] if wanted in SEARCH_PROVIDER_KEYS else list(SEARCH_PROVIDER_KEYS)
-    for name in order:
-        key = (os.getenv(SEARCH_PROVIDER_KEYS[name]) or "").strip()
-        if key:
-            return name, key
-    return "", ""
+
+def tavily_search(query: str, *, max_results: int = 5, topic: str = "general",
+                  time_range: str = "", timeout: float = 20) -> list:
+    """نداء Tavily واحد — يستخدمه البحث المدمج وكاشف الترندات. يرفع استثناءً عند الفشل."""
+    import requests
+
+    key = search_provider()[1]
+    if not key:
+        raise RuntimeError("TAVILY_API_KEY غير موجود في .env")
+    body = {"query": query, "max_results": max_results, "search_depth": "basic", "topic": topic}
+    if time_range:
+        body["time_range"] = time_range
+    resp = requests.post(TAVILY_SEARCH_URL, json=body, headers={"Authorization": f"Bearer {key}"},
+                         timeout=timeout)
+    resp.raise_for_status()
+    return resp.json().get("results") or []
 
 
 class SearchMCP(IMCPServer):
-    """بحث ويب حقيقي (Tavily / Brave / SerpAPI) — يختاره مفتاح البيئة.
+    """بحث ويب حقيقي عبر Tavily.
 
     بلا مفتاح يفشل صراحةً بـ«غير مُهيّأ» بدل أن يعيد نجاحاً بقائمة فارغة: النجاح
     الفارغ كان يُقرأ كـ«لا نتائج» فيبدو البحث شغّالاً وهو غير موصول أصلاً.
@@ -51,49 +62,17 @@ class SearchMCP(IMCPServer):
         return bool(search_provider()[0])
 
     def call(self, request: MCPRequest) -> MCPResponse:
-        import requests
-
         query = str(request.params.get("query") or "").strip()
         if not query:
             return MCPResponse.fail("query is required")
         limit = max(1, min(int(request.params.get("limit", 5) or 5), 10))
-        provider, key = search_provider()
-        if not provider:
-            return MCPResponse.fail(
-                "search provider not configured — أضف TAVILY_API_KEY أو "
-                "BRAVE_SEARCH_API_KEY أو SERPAPI_KEY إلى .env")
+        if not search_provider()[0]:
+            return MCPResponse.fail("search provider not configured — أضف TAVILY_API_KEY إلى .env")
         try:
-            if provider == "tavily":
-                resp = requests.post(
-                    "https://api.tavily.com/search",
-                    json={"query": query, "max_results": limit, "search_depth": "basic"},
-                    headers={"Authorization": f"Bearer {key}"}, timeout=20)
-                resp.raise_for_status()
-                items = [{"title": r.get("title", ""), "url": r.get("url", ""),
-                          "snippet": r.get("content", "")}
-                         for r in resp.json().get("results") or []]
-            elif provider == "brave":
-                resp = requests.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": limit},
-                    headers={"X-Subscription-Token": key, "Accept": "application/json"},
-                    timeout=20)
-                resp.raise_for_status()
-                items = [{"title": r.get("title", ""), "url": r.get("url", ""),
-                          "snippet": r.get("description", "")}
-                         for r in (resp.json().get("web") or {}).get("results") or []]
-            else:
-                resp = requests.get(
-                    "https://serpapi.com/search.json",
-                    params={"engine": "google", "q": query, "num": limit, "api_key": key},
-                    timeout=20)
-                resp.raise_for_status()
-                items = [{"title": r.get("title", ""), "url": r.get("link", ""),
-                          "snippet": r.get("snippet", "")}
-                         for r in resp.json().get("organic_results") or []]
+            items = [{"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+                     for r in tavily_search(query, max_results=limit)]
         except Exception as exc:  # noqa: BLE001
-            # لا نُظهر المفتاح: رسالة requests قد تحوي الرابط كاملاً (SerpAPI يضعه فيه)
             status = getattr(getattr(exc, "response", None), "status_code", "")
-            return MCPResponse.fail(f"{provider} search failed: {type(exc).__name__} {status}".strip())
+            return MCPResponse.fail(f"tavily search failed: {type(exc).__name__} {status}".strip())
         items = [i for i in items if i["url"]][:limit]
-        return MCPResponse.ok(results=items, provider=provider, query=query)
+        return MCPResponse.ok(results=items, provider="tavily", query=query)

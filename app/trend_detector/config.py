@@ -11,18 +11,8 @@ load_dotenv(override=True)
 # =============================================================================
 # API Keys (loaded from .env)
 # =============================================================================
-REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "MojTrendDetector/1.0")
-
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
-
-X_API_SERVER_URL = os.getenv("X_API_SERVER_URL", "")  # Custom X API server
-
-TIKTOK_API_KEY = os.getenv("TIKTOK_API_KEY", "")
-TIKTOK_API_PROVIDER = os.getenv("TIKTOK_API_PROVIDER", "rapidapi")  # rapidapi or apify
-
-GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY", "")
+# المصدر الوحيد للترندات: Tavily (TAVILY_API_KEY، يُقرأ في system/mcps/search).
+# أُزيلت جامعات Reddit / Google Trends (SerpAPI) / X API الخاص / TikTok وتحليل Google Vision.
 
 # مزوّد الـ LLM (OpenRouter افتراضياً، OpenAI احتياطاً). لا تُقرأ المفاتيح هنا
 # مباشرة: ``app.core.llm_provider.resolve_llm`` هو المصدر الوحيد لاختيار
@@ -34,11 +24,16 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # =============================================================================
 # Collector Polling Intervals (in minutes)
 # =============================================================================
+def _interval(name: str, default: int) -> int:
+    try:
+        return max(30, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+# كل دورة = TREND_TAVILY_MAX_QUERIES رصيداً من Tavily (افتراضياً 4 كل 240 دقيقة ≈ 24 يومياً)
 COLLECTOR_INTERVALS = {
-    "x": 10,
-    "google_trends": 30,
-    "reddit": 15,
-    "tiktok": 60,
+    "tavily": _interval("TREND_TAVILY_INTERVAL", 240),
 }
 
 # Watchlist re-check interval (minutes)
@@ -69,30 +64,15 @@ SCORING_WEIGHTS = {
 # A signal must exceed these to earn points for that metric
 # =============================================================================
 PLATFORM_THRESHOLDS = {
-    "reddit": {
-        "views": 5000,
-        "reshares": 100,       # crosspost count
-        "likes": 1000,         # upvotes
-        "comments": 200,
-    },
-    "x": {
-        "views": 10000,
-        "reshares": 500,       # retweets
-        "likes": 1000,
-        "comments": 300,       # replies
-    },
-    "google_trends": {
-        "views": 0,
-        "reshares": 0,
-        "likes": 0,
-        "comments": 0,
-        "is_trending_source": True,  # Auto-awarded trending_source bonus
-    },
-    "tiktok": {
-        "views": 50000,
-        "reshares": 1000,      # shares
-        "likes": 5000,
-        "comments": 500,
+    # Tavily (أخبار آخر يوم): مصدر ترند بطبيعته (+6). views = صلة النتيجة ×100،
+    # reshares = عدد المصادر التي تغطي القصة بعد الدمج. قصة من مصدرين+ أو بصلة ≥0.85 ← HOT (≥8)،
+    # ومصدر واحد بصلة عادية ← EARLY (قائمة المراقبة).
+    "tavily": {
+        "views": 84,
+        "reshares": 1,
+        "likes": 10**9,
+        "comments": 10**9,
+        "is_trending_source": True,
     },
 }
 

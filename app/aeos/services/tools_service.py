@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 CORE_SERVERS = ("x", "playwright_x", "content", "memory")
 #: خوادم مدمجة اختيارية يمكن للمالك ربطها/فصلها
 OPTIONAL_BUILTIN = {
-    "search": "بحث ويب (Tavily/Brave/SerpAPI)",
+    "search": "بحث ويب (Tavily)",
     "news": "أخبار قوقل حسب التخصص",
     "browser": "قراءة صفحات الويب",
     "image": "توليد الصور",
@@ -129,8 +129,7 @@ def set_attached(cfg, server: str, attach: bool) -> Dict[str, Any]:
         from app.aeos.mcp.servers.core_mcp import search_provider
 
         if not search_provider()[0]:
-            raise ValueError("البحث غير مُهيّأ: أضف TAVILY_API_KEY أو BRAVE_SEARCH_API_KEY "
-                             "أو SERPAPI_KEY إلى .env ثم أعد تشغيل الخادم")
+            raise ValueError("البحث غير مُهيّأ: أضف TAVILY_API_KEY إلى .env ثم أعد تشغيل الخادم")
     servers = [s for s in (cfg.mcp_servers or []) if s != server]
     if attach:
         servers.append(server)

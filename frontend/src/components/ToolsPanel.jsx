@@ -112,14 +112,14 @@ const ToolsPanel = ({ employeeId, onNotify }) => {
             {data.builtin.map(b => (
               <button key={b.name} type="button" disabled={!b.available || busy === b.name}
                 onClick={() => attach(b.name, !b.attached)} className={chip(b.attached)}
-                title={b.available ? '' : 'أضف مفتاح مزوّد بحث في .env (TAVILY_API_KEY / BRAVE_SEARCH_API_KEY / SERPAPI_KEY)'}>
+                title={b.available ? '' : 'أضف TAVILY_API_KEY في .env'}>
                 {b.label}{!b.available ? ' — غير مُهيّأ' : ''}
               </button>
             ))}
           </div>
           {!data.search.configured && (
             <p className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
-              البحث على الويب يعمل تلقائياً قبل كتابة كل منشور متى أضفت مفتاح Tavily أو Brave أو SerpAPI إلى ملف .env.
+              البحث على الويب يعمل تلقائياً قبل كتابة كل منشور متى أضفت مفتاح Tavily (TAVILY_API_KEY) إلى ملف .env.
             </p>
           )}
 

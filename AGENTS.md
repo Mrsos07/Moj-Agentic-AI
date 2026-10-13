@@ -595,6 +595,12 @@ independent structural causes — none of them fixable by telling the model to
   auto-called, and calls happen only at write time (posts, quotes; replies if
   `research_before_replies`). 6h query cache; built-in search via Tavily suppresses a duplicate
   Tavily-MCP search.
+- Tavily is the ONLY search/trend provider (user decision): built-in `system/mcps/search`
+  (`tavily_search()` helper) and the Trend Detector's single `TavilyCollector` (queries = Saudi/Gulf
+  news + employees' top interests, `topic=news`, `time_range=day`; landing pages/social hosts
+  dropped). Reddit / Google Trends (SerpAPI) / custom X API / TikTok collectors, Google Vision and
+  the X validator were removed; `ScoreGate` decides HOT/EARLY from score (multi-outlet stories → HOT).
+  Credit cost: `TREND_TAVILY_MAX_QUERIES` (4) every `TREND_TAVILY_INTERVAL` (240 min).
 - `verify_tools.py` needs the official SDK in a separate env at
   `%LOCALAPPDATA%\Moj-Agentic-AI\mcp_testenv` (`pip install mcp==2.2.0`). Not `%TEMP%`: Windows
   cleanup half-deleted it once and the test failed with `cannot import name 'MCPServer'`.

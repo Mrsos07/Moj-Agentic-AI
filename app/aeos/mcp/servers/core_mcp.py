@@ -12,3 +12,4 @@ _search = _m("search")
 SearchMCP = _search.SearchMCP
 SEARCH_PROVIDER_KEYS = _search.SEARCH_PROVIDER_KEYS
 search_provider = _search.search_provider
+tavily_search = _search.tavily_search
