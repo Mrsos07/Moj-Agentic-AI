@@ -19,39 +19,30 @@ from app.trend_detector.config import (
     WATCHLIST_MAX_CHECKS,
 )
 
-from app.trend_detector.collectors.reddit import RedditCollector
-from app.trend_detector.collectors.google_trends import GoogleTrendsCollector
-from app.trend_detector.collectors.x_collector import XCollector
-from app.trend_detector.collectors.tiktok import TikTokCollector
-from app.trend_detector.media.vision_analyzer import VisionAnalyzer
+from app.trend_detector.collectors.tavily_collector import TavilyCollector
 from app.trend_detector.pipeline.normalizer import Normalizer
 from app.trend_detector.pipeline.deduplicator import Deduplicator
 from app.trend_detector.pipeline.scoring import ScoringEngine
-from app.trend_detector.pipeline.validator import XValidator
+from app.trend_detector.pipeline.validator import ScoreGate
 from app.trend_detector.classifier.classifier import Classifier
 
 
 class TrendDetectorScheduler:
-    """Main orchestrator for the trend detection pipeline"""
+    """Main orchestrator for the trend detection pipeline (Tavily is the only source)."""
 
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.normalizer = Normalizer()
         self.deduplicator = Deduplicator()
         self.scoring_engine = ScoringEngine()
-        self.validator = XValidator()
+        self.validator = ScoreGate()
         self.classifier = Classifier()
-
-        # Media analyzer
-        self.vision_analyzer = VisionAnalyzer()
-
-        # Collectors
-        self.reddit_collector = RedditCollector()
-        self.google_trends_collector = GoogleTrendsCollector()
-        self.x_collector = XCollector()
-        self.tiktok_collector = TikTokCollector()
-
+        self.tavily_collector = TavilyCollector()
         self._is_running = False
+
+    @property
+    def collectors(self) -> dict:
+        return {"tavily": self.tavily_collector}
 
     def start(self):
         """Start the scheduler with all jobs"""
@@ -59,16 +50,8 @@ class TrendDetectorScheduler:
             print("[TrendScheduler] Already running")
             return
 
-        # Register all collectors
-        collectors = [
-            ("reddit", self.reddit_collector),
-            ("google_trends", self.google_trends_collector),
-            ("x", self.x_collector),
-            ("tiktok", self.tiktok_collector),
-        ]
-
         delay = 10
-        for name, collector in collectors:
+        for name, collector in self.collectors.items():
             if collector.is_configured():
                 interval = COLLECTOR_INTERVALS.get(name, 30)
                 self.scheduler.add_job(
@@ -124,9 +107,6 @@ class TrendDetectorScheduler:
                 print(f"[TrendScheduler] No new signals from {collector_name}")
                 return
 
-            # 1.5 Media analysis for signals with media
-            raw_signals = await self.vision_analyzer.process_signals(raw_signals)
-
             # 2. Normalize and persist signals
             new_signals = self.normalizer.process(raw_signals, db)
             if not new_signals:
@@ -142,7 +122,7 @@ class TrendDetectorScheduler:
             # 4. Score candidates
             scored = self.scoring_engine.process(candidates, db)
 
-            # 5. Validate against X
+            # 5. Score gate (HOT / EARLY / NOT_YET)
             hot_candidates = await self.validator.validate(scored, db)
 
             # 6. Classify HOT candidates
@@ -229,29 +209,21 @@ class TrendDetectorScheduler:
         finally:
             db.close()
 
-    async def run_pipeline_once(self, platform: str = "reddit"):
+    async def run_pipeline_once(self, platform: str = "tavily"):
         """
         Run the pipeline once manually (for testing / API trigger).
         Returns dict with results summary.
         """
-        collectors = {
-            "reddit": self.reddit_collector,
-            "google_trends": self.google_trends_collector,
-            "x": self.x_collector,
-            "tiktok": self.tiktok_collector,
-        }
-
-        collector = collectors.get(platform)
+        collector = self.collectors.get(platform)
         if not collector:
-            return {"error": f"Unknown platform: {platform}"}
+            return {"error": f"Unknown platform: {platform} — the only source is 'tavily'"}
 
         if not collector.is_configured():
-            return {"error": f"Platform '{platform}' not configured — add API keys to .env"}
+            return {"error": "Tavily not configured — add TAVILY_API_KEY to .env"}
 
         db: Session = SessionLocal()
         try:
             raw_signals = await collector.collect()
-            raw_signals = await self.vision_analyzer.process_signals(raw_signals)
             new_signals = self.normalizer.process(raw_signals, db)
             candidates = self.deduplicator.process(new_signals, db)
             scored = self.scoring_engine.process(candidates, db) if candidates else []

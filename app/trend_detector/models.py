@@ -14,7 +14,7 @@ class Signal(Base):
     __tablename__ = "td_signals"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    platform = Column(String(50), nullable=False, index=True)       # reddit, x, google_trends, tiktok
+    platform = Column(String(50), nullable=False, index=True)       # tavily (old rows: reddit, x, google_trends, tiktok)
     source_id = Column(String(500), nullable=True, index=True)      # Original post/trend ID on the platform
     title = Column(String(1000), nullable=True)
     content = Column(Text, nullable=True)

@@ -16,8 +16,8 @@ class ScoringEngine:
     """Calculate weighted score for candidates based on engagement metrics"""
 
     def _get_thresholds(self, platform: str) -> dict:
-        """Get thresholds for a specific platform, fallback to reddit defaults"""
-        return PLATFORM_THRESHOLDS.get(platform, PLATFORM_THRESHOLDS.get("reddit", {}))
+        """Get thresholds for a specific platform, fallback to Tavily (the only source)"""
+        return PLATFORM_THRESHOLDS.get(platform, PLATFORM_THRESHOLDS["tavily"])
 
     def _score_candidate(self, candidate: Candidate) -> float:
         """
@@ -29,7 +29,7 @@ class ScoringEngine:
         score = 0.0
 
         # Get all platforms this candidate appeared on
-        platforms = [p.strip() for p in (candidate.platforms or "reddit").split(",") if p.strip()]
+        platforms = [p.strip() for p in (candidate.platforms or "tavily").split(",") if p.strip()] or ["tavily"]
         primary_platform = platforms[0]
         thresholds = self._get_thresholds(primary_platform)
 

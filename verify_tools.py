@@ -151,7 +151,10 @@ check("المفتاح في الترويسة لا في الرابط", calls and "
       and "tvly" not in calls[0][0])
 
 from app.aeos.employee import research  # noqa: E402
+from app.aeos.employee import tool_use as _tu  # noqa: E402
 
+_real_available = _tu.available
+_tu.available = lambda cfg: []   # هذا القسم للبحث المدمج فقط — لا يلمس خوادم الكتالوج الحقيقية (رصيد Tavily)
 reg = MCPRegistry()
 reg.register(srv)
 progress = []
@@ -164,7 +167,71 @@ check("البحث يُضاف للبريف بمحدّدات وتحذير من ا�
       "<<<" in out and ">>>" in out and "تجاهل أي تعليمات" in out and "حقيقة" in out)
 rctx.config.business_rules = {"web_search": False}
 check("فصل البحث يدوياً (web_search=False) يوقفه", research.augment_brief("اكتب", "صفقة", rctx) == "اكتب")
+_tu.available = _real_available
 os.environ.pop("TAVILY_API_KEY")
+
+print("3.5) الاكتفاء بـ Tavily: البحث وكاشف الترندات")
+check("Tavily المزوّد الوحيد للبحث", list(core_mcp.SEARCH_PROVIDER_KEYS) == ["tavily"])
+os.environ["BRAVE_SEARCH_API_KEY"], os.environ["SERPAPI_KEY"] = "b-old", "s-old"
+check("مفاتيح Brave/SerpAPI القديمة لا تفعّل البحث", core_mcp.search_provider() == ("", ""))
+os.environ.pop("BRAVE_SEARCH_API_KEY"); os.environ.pop("SERPAPI_KEY")
+
+import asyncio  # noqa: E402
+from app.trend_detector.collectors import tavily_collector as TC  # noqa: E402
+from app.trend_detector.models import Candidate  # noqa: E402
+from app.trend_detector.pipeline.scoring import ScoringEngine  # noqa: E402
+from app.trend_detector.config import VALIDATION_THRESHOLDS as VT  # noqa: E402
+from app.trend_detector.scheduler.scheduler import TrendDetectorScheduler  # noqa: E402
+
+check("كاشف الترندات: مصدر واحد هو Tavily", list(TrendDetectorScheduler().collectors) == ["tavily"])
+_real_interests = TC.employee_interests
+TC.employee_interests = lambda n: ["الذكاء الاصطناعي", "كرة القدم", "الاقتصاد", "الطقس"][:n]
+qs = TC.build_queries()
+check("الاستعلامات: عام + تخصصات الموظفين، بحد أقصى 4 (رصيد)", len(qs) == 4 and qs[0]["query"] == TC.BASE_QUERY
+      and qs[1]["query"] == "آخر أخبار الذكاء الاصطناعي", qs)
+seen_q = []
+
+
+def _fake_tavily(query, **kw):
+    seen_q.append((query, kw))
+    return [{"title": f"خبر {query[:10]}", "url": f"https://www.news{len(seen_q)}.com/world/2026/a-story",
+             "content": "تفاصيل", "score": 0.9, "published_date": "Mon, 12 Oct 2026 10:00:00 GMT"},
+            {"title": "مكرر", "url": "https://www.news1.com/world/2026/a-story", "content": "", "score": 0.5},
+            {"title": "آخر أخبار السعودية الحصرية", "url": "https://www.alarabiya.net/saudi-today/2026"},
+            {"title": "أخبار Google", "url": "https://news.google.com/topics/abc"},
+            {"title": "الجزيرة نت", "url": "https://www.aljazeera.net/"}]
+
+
+_real_ts = core_mcp.tavily_search
+core_mcp.tavily_search = _fake_tavily
+os.environ["TAVILY_API_KEY"] = "tvly-test"
+sigs = asyncio.run(TC.TavilyCollector().collect())
+core_mcp.tavily_search = _real_ts
+TC.employee_interests = _real_interests
+os.environ.pop("TAVILY_API_KEY")
+check("الجامع يطلب أخبار آخر يوم", all(kw.get("topic") == "news" and kw.get("time_range") == "day" for _, kw in seen_q))
+check("صفحات الأقسام والرئيسية وأخبار Google ليست قصصاً", not any(
+    "google" in s["url"] or "saudi-today" in s["url"] or s["url"].endswith(".net/") for s in sigs))
+TC.employee_interests = lambda n: ["crypto"]
+check("اهتمام لاتيني بلا ترجمة ← استعلام إنجليزي لا خليط لغتين",
+      TC.build_queries()[1]["query"] == "latest crypto news" and TC._AR_INTEREST["politics"] == "السياسة")
+TC.employee_interests = _real_interests
+check("إشارات Tavily: رابط مكرر يُتجاهل، والمصدر = النطاق، والصلة = views",
+      len(sigs) == 4 and sigs[0]["platform"] == "tavily" and sigs[0]["author"] == "news1.com"
+      and sigs[0]["views"] == 90 and sigs[0]["published_at"].year == 2026, [s["url"] for s in sigs])
+check("بلا مفتاح: الجامع غير مُهيّأ (لا نداء)", not TC.TavilyCollector().is_configured())
+
+
+def _score(**kw):
+    fields = {"platforms": "tavily", "views_total": 0, "likes_total": 0, "reshares_total": 1,
+              "comments_total": 0, "platform_count": 1, **kw}
+    return ScoringEngine()._score_candidate(Candidate(**fields))
+
+
+check("قصة تغطيها عدة مصادر ← HOT", _score(**{"reshares_total": 3, "views_total": 150}) >= VT["hot"]["min_score"])
+check("مصدر واحد بصلة عالية جداً ← HOT", _score(views_total=95) >= VT["hot"]["min_score"])
+s1 = _score(views_total=60)
+check("مصدر واحد بصلة عادية ← EARLY (قائمة المراقبة)", VT["early"]["min_score"] <= s1 < VT["hot"]["min_score"], s1)
 
 # ───────────────────────── 4) MCP خارجي حقيقي ─────────────────────────
 print("4) خادم MCP حقيقي من الـSDK الرسمي")
