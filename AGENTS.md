@@ -1,5 +1,15 @@
 # Project notes for coding agents
 
+## Publishing — standing instruction from the owner (automatic, every time)
+- After any change is finished AND verified (relevant `verify_*.py` + frontend build if touched),
+  publish it without asking: `.\scripts\publish.ps1 -Message "<why, in Arabic>"`. It commits,
+  pushes `main` to GitHub (fast-forward only, never force) and updates the OneDrive copy
+  (`C:\Users\pc\OneDrive\Desktop\Moj-Agentic-AI`, `git pull --ff-only`, skipped if it has local edits).
+- The script refuses and unstages if a forbidden file (`.env`, `data/`, cookies, `*.db`,
+  secrets files) or a secret-key pattern is in the diff. Never bypass it; move the value to
+  `.env`/`data/` instead. Exit code 2 = the three copies disagree — investigate.
+- Do NOT publish half-done or failing work just to "keep it synced".
+
 ## Environment
 - The working virtualenv is `venv\` (NOT `.venv\`, which is missing most deps).
   Use `.\venv\Scripts\python.exe` for everything.

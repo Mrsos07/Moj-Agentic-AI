@@ -318,9 +318,13 @@ class RuntimeManager(IRuntimeManager):
 
     # ---- lifecycle helpers ---------------------------------------------
     def _reset_daily_counters(self, config) -> None:
-        """Reset per-day counters when a new day begins."""
+        """Reset per-day counters when a new day begins — في منتصف ليل الموظف (منطقته
+        الزمنية) لا منتصف ليل UTC: كان اليوم يبدأ 03:00 بتوقيت الرياض بينما الإيقاع
+        اليومي يُحسب بالتوقيت المحلي، فيتعارض مرجعا «اليوم» في القرار نفسه."""
+        from ..decision.engine import local_now
+
         rs = config.runtime_state
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = local_now(config).strftime("%Y-%m-%d")
         if rs.flags.get("counters_day") != today:
             rs.counters = {}
             rs.flags["counters_day"] = today

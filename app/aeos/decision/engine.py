@@ -91,26 +91,41 @@ def cycle_limit(capability: str, rules: Dict) -> int:
         return default
 
 
-def _day_progress(config) -> float:
-    """كم انقضى من يوم عمل الموظف (0..1) — مرجع الإيقاع اليومي.
-
-    بلا مرجع زمني تصير «نسبة الاستهلاك» بلا معنى: 50% من الحصة في الساعة
-    الأولى سلوك متكتّل، ونفسها في آخر ساعة تأخّر. نقيس التقدّم داخل ساعات
-    العمل المعلنة للموظف (ومنطقته الزمنية)، ونعيد 1.0 خارجها (آخر اليوم).
-    """
-    sched = getattr(config, "scheduler", None)
-    start = int(getattr(sched, "active_hours_start", 0) or 0)
-    end = int(getattr(sched, "active_hours_end", 23) or 23)
-    tz_name = getattr(sched, "timezone", "") or ""
+def local_now(config) -> datetime:
+    """الوقت الآن في منطقة الموظف الزمنية (scheduler.timezone)، وإلا توقيت الخادم."""
+    tz_name = getattr(getattr(config, "scheduler", None), "timezone", "") or ""
     try:
         from zoneinfo import ZoneInfo
 
-        now = datetime.now(ZoneInfo(tz_name)) if tz_name else datetime.now()
+        return datetime.now(ZoneInfo(tz_name)) if tz_name else datetime.now()
     except Exception:  # noqa: BLE001 - منطقة غير معروفة ⇒ توقيت الخادم
-        now = datetime.now()
-    span = (end - start) % 24 or 24
-    elapsed = (now.hour + now.minute / 60.0 - start) % 24
-    return max(0.05, min(1.0, elapsed / span))
+        return datetime.now()
+
+
+def _day_progress(config, now: datetime | None = None) -> float:
+    """كم انقضى من **ساعات عمل اليوم** (0..1) — مرجع الإيقاع اليومي.
+
+    اليوم هو يوم العدّادات نفسه (منتصف الليل بتوقيت الموظف)، والتقدّم = ساعات العمل
+    المنقضية منذ منتصف الليل ÷ ساعات العمل في اليوم. كانت الصيغة السابقة تعيد 1.0
+    («انتهى اليوم») لأي وقت خارج نافذة العمل — قيس في سجل القرار: «pace=…@100%» في
+    كل دورة 4 فجراً بعد تصفير العدّادات، فتنال كل أنواع التفاعل دفعة الإيقاع القصوى
+    (+0.35) ويُزاح النشر (لا ميزانية تفاعل له) فيختار الموظف رداً بدل منشور مستحق.
+    """
+    sched = getattr(config, "scheduler", None)
+    start = int(getattr(sched, "active_hours_start", 0) or 0) % 24
+    end = int(getattr(sched, "active_hours_end", 23) or 23) % 24
+    now = now or local_now(config)
+
+    def active(h: int) -> bool:
+        if start == end:
+            return True
+        return start <= h < end if start < end else (h >= start or h < end)
+
+    total = sum(1 for h in range(24) if active(h)) or 24
+    elapsed = sum(1 for h in range(now.hour) if active(h))
+    if active(now.hour):
+        elapsed += now.minute / 60.0
+    return max(0.05, min(1.0, elapsed / total))
 
 
 def capability_streak(config, capability: str) -> int:
@@ -131,6 +146,21 @@ def streak_limit(rules: Dict) -> int:
         return max(int((rules or {}).get("max_same_capability_streak", 3)), 1)
     except (TypeError, ValueError):
         return 3
+
+
+def streak_exempt(action: "ProposedAction", config) -> bool:
+    """أفعال لا يمنعها «حدّ التكرار المتتالي»: ردّ المنشن، أمر المالك، و**النشر ما دام دون
+    هدفه اليومي**. قيس على liketoday5 (حساب توثيقي هدفه 3 منشورات/يوم): نشر 4 دورات
+    متتالية فمُنع النشر — وهو 0/3 لليوم — وبقيّة مقترحاته تفاعلات خارج شخصيته يرفضها الحارس،
+    فانتهت 54% من دوراته بلا أي فعل. عقوبة التكرار تستثني النشر لهذا السبب أصلاً."""
+    params = action.params or {}
+    if is_mention_reply(action) or params.get("owner_directed"):
+        return True
+    if action.capability in PUBLISHING_CAPABILITIES:
+        rules = config.business_rules or {}
+        target = int(rules.get("daily_post_target", 1) or 0)
+        return int(config.runtime_state.counters.get("posts_today", 0)) < target
+    return False
 
 
 def is_mention_reply(action: "ProposedAction") -> bool:
@@ -355,8 +385,8 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
 
         # ضمانة تنويع بنيوية: نوعٌ نُفِّذ في آخر N دورات متتالية يُستبعد هذه
         # الدورة مهما علت درجته. الأوزان وحدها لا تكفي — القياس أظهر ردّاً
-        # يتكرّر 5 دورات متتالية لأن درجته تبقى الأعلى دائماً. الاستثناءات:
-        # ردّ المنشنات (واجب مهني) وأمر المالك (مرجع أعلى).
+        # يتكرّر 5 دورات متتالية لأن درجته تبقى الأعلى دائماً. الاستثناءات
+        # (streak_exempt): ردّ المنشنات، وأمر المالك، والنشر دون هدفه اليومي.
         max_streak = streak_limit(rules)
         blocked_by_streak = {
             cap for cap in {d.action.capability for d in scored}
@@ -367,8 +397,7 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         def _eligible(d: "Decision") -> bool:
             if d.action.capability not in blocked_by_streak:
                 return True
-            return bool(is_mention_reply(d.action)
-                        or (d.action.params or {}).get("owner_directed"))
+            return streak_exempt(d.action, context.config)
 
         chosen: List[Decision] = []
         used_counts: Dict[str, int] = {}
@@ -548,7 +577,8 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
                 # قيود البنية تسري على اختيار النموذج أيضاً: المراجعة تُرتِّب
                 # المرشّحين ولا تُلغي التنويع. النموذج يميل بثبات إلى الأفعال
                 # «الأكثر إثارة» (الاقتباس/الثريد) فيُنتج نفس السلوك كل دورة.
-                if not mention and capability_streak(context.config, cap) >= max_streak:
+                if (capability_streak(context.config, cap) >= max_streak
+                        and not streak_exempt(d.action, context.config)):
                     continue
                 group = "mention_reply" if mention else cycle_group(cap)
                 limit = mention_cap if mention else cycle_limit(cap, rules)
