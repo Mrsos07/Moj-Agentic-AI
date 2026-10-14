@@ -78,6 +78,7 @@ class CognitiveCycle:
             "decision_review": context.scratch.get("decision_review"),
             "suspended_arms": context.scratch.get("suspended_arms") or [],
             "research": context.scratch.get("research_log") or [],
+            "images": context.scratch.get("image_log") or [],
             "tool_calls": context.scratch.get("tool_use") or [],
             "available_tools": sorted({f"{t['label']}.{t['tool']}" for t in context.scratch.get("available_tools") or []}),
             "phase_timings_ms": phase_timings,

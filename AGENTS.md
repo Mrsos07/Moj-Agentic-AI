@@ -54,6 +54,16 @@
   (`--config-only` for no network, `--no-image` to skip the priciest check).
   A wrong key produces 401 on every path — which is exactly how you tell
   "wiring is right, key is wrong" apart from "wiring is wrong".
+- Post images go through `app/aeos/employee/visual_director.py` (NOT a raw prompt): an LLM art
+  director turns the post into a concrete, literal news scene (subject/setting/composition/
+  lighting/camera/palette/mood) with banned clichés (chess, crowns, maps, flags…), Gulf cultural
+  accuracy, anonymous people only, and a memory of recent concepts; then a vision review
+  (system model, `detail: low`) — retry ONCE only for a real defect (severe, or score < 6), and
+  publish text-only after two severe failures. Measured before: 4/4 images were chess pieces,
+  square, same grey palette, a cross on the king in Saudi/Yemen content. Default output is
+  16:9 `quality: high` (~70-90 s, ~$0.13/image on OpenRouter gpt-image-2); explicit `size`
+  (avatar 1024x1024) keeps its ratio. `image_review: false` disables the review. Test:
+  `verify_visual.py`.
 - Image generation defaults to GPT Image 2: `openai/gpt-image-2` on OpenRouter,
   `gpt-image-2` on OpenAI. `verify_openrouter.py --config-only` also checks the
   image-model defaults and mocked ImageMCP dispatch without generating paid images.
