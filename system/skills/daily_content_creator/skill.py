@@ -31,7 +31,36 @@ class DailyContentCreatorSkill(_h.ISkill):
         # ── توجيه مباشر من المستخدم عبر الشات («انشر عن …» / «تكلم عن …») ──
         # أمر صريح من صاحب الحساب: ينفَّذ فوراً بأسلوب الشخصية، ويتجاوز حدود
         # النشر اليومي وفحص نطاق الاهتمامات (المستخدم هو المرجع الأعلى).
-        directed = str((context.event.payload or {}).get("directed_topic") or "").strip()
+        payload = context.event.payload or {}
+        directed = str(payload.get("directed_topic") or "").strip()
+        media_brief = str(payload.get("media_brief") or "").strip()
+        if directed and media_brief:
+            # المنسّق أعدّ رسالة إعلامية (بحث عميق): يكتب منها بزاويته، لا نشر أعمى
+            lang = getattr(context.config.persona, "language", "ar") or "ar"
+            dialect = getattr(context.config.persona, "dialect", "") or ""
+            brief = (
+                f"كلّفك المنسّق العام بالكتابة عن: «{directed}».\n"
+                "أُرفقت لك أدناه رسالة إعلامية أعدّها فريق التحرير من بحث عميق في المصادر الحديثة. "
+                f"اكتب منشور X أصلياً واحداً باللغة {lang}"
+                + (f" وبلهجة {dialect}" if dialect else "")
+                + " بأسلوب شخصيتك: Hook قوي، ثم معلومة أو اثنتان مقتبسة من الرسالة، ثم موقف/Insight "
+                "من زاويتك. لا تلخّص الرسالة كلها ولا تنسخ عنوانها."
+            )
+            items = payload.get("media_brief_items") or []
+            if items:
+                # للمخرج البصري وسجل الدورة: الموضوع مُبحوث مسبقاً (لا بحث جديد)
+                context.scratch["research"] = {"query": directed[:160], "items": items}
+                context.scratch.setdefault("research_log", []).append({
+                    "query": directed[:160], "sources": list(dict.fromkeys(i.get("source", "") for i in items)),
+                    "items": len(items), "kind": "media_brief"})
+            if directed.startswith("#"):
+                brief += f" مهم: ضمّن الوسم {directed} كما هو حرفياً في المنشور."
+            return [_h.ProposedAction(
+                capability="publish_content",
+                params={"brief": brief, "media_brief": media_brief, "media_url": "", "owner_directed": True},
+                rationale="coordinator-directed topic with a researched media brief",
+                expected_impact=0.97, urgency=0.95, risk=0.08,
+            )]
         if directed:
             lang = getattr(context.config.persona, "language", "ar") or "ar"
             dialect = getattr(context.config.persona, "dialect", "") or ""

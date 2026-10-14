@@ -146,11 +146,16 @@ TOOLS: List[Dict[str, Any]] = [
     }},
     {"type": "function", "function": {
         "name": "order_publish",
-        "description": ("كلّف موظفاً بنشر منشور على X عن موضوع/خبر. الموظف يبحث ويكتب "
-                        "بأسلوب شخصيته ثم ينشر فعلاً. لا تكتب نص المنشور بنفسك."),
+        "description": ("كلّف موظفاً بنشر منشور على X عن موضوع/خبر. قبل التكليف يُجري النظام **بحثاً "
+                        "عميقاً** عن الموضوع (أهم التفاصيل والتطورات اللحظية) ويُعدّ **رسالة إعلامية** "
+                        "يكتب الموظف منها بزاوية خاصة به — لا نشر أعمى. لتوجيه عدة موظفين بالموضوع "
+                        "نفسه استدعِ الأداة لكل موظف بالنص نفسه: البحث يتم مرة واحدة وتتوزّع الزوايا. "
+                        "لا تكتب نص المنشور بنفسك. بعد التكليف أخبر المالك بعنوان الرسالة ومصادرها والزوايا."),
         "parameters": {"type": "object", "properties": {
             "employee": _employee_param(),
             "topic": {"type": "string", "description": "الموضوع أو الخبر أو التوجيه التحريري"},
+            "deep_research": {"type": "boolean",
+                              "description": "افتراضياً true. false فقط إن طلب المالك صراحةً النشر بلا بحث."},
         }, "required": ["employee", "topic"]},
     }},
     {"type": "function", "function": {
@@ -380,10 +385,26 @@ class _Tools:
         if not topic:
             raise ValueError("topic فارغ")
         snippet = re.sub(r"\s+", " ", topic)[:90]
-        self._dispatch(cfg, {"directed_topic": topic},
-                       ["publish_content", "publish_thread"], f"نشر منشور عن «{snippet}»")
-        return {"dispatched": True, "employee": cfg.account_username,
-                "note": "النشر يجري في الخلفية؛ الرابط أو سبب الفشل يصل للشات."}
+        payload: Dict[str, Any] = {"directed_topic": topic}
+        out: Dict[str, Any] = {"dispatched": True, "employee": cfg.account_username,
+                               "note": "النشر يجري في الخلفية؛ الرابط أو سبب الفشل يصل للشات."}
+        if args.get("deep_research", True) is not False:
+            from . import media_brief as MB
+
+            try:
+                brief = MB.build(topic, user_id=self.user_id, llm=getattr(_platform(), "llm", None))
+                angle = MB.assign_angle(brief, self.user_id, cfg.account_username)
+                payload["media_brief"] = MB.for_employee(brief, angle)
+                payload["media_brief_items"] = MB.research_items(brief)
+                angles = brief.get("angles") or []
+                out["media_brief"] = MB.owner_summary(brief)
+                out["employee_angle"] = angles[angle % len(angles)] if angles else ""
+            except Exception as exc:  # noqa: BLE001 - تعذّر البحث لا يلغي أمر المالك
+                logger.warning("media brief failed for %r: %s", snippet, exc)
+                out["media_brief_error"] = (f"تعذّر البحث العميق ({exc}) — سيكتب الموظف ببحثه "
+                                            "المعتاد. أخبر المالك بذلك.")
+        self._dispatch(cfg, payload, ["publish_content", "publish_thread"], f"نشر منشور عن «{snippet}»")
+        return out
 
     def order_mission(self, args):
         from . import employee_mission as EM
