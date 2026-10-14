@@ -180,6 +180,33 @@ def check_streak_cap() -> None:
           [d.action.capability for d in decided2] == ["reply_to_user"],
           str([d.action.capability for d in decided2]))
 
+    # النشر دون هدفه اليومي معفى (حالة liketoday5 الحقيقية: نشر 4 دورات متتالية
+    # فمُنع النشر وهو 0/3، وتفاعلاته خارج الشخصية يرفضها الحارس ← 54% دورات بلا فعل)
+    post = ProposedAction(capability="publish_content", params={"brief": "حدث في مثل هذا اليوم"},
+                          expected_impact=0.9, urgency=0.85, risk=0.1)
+    cfg3 = make_config(max_same_capability_streak=3, daily_post_target=3, llm_decision_review=False)
+    cfg3.runtime_state.flags["action_type_history"] = [["publish_content"]] * 4
+    cfg3.runtime_state.counters["posts_today"] = 0
+    caps3 = [d.action.capability for d in eng.decide([post], make_context(cfg3, with_signals=False))]
+    check("النشر دون هدفه اليومي لا يوقفه سقف التتابع", "publish_content" in caps3, str(caps3))
+    cfg3.runtime_state.counters["posts_today"] = 3
+    ctx3 = make_context(cfg3, with_signals=False)
+    eng.decide([post], ctx3)
+    from datetime import datetime as _dt
+    from types import SimpleNamespace as _NS
+
+    _c = _NS(scheduler=_NS(active_hours_start=8, active_hours_end=23, timezone="Asia/Riyadh"))
+    _w = _NS(scheduler=_NS(active_hours_start=6, active_hours_end=4, timezone="Asia/Riyadh"))
+    check("الإيقاع اليومي: 4:30 فجراً قبل نافذة العمل = بداية اليوم لا نهايته (كان 100%)",
+          E._day_progress(_c, _dt(2026, 10, 14, 4, 30)) <= 0.05
+          and abs(E._day_progress(_c, _dt(2026, 10, 14, 15, 30)) - 0.5) < 0.01
+          and E._day_progress(_c, _dt(2026, 10, 14, 23, 30)) == 1.0
+          and 0.15 < E._day_progress(_w, _dt(2026, 10, 14, 4, 30)) < 0.2,
+          [E._day_progress(_c, _dt(2026, 10, 14, 4, 30)), E._day_progress(_w, _dt(2026, 10, 14, 4, 30))])
+    check("وبعد بلوغ الهدف يعود سقف التتابع ساريّاً على النشر",
+          not any(t["capability"] == "publish_content" and t["chosen"] for t in ctx3.scratch["decision_trace"]),
+          str(ctx3.scratch["decision_trace"]))
+
 
 def check_affinity_ranks_targets() -> None:
     """الحساب الذي تجاوب سابقاً يجب أن يتقدّم على المجهول بنفس القيمة الظاهرة."""
