@@ -17,7 +17,7 @@ from app.trend_detector.models import Candidate, Watchlist
 class ScoreGate:
     """HOT ← تقييم ≥ حد hot · EARLY ← ≥ حد early (قائمة المراقبة) · وإلا NOT_YET."""
 
-    async def validate(self, candidates: List[Candidate], db: Session) -> List[Candidate]:
+    async def validate(self, candidates: List[Candidate], db: Session, quiet: bool = False) -> List[Candidate]:
         hot_candidates = []
         for candidate in candidates:
             if candidate.score >= VALIDATION_THRESHOLDS["hot"]["min_score"]:
@@ -29,7 +29,8 @@ class ScoreGate:
             else:
                 candidate.status = "not_yet"
         db.commit()
-        print(f"[ScoreGate] {len(hot_candidates)} HOT of {len(candidates)}")
+        if not quiet:
+            print(f"[ScoreGate] {len(hot_candidates)} HOT of {len(candidates)}")
         return hot_candidates
 
     def _add_to_watchlist(self, candidate: Candidate, db: Session):

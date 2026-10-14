@@ -108,7 +108,8 @@ def to_form(server: Dict[str, Any]) -> Dict[str, Any]:
     headers = {k: v for k, v in headers.items() if k.lower() not in ("content-type", "accept", "mcp-protocol-version")}
     return {
         "name": server.get("name") or "", "description": server.get("description") or "",
-        "transport": transport, "url": url, "command": server.get("command") or "",
+        "transport": transport, "url": url, "http_mode": server.get("http_mode") or "",
+        "command": server.get("command") or "",
         "args": list(server.get("args") or []), "auth": auth, "headers": headers, "env": env,
         "needs_key": auth["mode"] != "none" and not auth["key"],
     }
@@ -150,9 +151,7 @@ def _finalize(server: Dict[str, Any], warnings: List[str]) -> None:
     if url:
         server["transport"] = "http"
         path = urlsplit(url).path.rstrip("/")
-        if server.pop("_sse", False) or path.endswith("/sse"):
-            warnings.append("هذا رابط SSE (النقل القديم) — النظام يدعم Streamable HTTP؛ جرّب نفس الرابط "
-                            "بنهاية /mcp بدل /sse إن كان المزوّد يوفّره")
+        server["http_mode"] = "sse" if (server.pop("_sse", False) or path.endswith("/sse")) else "streamable"
     elif server.get("command"):
         server["transport"] = "stdio"
     server.setdefault("name", _guess_name(server))
@@ -198,8 +197,27 @@ def _header_pair(h: str):
     return k.strip(), v.strip()
 
 
+def _rest_to_mcp(url: str, body: str, warnings: List[str]) -> str:
+    """أمر curl لواجهة REST (جسم JSON بلا jsonrpc) ليس خادم MCP — كان «اتصال ناجح — 0 أداة».
+    المزوّدات تضع خادم MCP عادةً على نفس المضيف بمسار /mcp (مثل TrendsMCP: /api ← /mcp)."""
+    try:
+        data = json.loads(body) if body.strip().startswith("{") else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or "jsonrpc" in data:
+        return url
+    parts = urlsplit(url)
+    if parts.path.rstrip("/").endswith("/mcp"):
+        return url
+    guess = f"{parts.scheme}://{parts.netloc}/mcp"
+    warnings.append(f"هذا أمر curl لواجهة REST ({parts.path or '/'}) لا لخادم MCP — جسمه ليس JSON-RPC. "
+                    f"غيّرت الرابط إلى {guess} (المسار المعتاد لخادم MCP لدى المزوّد)؛ "
+                    "«اختبار الاتصال» يؤكد صحته، وإلا فخذ رابط MCP من توثيق المزوّد")
+    return guess
+
+
 def _curl(tokens: List[str], warnings: List[str]) -> Dict[str, Any]:
-    url, headers = "", {}
+    url, headers, body = "", {}, ""
     i = 0
     while i < len(tokens):
         t = tokens[i]
@@ -228,8 +246,11 @@ def _curl(tokens: List[str], warnings: List[str]) -> Dict[str, Any]:
             url = nxt
             i += 2
             continue
-        elif t in ("-X", "--request", "-d", "--data", "--data-raw", "--data-binary", "--json", "-o", "-w",
-                   "--max-time", "-m", "--connect-timeout"):
+        elif t in ("-d", "--data", "--data-raw", "--data-binary", "--json"):
+            body = nxt
+            i += 2
+            continue
+        elif t in ("-X", "--request", "-o", "-w", "--max-time", "-m", "--connect-timeout"):
             i += 2
             continue
         elif not url and re.match(r"^https?://", t):
@@ -237,7 +258,7 @@ def _curl(tokens: List[str], warnings: List[str]) -> Dict[str, Any]:
         i += 1
     if not url:
         raise ValueError("لم أجد رابط الخادم في أمر curl")
-    return {"transport": "http", "url": url, "headers": headers}
+    return {"transport": "http", "url": _rest_to_mcp(url, body, warnings), "headers": headers}
 
 
 def _claude_add(tokens: List[str]) -> Dict[str, Any]:
@@ -378,6 +399,12 @@ def _parse_python(text: str, warnings: List[str]) -> List[Dict[str, Any]]:
             servers.append(_from_dict(kw["params"], kw.get("name") or ""))
             continue
         url = kw.get("url") or (ev(node.args[0]) if node.args else None)
+        if fn == "post" and isinstance(url, str) and url.startswith("http"):   # requests/httpx.post لواجهة REST
+            body = kw.get("json")
+            servers.append({"transport": "http",
+                            "url": _rest_to_mcp(url, json.dumps(body) if isinstance(body, dict) else "", warnings),
+                            "headers": {str(k): str(v) for k, v in (kw.get("headers") or {}).items() if v is not None}})
+            continue
         if fn in _HTTP_CALLS and isinstance(url, str) and url.startswith("http"):
             servers.append({"transport": "http", "url": url,
                             "headers": {str(k): str(v) for k, v in (kw.get("headers") or {}).items() if v is not None},

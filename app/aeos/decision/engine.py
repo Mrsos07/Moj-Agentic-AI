@@ -432,6 +432,14 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         # البديل التالي بدل إهدار الدورة كاملة.
         context.scratch["suspended_arms"] = sorted(set(suspended))
         chosen_ids = {id(d) for d in chosen}
+        # أثر القرار في سجل الدورة: لماذا اختير هذا وتُرك ذاك (الدرجة ومكوّناتها + مراجعة LLM).
+        # كان السجل يحفظ الاختيار النهائي فقط، فدورة نفّذت رداً واحداً من 11 مقترحاً بلا تفسير.
+        context.scratch["decision_trace"] = [
+            {"capability": d.action.capability, "arm": learning.arm_of(d.action),
+             "score": round(d.score, 3), "chosen": id(d) in chosen_ids,
+             "why": d.explanation[:320]}
+            for d in scored[:12]
+        ]
         context.scratch["decision_alternates"] = [
             d for d in scored
             if id(d) not in chosen_ids and d.action.capability != "wait"
@@ -521,6 +529,7 @@ class WeightedUtilityDecisionEngine(IDecisionEngine):
         except (TypeError, ValueError):
             return chosen
         reason = str(data.get("reason", ""))[:200]
+        context.scratch["decision_review"] = {"selected": idxs, "reason": reason}
 
         rules = context.config.business_rules or {}
         mention_cap = mention_reply_limit(rules)

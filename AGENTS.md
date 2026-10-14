@@ -601,6 +601,14 @@ independent structural causes — none of them fixable by telling the model to
   dropped). Reddit / Google Trends (SerpAPI) / custom X API / TikTok collectors, Google Vision and
   the X validator were removed; `ScoreGate` decides HOT/EARLY from score (multi-outlet stories → HOT).
   Credit cost: `TREND_TAVILY_MAX_QUERIES` (4) every `TREND_TAVILY_INTERVAL` (240 min).
+- Adding an MCP must "just work": `system_catalog.autodetect()` (used by test-connection AND install)
+  retries the given form with alternatives — same-host `/mcp` (REST `/api` pasted from docs), legacy
+  SSE transport (`http_mode: "sse"`, `_SseTransport`), and key placement (Bearer / bare
+  Authorization / X-API-Key / query) — and returns `adjusted` + the corrected form to the UI. A real
+  MCP reply (401/0 tools) pins the URL; only URL/transport errors move to the next URL. Never treat
+  "any JSON" as success: non-JSON-RPC, missing protocolVersion/capabilities, 0 tools and OAuth-only
+  (401 + `resource_metadata`) all raise explicit messages. SSE reader uses `raw.readline`
+  (`iter_lines` buffers 512 bytes and swallowed the `endpoint` event).
 - `verify_tools.py` needs the official SDK in a separate env at
   `%LOCALAPPDATA%\Moj-Agentic-AI\mcp_testenv` (`pip install mcp==2.2.0`). Not `%TEMP%`: Windows
   cleanup half-deleted it once and the test failed with `cannot import name 'MCPServer'`.

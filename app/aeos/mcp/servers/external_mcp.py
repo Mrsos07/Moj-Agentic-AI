@@ -30,6 +30,7 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from ..base import IMCPServer, MCPRequest, MCPResponse
 
@@ -58,7 +59,13 @@ PY_TOKEN, PKG_TOKEN = "{python}", "{package}"
 
 
 class MCPError(RuntimeError):
-    pass
+    """``status``/``www_auth``: رمز HTTP وترويسة WWW-Authenticate إن وُجدا — يستخدمهما
+    الاكتشاف التلقائي ليميّز «رابط خاطئ» (404/HTML) عن «مفتاح خاطئ» (401/403) عن «OAuth»."""
+
+    def __init__(self, message: str, status: int = 0, www_auth: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.www_auth = www_auth
 
 
 # ─────────────────────────── transports ───────────────────────────
@@ -141,10 +148,7 @@ class _HttpTransport:
         # العنوان (SSRF عبر redirect). خادم MCP لا يحتاج تحويلاً أصلاً.
         resp = requests.post(self._url, json=msg, headers=headers, timeout=timeout,
                              stream=True, allow_redirects=False)
-        if 300 <= resp.status_code < 400:
-            raise MCPError(f"HTTP {resp.status_code}: تحويلات الخادم غير مسموحة")
-        if resp.status_code >= 400:
-            raise MCPError(f"HTTP {resp.status_code}")
+        _raise_for_http(resp)
         sid = resp.headers.get("Mcp-Session-Id")
         if sid:
             self._session_id = sid
@@ -166,7 +170,14 @@ class _HttpTransport:
                         resp.close()
                         return data
             raise MCPError("stream ended without a response")
-        return resp.json()
+        ctype = resp.headers.get("Content-Type", "")
+        try:
+            data = resp.json()
+        except ValueError:
+            kind = "صفحة ويب (HTML)" if "html" in ctype else f"نص غير JSON ({ctype or 'بلا نوع'})"
+            raise MCPError(f"الرابط أعاد {kind} لا رد MCP — تأكد أنه عنوان خادم MCP "
+                           "(غالباً ينتهي بـ /mcp) لا صفحة الموقع أو التوثيق") from None
+        return data
 
     def close(self) -> None:
         if not self._session_id:
@@ -176,6 +187,124 @@ class _HttpTransport:
 
             requests.delete(self._url, headers={**self._headers, "Mcp-Session-Id": self._session_id},
                             timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _raise_for_http(resp) -> None:
+    code = resp.status_code
+    if 300 <= code < 400:
+        raise MCPError(f"HTTP {code}: تحويلات الخادم غير مسموحة", status=code)
+    if code >= 400:
+        www = resp.headers.get("WWW-Authenticate", "")
+        if code == 401 and "resource_metadata" in www:
+            raise MCPError("HTTP 401: هذا الرابط يتطلب تسجيل دخول OAuth (حساب المزوّد في المتصفح) — "
+                           "النظام يتصل بمفتاح API؛ خذ من توثيق المزوّد رابط MCP الذي يقبل مفتاح API",
+                           status=code, www_auth=www)
+        hint = {401: " — المفتاح مفقود أو غير صحيح أو أُرسل بطريقة غير المتوقعة",
+                403: " — المفتاح لا يملك الصلاحية", 404: " — المسار غير موجود (تأكد من الرابط)",
+                405: " — الخادم لا يقبل POST على هذا المسار"}.get(code, "")
+        raise MCPError(f"HTTP {code}{hint}", status=code, www_auth=www)
+
+
+class _SseTransport:
+    """نقل MCP القديم (HTTP+SSE، إصدار 2024-11-05): ``GET`` يفتح بثاً يرسل أولاً حدث
+    ``endpoint`` (عنوان POST)، ثم تصل الردود أحداثَ ``message`` على البث نفسه.
+    خوادم كثيرة (روابط تنتهي بـ ``/sse``) ما زالت تعمل به فقط — كانت تُرفض تماماً."""
+
+    def __init__(self, url: str, headers: Dict[str, str], timeout: float = _DEFAULT_TIMEOUT) -> None:
+        import queue
+
+        import requests
+
+        self._headers = dict(headers)
+        self._pending: Dict[Any, "queue.Queue"] = {}
+        self._plock = threading.Lock()
+        self._endpoint = ""
+        self._ready = threading.Event()
+        self.alive = True
+        self._resp = requests.get(url, headers={"Accept": "text/event-stream", **self._headers},
+                                  stream=True, timeout=(timeout, None), allow_redirects=False)
+        _raise_for_http(self._resp)
+        if "text/event-stream" not in self._resp.headers.get("Content-Type", ""):
+            self._resp.close()
+            raise MCPError("الرابط لا يفتح بث SSE (text/event-stream) — ليس خادم MCP بنقل SSE")
+        self._base = url
+        threading.Thread(target=self._reader, daemon=True, name="mcp-sse").start()
+        # خوادم Streamable HTTP تقبل GET لبث إشعارات بلا حدث endpoint — لا ننتظرها 30 ثانية
+        if not self._ready.wait(min(timeout, 10)):
+            self.close()
+            raise MCPError("خادم SSE لم يرسل حدث endpoint — ليس خادم MCP بنقل SSE")
+
+    def _reader(self) -> None:
+        from urllib.parse import urljoin, urlsplit
+
+        event, data = "message", []
+        try:
+            # readline لا iter_lines: الأخيرة تنتظر امتلاء كتلة 512 بايت قبل أن تُخرج أي سطر،
+            # وحدث endpoint أقصر من ذلك فيبقى عالقاً حتى المهلة (قيس: «لم يرسل endpoint»)
+            for raw_b in iter(self._resp.raw.readline, b""):
+                line = raw_b.rstrip(b"\r\n").decode("utf-8", "replace")
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    data.append(line[5:].lstrip())
+                elif not line and data:
+                    payload, data, ev, event = "\n".join(data), [], event, "message"
+                    if ev == "endpoint":
+                        ep = urljoin(self._base, payload.strip())
+                        a, b = urlsplit(ep), urlsplit(self._base)
+                        # عنوان POST من نفس الأصل فقط: وإلا يستطيع خادم عام توجيهنا لعنوان داخلي
+                        if (a.scheme, a.netloc) == (b.scheme, b.netloc):
+                            self._endpoint = ep
+                            self._ready.set()
+                        continue
+                    try:
+                        msg = json.loads(payload)
+                    except ValueError:
+                        continue
+                    with self._plock:
+                        q = self._pending.pop(msg.get("id"), None) if isinstance(msg, dict) else None
+                    if q is not None:
+                        q.put(msg)
+        except Exception:  # noqa: BLE001 - انقطاع البث = جلسة ميتة، تُعاد عند الاستخدام التالي
+            pass
+        finally:
+            self.alive = False
+
+    def send(self, msg: Dict[str, Any], timeout: float) -> Optional[Dict[str, Any]]:
+        import queue
+
+        import requests
+
+        q: "queue.Queue" = queue.Queue(maxsize=1)
+        if "id" in msg:
+            with self._plock:
+                self._pending[msg["id"]] = q
+        resp = requests.post(self._endpoint, json=msg, timeout=timeout, allow_redirects=False,
+                             headers={"Content-Type": "application/json", **self._headers})
+        _raise_for_http(resp)
+        if "id" not in msg:
+            return None
+        if "json" in resp.headers.get("Content-Type", ""):     # بعض الخوادم ترد في جسم POST مباشرة
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("id") == msg["id"]:
+                    return data
+            except ValueError:
+                pass
+        try:
+            return q.get(timeout=timeout)
+        except queue.Empty:
+            raise MCPError("لم يصل الرد على بث SSE في الوقت المحدد") from None
+        finally:
+            with self._plock:
+                self._pending.pop(msg["id"], None)
+
+    def close(self) -> None:
+        self.alive = False
+        try:
+            self._resp.close()
         except Exception:  # noqa: BLE001
             pass
 
@@ -190,6 +319,7 @@ class MCPClient:
         self._next_id = 0
         self._lock = threading.Lock()
         self.server_info: Dict[str, Any] = {}
+        self.capabilities: Dict[str, Any] = {}
 
     def _rpc(self, method: str, params: Optional[Dict[str, Any]] = None,
              timeout: float = _DEFAULT_TIMEOUT, notify: bool = False) -> Dict[str, Any]:
@@ -202,6 +332,10 @@ class MCPClient:
         reply = self._t.send(msg, timeout)  # type: ignore[union-attr]
         if notify:
             return {}
+        if not isinstance(reply, dict) or not ("result" in reply or "error" in reply):
+            # خادم JSON عادي (REST) يرد 200 على أي POST: كان يُقرأ «اتصال ناجح — 0 أداة»
+            raise MCPError("الرد ليس JSON-RPC (لا result ولا error) — هذا الرابط ليس خادم MCP؛ "
+                           "إن أعطاك المزوّد أمر curl لواجهة REST فهي ليست MCP")
         if reply.get("error"):
             err = reply["error"]
             raise MCPError(f"{err.get('code')}: {err.get('message')}")
@@ -209,16 +343,28 @@ class MCPClient:
 
     def _connect(self) -> None:
         cfg = self._cfg
-        if cfg.get("transport") == "http":
+        if cfg.get("transport") == "http" and cfg.get("http_mode") == "sse":
+            self._t = _SseTransport(runtime_url(cfg), cfg.get("headers") or {})
+        elif cfg.get("transport") == "http":
             self._t = _HttpTransport(runtime_url(cfg), cfg.get("headers") or {})
         else:
             command, args, cwd = runtime_command(cfg)
             self._t = _StdioTransport(command, args, dict(cfg.get("env") or {}), cwd)
-        res = self._rpc("initialize", {
-            "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-            "clientInfo": {"name": "moj-aeos", "version": "1.0"},
-        })
+        try:
+            res = self._rpc("initialize", {
+                "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+                "clientInfo": {"name": "moj-aeos", "version": "1.0"},
+            })
+        except MCPError as exc:
+            parts = urlsplit(cfg.get("url") or "") if cfg.get("transport") == "http" else None
+            if parts and "JSON-RPC" in str(exc) and not parts.path.rstrip("/").endswith("/mcp"):
+                raise MCPError(f"{exc}. جرّب: {parts.scheme}://{parts.netloc}/mcp") from None
+            raise
+        if not isinstance(res, dict) or not ("protocolVersion" in res or "capabilities" in res):
+            raise MCPError("رد «initialize» لا يحوي protocolVersion ولا capabilities — الخادم لا يتكلم "
+                           "بروتوكول MCP (ربما واجهة JSON-RPC أخرى أو رابط خاطئ)")
         self.server_info = res.get("serverInfo") or {}
+        self.capabilities = res.get("capabilities") if isinstance(res.get("capabilities"), dict) else {}
         if isinstance(self._t, _HttpTransport):
             self._t.protocol = res.get("protocolVersion") or PROTOCOL_VERSION
         self._rpc("notifications/initialized", notify=True)
@@ -468,6 +614,7 @@ def public_view(cfg: Dict[str, Any], connected: Optional[bool] = None) -> Dict[s
         "description": cfg.get("description", ""),
         "transport": cfg.get("transport"), "command": cfg.get("command", ""),
         "args": cfg.get("args") or [], "url": cfg.get("url", ""),
+        "http_mode": cfg.get("http_mode") or ("streamable" if cfg.get("transport") == "http" else ""),
         "source": cfg.get("source", "config"), "entry": cfg.get("entry", ""),
         "enabled": bool(cfg.get("enabled", True)),
         "scope": cfg.get("scope") or {"coordinator": True, "employees": True},
@@ -515,6 +662,10 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("url must start with http:// or https://")
         url, found = split_secret_params(url)
         cfg["url"] = url
+        mode = str(raw.get("http_mode") or "").lower()
+        if mode not in ("streamable", "sse"):
+            mode = "sse" if urlsplit(url).path.rstrip("/").endswith("/sse") else "streamable"
+        cfg["http_mode"] = mode
         cfg["headers"] = {str(k): str(v) for k, v in (raw.get("headers") or {}).items()}
         cfg["query_secrets"] = {**found, **{str(k): str(v) for k, v in (raw.get("query_secrets") or {}).items()}}
     allowed = raw.get("allowed_tools")
@@ -546,9 +697,19 @@ def discover(cfg: Dict[str, Any]) -> Dict[str, Any]:
     client = MCPClient(cfg)
     try:
         tools = client.list_tools()
-        info = client.server_info
+        info, caps = client.server_info, client.capabilities
     finally:
         client.close()
+    if not any(isinstance(t, dict) and t.get("name") for t in tools):
+        # خادم بلا أدوات لا فائدة منه للمنسّق ولا للموظفين — كان يُحفظ بنجاح «0 أداة»
+        who = f"«{info.get('name')}» " if info.get("name") else ""
+        if "tools" not in caps:
+            raise ValueError(f"الخادم {who}يعمل لكنه لا يقدّم أدوات (لا يعلن قدرة tools) — "
+                             "ربما يقدّم موارد أو قوالب فقط، والنظام يستخدم الأدوات")
+        raise ValueError(
+            f"الاتصال بالخادم {who}نجح لكنه أعاد 0 أداة. الأسباب الشائعة: المفتاح ناقص أو بصلاحيات "
+            "لا تكشف أدوات، أو أُرسل بطريقة غير التي يتوقعها المزوّد (Bearer / ترويسة / معامل)، أو "
+            "حسابك لدى المزوّد بلا أدوات مفعّلة (مثل Zapier وComposio: فعّل الإجراءات من لوحتهم أولاً).")
     cfg = {**cfg, "server_info": {k: info.get(k) for k in ("name", "version") if k in info},
            "tools": [{"name": t.get("name"), "description": t.get("description", ""),
                       "inputSchema": t.get("inputSchema") or {}}
@@ -656,9 +817,9 @@ def parse_config_file(data: bytes) -> List[Dict[str, Any]]:
         if not isinstance(raw, dict):
             raise ValueError("كل خادم يجب أن يكون كائناً")
         t = str(raw.get("type") or raw.get("transport") or "").lower()
-        if t in ("sse",):
-            raise ValueError(f"{raw.get('name')}: نقل SSE القديم غير مدعوم — استخدم Streamable HTTP")
-        if t in ("http", "streamable-http", "streamable_http"):
+        if t == "sse":
+            raw = {**raw, "transport": "http", "http_mode": "sse"}
+        elif t in ("http", "streamable-http", "streamable_http"):
             raw = {**raw, "transport": "http"}
         out.append(raw)
     if not out:

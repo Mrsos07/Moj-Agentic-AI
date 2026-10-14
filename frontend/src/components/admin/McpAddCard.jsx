@@ -29,7 +29,7 @@ const AUTH = {
 
 const emptyQuick = {
   name: '', description: '', transport: 'http', url: '', command: '', args: '',
-  authMode: 'bearer', authName: '', authKey: '', extra: '', coordinator: true, employees: true,
+  authMode: 'bearer', authName: '', authKey: '', extra: '', coordinator: true, employees: true, httpMode: '',
 }
 
 const Toggle = ({ on, onChange, text }) => (
@@ -56,7 +56,7 @@ const McpAddCard = ({ notify, onAdded }) => {
   const applyForm = (f) => {
     setQ({
       ...emptyQuick, name: f.name, description: f.description || '', transport: f.transport,
-      url: f.url || '', command: f.command || '', args: (f.args || []).join('\n'),
+      url: f.url || '', httpMode: f.http_mode || '', command: f.command || '', args: (f.args || []).join('\n'),
       authMode: f.auth.mode, authName: f.auth.name || '', authKey: f.auth.key || '',
       extra: Object.entries(f.transport === 'http' ? f.headers || {} : f.env || {}).map(([k, v]) => `${k}=${v}`).join('\n'),
     })
@@ -83,7 +83,7 @@ const McpAddCard = ({ notify, onAdded }) => {
     const extra = parseKV(q.extra)
     return {
       name: q.name.trim(), description: q.description.trim(), transport: q.transport,
-      url: q.url.trim(), command: q.command.trim(),
+      url: q.url.trim(), http_mode: q.httpMode, command: q.command.trim(),
       args: q.args.split('\n').map(a => a.trim()).filter(Boolean),
       auth: { mode: q.authMode, name: q.authName.trim(), key: q.authKey.trim() },
       headers: q.transport === 'http' ? extra : {}, env: q.transport === 'stdio' ? extra : {},
@@ -96,9 +96,15 @@ const McpAddCard = ({ notify, onAdded }) => {
     setBusy('test')
     try {
       const res = await axios.post('/api/admin/system/mcps/test-connection', body(), { headers: authHeaders(), timeout: 90000 })
+      const fixed = res.data.form
+      if (fixed && res.data.adjusted?.length) {
+        // النظام وجد الإعداد الصحيح بنفسه — اعتمده في الحقول (بلا setFound(null) الذي يفعله set)
+        setQ({ ...q, url: fixed.url, httpMode: fixed.http_mode || '', authMode: fixed.auth.mode, authName: fixed.auth.name || '' })
+      }
       setFound(res.data)
       setAllowed(Object.fromEntries(res.data.tools.map(t => [t.name, true])))
-      notify(`✅ الاتصال ناجح — ${res.data.tools.length} أداة${res.data.server_info?.name ? ` (${res.data.server_info.name})` : ''}`, 'success')
+      notify(`✅ الاتصال ناجح — ${res.data.tools.length} أداة${res.data.server_info?.name ? ` (${res.data.server_info.name})` : ''}`
+        + (res.data.adjusted?.length ? ` — صحّحت الإعداد تلقائياً: ${res.data.adjusted.join('، ')}` : ''), 'success')
     } catch (e) { setFound(null); notify(e?.response?.data?.detail || 'فشل الاتصال', 'error') }
     setBusy('')
   }
@@ -190,7 +196,7 @@ const McpAddCard = ({ notify, onAdded }) => {
               <input placeholder="مثال: tavily" value={q.name} onChange={(e) => set({ name: e.target.value })} className={input} /></div>
             <div><span className={label}>نوع الاتصال</span>
               <select value={q.transport} onChange={(e) => set({ transport: e.target.value, authMode: e.target.value === 'stdio' && q.authMode === 'bearer' ? 'env' : q.authMode })} className={input}>
-                <option value="http">رابط بعيد (Remote — Streamable HTTP)</option>
+                <option value="http">رابط بعيد (Remote — HTTP / SSE)</option>
                 <option value="stdio">أمر محلي (stdio — npx / python / uvx)</option>
               </select></div>
           </div>
@@ -198,7 +204,11 @@ const McpAddCard = ({ notify, onAdded }) => {
           {q.transport === 'http' ? (
             <div><span className={label}>رابط الخادم</span>
               <input placeholder="https://mcp.example.com/mcp" value={q.url} onChange={(e) => set({ url: e.target.value })} className={input} dir="ltr" />
-              <p className={`text-[11px] mt-1 ${muted}`}>إن كان المفتاح داخل الرابط (?apiKey=…) يُنزع تلقائياً ويُحفظ كسرّ.</p></div>
+              <p className={`text-[11px] mt-1 ${muted}`}>
+                إن كان المفتاح داخل الرابط (?apiKey=…) يُنزع تلقائياً ويُحفظ كسرّ. وإن لم يكن الإعداد صحيحاً تماماً
+                (رابط REST بدل /mcp، أو نقل SSE، أو مكان المفتاح) يجرّب «اختبار الاتصال» البدائل ويصحّحه بنفسه.
+                {q.httpMode === 'sse' && <b> · النقل: SSE</b>}
+              </p></div>
           ) : (
             <div className="grid md:grid-cols-2 gap-3">
               <div><span className={label}>الأمر</span>

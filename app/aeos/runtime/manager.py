@@ -358,6 +358,12 @@ class RuntimeManager(IRuntimeManager):
                 "evaluation": report.get("evaluation"),
                 "lesson": report.get("lesson"),
                 "phase_errors": report.get("phase_errors"),
+                "decision_trace": report.get("decision_trace"),
+                "decision_review": report.get("decision_review"),
+                "suspended_arms": report.get("suspended_arms"),
+                "research": report.get("research"),
+                "tool_calls": report.get("tool_calls"),
+                "available_tools": report.get("available_tools"),
                 "phase_timings_ms": report.get("phase_timings_ms"),
                 "error": report.get("error"),
             }

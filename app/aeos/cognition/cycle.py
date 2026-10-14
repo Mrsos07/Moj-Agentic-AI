@@ -73,6 +73,13 @@ class CognitiveCycle:
             "lesson": context.scratch.get("lesson"),
             "help_request": context.scratch.get("help_request"),
             "phase_errors": context.scratch.get("phase_errors", []),
+            # الأدوات والمهارات الفعلية في هذه الدورة: البحث قبل الكتابة + أدوات MCP المستدعاة
+            "decision_trace": context.scratch.get("decision_trace") or [],
+            "decision_review": context.scratch.get("decision_review"),
+            "suspended_arms": context.scratch.get("suspended_arms") or [],
+            "research": context.scratch.get("research_log") or [],
+            "tool_calls": context.scratch.get("tool_use") or [],
+            "available_tools": sorted({f"{t['label']}.{t['tool']}" for t in context.scratch.get("available_tools") or []}),
             "phase_timings_ms": phase_timings,
             "duration_ms": duration_ms,
         }

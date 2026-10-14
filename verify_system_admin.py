@@ -364,6 +364,7 @@ check("كتالوج المنسّق: مهارات المنسّق فقط", "on_thi
       and "team-weekly-report" in O._system_capabilities_block())
 
 print("10) أدوات MCP خاصة بموظف — يضيفها مالكه ولا يراها غيره")
+import queue  # noqa: E402
 import threading  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
@@ -376,17 +377,84 @@ class _H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        # نقل SSE القديم: GET يفتح بثاً يرسل endpoint، والردود تصل أحداثاً على البث
+        if self.path != "/legacy/sse":
+            self.send_response(405)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b"event: endpoint\ndata: /legacy/messages?sid=1\n\n")
+        self.wfile.flush()
+        while True:
+            try:
+                out = SSE_Q.get(timeout=20)
+            except queue.Empty:
+                return
+            self.wfile.write(f"event: message\ndata: {json.dumps(out, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
+
     def do_POST(self):
+        if self.path.startswith("/legacy/messages"):
+            msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            mid, method = msg.get("id"), msg.get("method")
+            if mid is not None:
+                if method == "initialize":
+                    res = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "sse-legacy"}}
+                elif method == "tools/list":
+                    res = {"tools": [{"name": "sse_lookup", "description": "بحث", "inputSchema": {
+                        "type": "object", "properties": {"query": {"type": "string"}}}}]}
+                else:
+                    res = {"content": [{"type": "text", "text": f"sse:{msg['params']['arguments'].get('query')}"}]}
+                SSE_Q.put({"jsonrpc": "2.0", "id": mid, "result": res})
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if "mode=keyed" in self.path and self.headers.get("X-API-Key") != "good-key":
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if "mode=oauth" in self.path:
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Bearer resource_metadata="https://x/.well-known/oauth"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path == "/redirect":
+            # اقرأ الجسم أولاً: الرد قبل قراءته يجعل ويندوز يرسل RST أحياناً فيصل العميلَ
+            # «ConnectionReset» بدل 302 — فحص متقطّع الفشل بلا علاقة بالحماية نفسها
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(302)
             self.send_header("Location", f"http://127.0.0.1:{PORT}/mcp")
             self.end_headers()
             return
         msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         mid, method = msg.get("id"), msg.get("method")
+        mode = next((p[5:] for p in self.path.split("?")[-1].split("&") if p.startswith("mode=")), "")
+        if mode in ("rest", "html"):   # ليس خادم MCP: واجهة REST / صفحة موقع ترد 200 على أي POST
+            body = b'{"ok": true, "data": []}' if mode == "rest" else b"<html><body>Docs</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json" if mode == "rest" else "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         res = {}
         if method == "initialize":
             res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "http-echo"}}
+            if mode == "notools":
+                res["capabilities"] = {"resources": {}}
+            elif mode == "noinit":
+                res = {}
+        elif method == "tools/list" and mode in ("empty", "notools"):
+            res = {"tools": []}
         elif method == "tools/list":
             tools = [{"name": "lookup", "description": "بحث", "inputSchema": {
                 "type": "object", "properties": {"query": {"type": "string"}}}}]
@@ -414,7 +482,9 @@ class _H(BaseHTTPRequestHandler):
 
 
 CALLS: list = []
+SSE_Q: "queue.Queue" = queue.Queue()
 _srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+_srv.daemon_threads = True
 PORT = _srv.server_address[1]
 threading.Thread(target=_srv.serve_forever, daemon=True).start()
 URL = f"http://127.0.0.1:{PORT}/mcp"
@@ -466,12 +536,14 @@ check("ليست من أدوات المنسّق النظامية", not any(t["ser
 up = json.dumps({"mcpServers": {"docs": {"type": "http", "url": URL}}}).encode()
 r = client.post(base + "/upload", headers=HU, files={"file": ("m.json", up, "application/json")})
 check("رفع ملف إعداد JSON (http) للموظف", r.status_code == 200 and len(r.json()["saved"]) == 1, r.text[:150])
+redir_err = ""
 try:
     EM.save(emp_cfg.id, {"name": "redir", "url": f"http://127.0.0.1:{PORT}/redirect"})
     redirected = True
 except Exception as exc:  # noqa: BLE001
+    redir_err = f"{type(exc).__name__}: {exc}"
     redirected = "تحويل" not in str(exc) and "302" not in str(exc)
-check("تحويل (302) من الخادم ← مرفوض (لا SSRF عبر redirect)", not redirected)
+check("تحويل (302) من الخادم ← مرفوض (لا SSRF عبر redirect)", not redirected, redir_err)
 EM.check_public_url = _real_check
 cfg_x = EM.get(emp_cfg.id, srv_name)
 r = EM.EmployeeMCPServer(cfg_x).call(__import__("app.aeos.mcp.base", fromlist=["MCPRequest"]).MCPRequest(
@@ -573,8 +645,8 @@ check("رابط بمفتاح في المعاملات ← طريقة «معامل
 f = _snip('claude mcp add --transport http zz https://z.io/mcp --header "Authorization: Bearer cl-1"').json()["forms"][0]
 check("claude mcp add", f["name"] == "zz" and f["auth"]["key"] == "cl-1", f)
 r = _snip('npx -y mcp-remote https://mcp.linear.app/sse --header "Authorization:Bearer lin-1"').json()
-check("mcp-remote ← اتصال مباشر بالرابط + تنبيه SSE", r["forms"][0]["url"].endswith("/sse")
-      and r["forms"][0]["auth"]["key"] == "lin-1" and any("SSE" in w for w in r["warnings"]), r)
+check("mcp-remote ← اتصال مباشر بالرابط بنقل SSE (صار مدعوماً)", r["forms"][0]["url"].endswith("/sse")
+      and r["forms"][0]["auth"]["key"] == "lin-1" and r["forms"][0]["http_mode"] == "sse", r)
 f = _snip("GITHUB_TOKEN=ghp_x1 uvx mcp-server-github").json()["forms"][0]
 check("أمر stdio بمتغيّر قبله", f["transport"] == "stdio" and f["command"] == "uvx"
       and f["auth"] == {"mode": "env", "name": "GITHUB_TOKEN", "key": "ghp_x1"} and f["name"] == "github", f)
@@ -591,6 +663,80 @@ check("مقتطف بلا رابط ولا أمر ← رسالة واضحة (400)"
 form = _snip(f'curl -X POST {URL} -H "Authorization: Bearer e2e-key-7"').json()["forms"][0]
 r = client.post("/api/admin/system/mcps", headers=HD, json={**form, "name": "from_curl"})
 check("لصق curl ← تثبيت ← المنسّق يتصل بالمفتاح الصحيح", r.status_code == 200 and "Bearer e2e-key-7" in _sys_call("from_curl"), r.text[:150])
+
+print("12.5) «اتصال ناجح — 0 أداة» لم يعد ممكناً: تشخيص واضح بدل نجاح زائف")
+
+
+def _tc(mode):
+    return client.post("/api/admin/system/mcps/test-connection", headers=HD,
+                       json={"name": "diag", "url": f"{URL}?mode={mode}"})
+
+
+r = client.post("/api/admin/system/mcps/test-connection", headers=HD,
+                json={"name": "diag", "url": f"http://127.0.0.1:{PORT}/api?mode=rest"})
+check("رابط REST (/api) ← يُصحَّح تلقائياً إلى /mcp ويعمل، وتُبلَّغ الواجهة بالتعديل", r.status_code == 200
+      and r.json()["form"]["url"] == f"http://127.0.0.1:{PORT}/mcp" and r.json()["tools"]
+      and any("الرابط" in a for a in r.json()["adjusted"]), r.text[:250])
+try:
+    X.discover(X.normalize_config({"name": "d", "url": f"http://127.0.0.1:{PORT}/api?mode=rest"}))
+    rest_err = ""
+except Exception as exc:  # noqa: BLE001
+    rest_err = str(exc)
+check("وبلا اكتشاف تلقائي: رسالة «ليس JSON-RPC» مع اقتراح /mcp", "ليس JSON-RPC" in rest_err
+      and f"127.0.0.1:{PORT}/mcp" in rest_err, rest_err)
+r = client.post("/api/admin/system/mcps/test-connection", headers=HD, json={
+    "name": "keyed", "url": f"{URL}?mode=keyed", "auth": {"mode": "bearer", "key": "good-key"}})
+check("مكان المفتاح خاطئ (Bearer والخادم يريد X-API-Key) ← يُكتشف ويُصحَّح تلقائياً", r.status_code == 200
+      and r.json()["form"]["auth"] == {"mode": "header", "name": "X-API-Key"}
+      and any("X-API-Key" in a for a in r.json()["adjusted"]), r.text[:300])
+r = client.post("/api/admin/system/mcps/test-connection", headers=HD, json={
+    "name": "keyed", "url": f"{URL}?mode=keyed", "auth": {"mode": "bearer", "key": "wrong"}})
+check("مفتاح خاطئ في كل الأماكن ← 401 واضح (المفتاح…) لا نجاح", r.status_code == 502 and "401" in r.text
+      and "المفتاح" in r.text, r.text[:250])
+r = client.post("/api/admin/system/mcps", headers=HD, json={
+    "name": "keyedsrv", "url": f"{URL}?mode=keyed", "auth": {"mode": "bearer", "key": "good-key"}})
+check("«تثبيت» مباشرة بلا اختبار ← يُحفظ بالإعداد المصحَّح", r.status_code == 200
+      and X.get("keyedsrv")["headers"].get("X-API-Key") == "good-key", r.text[:200])
+try:
+    X.discover(X.normalize_config({"name": "o", "url": f"{URL}?mode=oauth"}))
+    oauth_err = ""
+except Exception as exc:  # noqa: BLE001
+    oauth_err = str(exc)
+check("رابط يتطلب OAuth ← رسالة تشرح ذلك وتطلب رابط مفتاح API", "OAuth" in oauth_err, oauth_err)
+r = client.post("/api/admin/system/mcps/test-connection", headers=HD,
+                json={"name": "legacy", "url": f"http://127.0.0.1:{PORT}/legacy/sse"})
+check("خادم SSE القديم (/sse) ← يعمل الآن (كان مرفوضاً)", r.status_code == 200
+      and [t["name"] for t in r.json()["tools"]] == ["sse_lookup"] and r.json()["form"]["http_mode"] == "sse", r.text[:250])
+r = client.post("/api/admin/system/mcps", headers=HD,
+                json={"name": "legacysse", "url": f"http://127.0.0.1:{PORT}/legacy/sse"})
+sse_out = O._Tools(U, "x").call("mcp__legacysse__sse_lookup", json.dumps({"query": "نفط"})) if r.status_code == 200 else ""
+check("تثبيت خادم SSE + المنسّق يستدعي أداته", "sse:نفط" in sse_out, (r.text[:150], sse_out[:150]))
+# حالة TrendsMCP الحقيقية: التوثيق يعرض curl لواجهة REST (/api) — خادم MCP على /mcp
+r = _snip('curl -X POST https://api.trendsmcp.ai/api -H "Authorization: Bearer YOUR_API_KEY" '
+          '-H "Content-Type: application/json" -d \'{"mode":"get_time_series","source":"google search"}\'').json()
+check("مقتطف curl لواجهة REST ← الرابط يصير /mcp مع تنبيه، والمفتاح يُطلب",
+      r["forms"][0]["url"] == "https://api.trendsmcp.ai/mcp" and r["forms"][0]["needs_key"]
+      and any("REST" in w for w in r["warnings"]), r)
+r = _snip('import requests\nres = requests.post("https://api.trendsmcp.ai/api", headers={"Authorization": "Bearer k1"},'
+          ' json={"mode": "get_time_series"})').json()
+check("ونفسه بكود Python (requests.post)", r["forms"][0]["url"] == "https://api.trendsmcp.ai/mcp"
+      and r["forms"][0]["auth"]["key"] == "k1", r["forms"])
+f = _snip('curl -X POST https://m.io/mcp -d \'{"jsonrpc":"2.0","id":1,"method":"initialize"}\'').json()["forms"][0]
+check("curl لخادم MCP حقيقي (جسم JSON-RPC) لا يُغيَّر رابطه", f["url"] == "https://m.io/mcp")
+r = _tc("html")
+check("صفحة ويب ← «أعاد صفحة ويب (HTML)… غالباً ينتهي بـ /mcp»", r.status_code == 502 and "HTML" in r.text
+      and "/mcp" in r.text, r.text[:200])
+r = _tc("noinit")
+check("رد initialize بلا protocolVersion/capabilities ← لا يتكلم MCP", r.status_code == 502
+      and "protocolVersion" in r.text, r.text[:200])
+r = _tc("notools")
+check("خادم MCP بلا قدرة tools ← يوضح أنه يقدّم موارد فقط", r.status_code == 400 and "لا يقدّم أدوات" in r.text, r.text[:200])
+r = _tc("empty")
+check("خادم MCP أعاد 0 أداة ← 400 بالأسباب (المفتاح/طريقة الإرسال/أدوات الحساب)", r.status_code == 400
+      and "0 أداة" in r.text and "المفتاح" in r.text, r.text[:200])
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "emptysrv", "url": f"{URL}?mode=empty"})
+check("ولا يُثبَّت خادم بلا أدوات", r.status_code == 400 and not any(c["slug"] == "emptysrv" for c in X.list_configs()))
+check("خادم سليم ما زال يعمل", _tc("").status_code == 200 and _tc("").json()["tools"])
 
 print("13) مهارة تلقائية: الموظف يستخدم أي أداة تُضاف للنظام (مثل Tavily) دون إعداد")
 from app.aeos.employee import research as RS  # noqa: E402
