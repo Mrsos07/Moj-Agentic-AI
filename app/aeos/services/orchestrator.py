@@ -918,10 +918,11 @@ def _history(db, session_id: Optional[str], user_id: Optional[int],
         return []
 
 
-def _client():
+def _client(user_id: Optional[int] = None):
+    """عميل المنسّق: نموذج «الشات» الذي اختاره المستخدم من إعداداته، وإلا إعداد النظام."""
     from app.core.llm_provider import resolve_llm
 
-    endpoint = resolve_llm()
+    endpoint = resolve_llm(user_id=user_id, purpose="chat")
     if not endpoint.available:
         return None, None
     from openai import OpenAI
@@ -991,7 +992,7 @@ def handle(message: str, user_id: Optional[int], *, pinned: Optional[str] = None
     الخاصة)، فيرد الموظف نفسه بأدوات محصورة عليه."""
     if not (message or "").strip():
         return None
-    client, model = client_factory()
+    client, model = client_factory(user_id) if client_factory is _client else client_factory()
     if client is None:
         return None
 

@@ -45,6 +45,7 @@ from app.api.user_accounts_routes import router as user_accounts_router
 from app.api.schedule_routes import router as schedule_router
 from app.api.telegram_routes import router as telegram_router
 from app.api.trend_routes import router as trend_router
+from app.api.llm_routes import router as llm_router
 from app.agents.agent_manager import agent_manager
 from app.services import x_bridge
 from app.services.memory_service import memory_service
@@ -167,6 +168,9 @@ app.include_router(schedule_router)
 
 # Include telegram integration routes
 app.include_router(telegram_router)
+
+# مزوّد النماذج لكل مستخدم (الإعدادات ← مزوّد النماذج، ومنتقي النموذج في الشات)
+app.include_router(llm_router)
 
 # Include AEOS (AI Employee Operating System) routes
 app.include_router(aeos_router)
@@ -920,6 +924,10 @@ async def websocket_endpoint(websocket: WebSocket):
             # سياق المحادثة الجارية لذاكرة الموظف قصيرة المدى (انظر agent_memory.CURRENT_CHAT)
             from app.aeos.memory.agent_memory import CURRENT_CHAT
             CURRENT_CHAT.set({"user_id": _norm_uid(user_id), "session_id": session_id})
+            # نداءات LLM أثناء معالجة هذه الرسالة (نقاش الموظف، الردود المساعدة) تذهب لنموذج
+            # «الشات» الذي اختاره المستخدم؛ asyncio.to_thread ينقل السياق للخيوط تلقائياً
+            from app.core.llm_provider import LLM_OWNER
+            LLM_OWNER.set((_norm_uid(user_id), "chat"))
 
             await manager.send_message({
                 "type": "user_message",

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { FiCamera, FiUser, FiMail, FiLock, FiCheck } from 'react-icons/fi'
 import { MdClose } from 'react-icons/md'
+import LLMProvidersPanel from '../components/LLMProvidersPanel'
 
 const EMPTY_TELEGRAM_DATA = {
   bot_token: '',
@@ -341,6 +342,10 @@ const Profile = ({ user, setUser, darkMode }) => {
         )}
 
         <div className="space-y-6">
+          <div id="model-provider">
+            <LLMProvidersPanel />
+          </div>
+
           <div className="bg-card-light dark:bg-card-dark rounded-xl p-6 shadow-sm">
             <h2 className="text-xl font-semibold text-text-primary-light dark:text-text-primary-dark mb-6">
               الصورة الشخصية

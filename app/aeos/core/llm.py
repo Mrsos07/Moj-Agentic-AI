@@ -109,15 +109,71 @@ def _safe_json(raw: str) -> Dict[str, Any]:
         return {}
 
 
+class RoutedLLMProvider(ILLMProvider):
+    """يوجّه كل نداء لنموذج **مالك** الدورة الجارية إن اختار مزوّداً للموظفين، وإلا للافتراضي.
+
+    مزوّد واحد مشترك يُحقن عند الإقلاع في سياق الدورة وفي خادم المحتوى؛ الدورة تعمل في خيط
+    واحد وتضبط ``LLM_OWNER`` في بدايتها، فيصل الاختيار لكل نداء (الكتابة، القرار، التقييم،
+    الحارس…) دون تعديل أي موضع استدعاء. فشل نموذج المستخدم (مفتاح/رصيد) ⇒ نداء واحد بالافتراضي
+    بدل دورة صامتة بلا محتوى، مع تسجيل السبب.
+    """
+
+    def __init__(self, default: ILLMProvider) -> None:
+        self._default = default
+        self._clients: Dict[tuple, OpenAICompatibleLLMProvider] = {}
+
+    def _pick(self) -> ILLMProvider:
+        from app.core.llm_provider import LLM_OWNER
+
+        owner = LLM_OWNER.get()
+        if not owner or not owner[0]:
+            return self._default
+        try:
+            from app.services.user_llm import endpoint_for
+
+            ep = endpoint_for(owner[0], owner[1])
+        except Exception:  # noqa: BLE001 - إعدادات المستخدم لا توقف الدورة
+            ep = None
+        if ep is None or not ep.available:                # لا اختيار للمستخدم ⇒ الافتراضي المبني مسبقاً
+            return self._default
+        prov = self._clients.get(ep.cache_key)
+        if prov is None:
+            prov = self._clients[ep.cache_key] = OpenAICompatibleLLMProvider(ep)
+        return prov
+
+    @property
+    def available(self) -> bool:
+        return self._default.available or self._pick() is not self._default
+
+    def complete(self, system: str, prompt: str, *, temperature: float = 0.7,
+                 max_tokens: int = 1000) -> str:
+        prov = self._pick()
+        out = prov.complete(system, prompt, temperature=temperature, max_tokens=max_tokens)
+        if not out and prov is not self._default and self._default.available:
+            logger.warning("user model failed (%s); falling back to system model for this call",
+                           getattr(prov, "_provider", "?"))
+            out = self._default.complete(system, prompt, temperature=temperature, max_tokens=max_tokens)
+        return out
+
+    def complete_json(self, system: str, prompt: str, *,
+                      temperature: float = 0.3) -> Dict[str, Any]:
+        prov = self._pick()
+        out = prov.complete_json(system, prompt, temperature=temperature)
+        if not out and prov is not self._default and self._default.available:
+            out = self._default.complete_json(system, prompt, temperature=temperature)
+        return out
+
+
 def build_llm_provider() -> ILLMProvider:
-    """Factory: pick a provider from environment configuration."""
+    """Factory: pick a provider from environment configuration (مغلّف بموجّه اختيار المالك)."""
+    default: ILLMProvider = NullLLMProvider()
     try:
         from app.core.llm_provider import resolve_llm
 
         endpoint = resolve_llm()
         if endpoint.available:
             logger.info("LLM provider: %s (model=%s)", endpoint.provider, endpoint.model)
-            return OpenAICompatibleLLMProvider(endpoint)
+            default = OpenAICompatibleLLMProvider(endpoint)
     except Exception:  # noqa: BLE001
         logger.exception("LLM provider config failed")
-    return NullLLMProvider()
+    return RoutedLLMProvider(default)
