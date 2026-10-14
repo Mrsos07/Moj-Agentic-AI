@@ -372,6 +372,7 @@ class RuntimeManager(IRuntimeManager):
                 "decision_review": report.get("decision_review"),
                 "suspended_arms": report.get("suspended_arms"),
                 "research": report.get("research"),
+                "images": report.get("images"),
                 "tool_calls": report.get("tool_calls"),
                 "available_tools": report.get("available_tools"),
                 "phase_timings_ms": report.get("phase_timings_ms"),

@@ -1352,39 +1352,31 @@ class FetchNewsCapability(ICapability):
         return CapabilityResult.ok(self.name, count=len(ordered), news=ordered)
 
 
-#: أنماط بصرية جاهزة — ثبات النمط عبر المنشورات يبني هوية بصرية للحساب
-_IMAGE_STYLES = {
-    "editorial": "clean editorial photo-illustration, muted palette, soft depth of field",
-    "cinematic": "cinematic wide shot, dramatic side lighting, rich contrast, film grain",
-    "minimal": "minimal flat vector illustration, two-tone palette, generous negative space",
-    "infographic": "modern abstract data-visual composition, geometric shapes, no labels",
-    "photoreal": "photorealistic documentary photograph, natural light, shallow depth of field",
-}
-
-
 def _image_prompt(text: str, context: "ExecutionContext") -> str:
-    """برومبت صورة تخدم المنشور نفسه — مبنيّة على نصّه النهائي لا على التوجيه.
+    """برومبت الصورة عبر المخرج البصري (توجيه فني ← برومبت منظّم). انظر
+    ``app.aeos.employee.visual_director`` — كان «استعارة لهذا المنشور» فخرجت كل الصور شطرنجاً."""
+    from ..employee import visual_director as VD
 
-    نثبّت نمطاً بصرياً واحداً (``image_style``) فتتشابه صور الحساب وتُبنى هوية
-    بصرية، ونمنع النصّ داخل الصورة (النص العربي يخرج مشوّهاً من مولّدات الصور
-    ويُفسد المنشور).
-    """
-    persona = context.config.persona
-    rules = context.config.business_rules or {}
-    interests = "، ".join((getattr(persona, "interests", None) or [])[:3])
-    style_key = str(rules.get("image_style", "editorial")).strip().lower()
-    style = _IMAGE_STYLES.get(style_key, _IMAGE_STYLES["editorial"])
-    extra = str(rules.get("image_prompt_extra", "")).strip()
-    return (
-        f"{style}. Subject: a visual metaphor for this social post — \"{text[:280]}\". "
-        f"Topic field: {interests or 'general news'}. "
-        "One strong focal subject, uncluttered background, professional quality, "
-        "16:9 friendly composition. "
-        "Absolutely NO text, NO words, NO letters, NO numbers, NO captions, "
-        "no watermark, no logos, no charts with labels, and no faces of real "
-        "identifiable people or politicians."
-        + (f" {extra}" if extra else "")
-    )
+    return VD.build_prompt(VD.art_direct(text, context), context)
+
+
+def _create_image(context: "ExecutionContext", text: str) -> str:
+    """توليد كامل بالمخرج البصري (توجيه ← توليد ← مراجعة ← إعادة) + تسجيله في سجل الدورة."""
+    from ..employee import visual_director as VD
+
+    out = VD.create(context, text)
+    rv = out.get("review") or {}
+    context.scratch.setdefault("image_log", []).append({
+        "concept": str((out.get("brief") or {}).get("concept") or "")[:120],
+        "style": (out.get("brief") or {}).get("style"), "attempts": out.get("attempts"),
+        "score": rv.get("score"), "issues": rv.get("issues") or [], "published": bool(out.get("url")),
+        "reason": out.get("reason", "")[:200],
+        # مراجعة كل محاولة (لماذا رُفضت الأولى) — كانت تضيع فلا يُعرف سبب إعادة التوليد
+        "history": [{k: h.get(k) for k in ("attempt", "score", "severe", "issues")} for h in out.get("history") or []],
+    })
+    if not out.get("url"):
+        logger.info("image not used: %s", out.get("reason"))
+    return out.get("url") or ""
 
 
 def _maybe_generate_image(context: "ExecutionContext", text: str,
@@ -1411,15 +1403,7 @@ def _maybe_generate_image(context: "ExecutionContext", text: str,
     if cap <= 0 or int(counters.get("generated_images_today", 0)) >= cap:
         return ""
 
-    res = context.mcp.call(MCPRequest(
-        employee_id=context.config.id, tool="generate_image",
-        params={"prompt": _image_prompt(text, context)},
-        context={"server": "image"},
-    ))
-    if not res.success:
-        logger.info("image generation skipped: %s", res.error)
-        return ""
-    url = (res.data.get("url") or "").strip()
+    url = _create_image(context, text)
     if url:
         counters["generated_images_today"] = int(counters.get("generated_images_today", 0)) + 1
     return url
@@ -1866,14 +1850,11 @@ class GenerateImageCapability(ICapability):
         topic = (request.params.get("topic") or request.params.get("prompt") or "").strip()
         if not topic:
             return CapabilityResult.fail("topic/prompt is required", self.name)
-        res = context.mcp.call(MCPRequest(
-            employee_id=context.config.id, tool="generate_image",
-            params={"prompt": _image_prompt(topic, context)},
-            context={"server": "image"},
-        ))
-        if not res.success:
-            return CapabilityResult.fail(res.error, self.name)
-        return CapabilityResult.ok(self.name, **(res.data or {}))
+        url = _create_image(context, topic)
+        if not url:
+            reason = ((context.scratch.get("image_log") or [{}])[-1]).get("reason") or "image not generated"
+            return CapabilityResult.fail(reason, self.name)
+        return CapabilityResult.ok(self.name, url=url, review=(context.scratch.get("image_log") or [{}])[-1])
 
 
 class WaitCapability(ICapability):

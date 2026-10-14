@@ -120,13 +120,20 @@ class ImageMCP(IMCPServer):
         # gpt-image-1 لا dall-e-3: واجهة OpenAI أزالت dall-e-3 نهائياً
         # ‏("The model 'dall-e-3' does not exist"، مؤكد فعلياً 2026-08-05)
         model = request.params.get("model") or endpoint.image_model
-        size = request.params.get("size") or os.getenv("AEOS_IMAGE_SIZE", "1024x1024")
+        # الصورة في تايم لاين X تُعرض 16:9؛ المربّع (1024x1024 سابقاً) يُقصّ أعلاه وأسفله.
+        # size صريح (مثل الصورة الشخصية 1024x1024) يتقدّم على الافتراضي.
+        explicit_size = request.params.get("size") or ""
+        size = explicit_size or os.getenv("AEOS_IMAGE_SIZE", "1536x1024")
+        aspect = (request.params.get("aspect_ratio")
+                  or (self._aspect_ratio(explicit_size) if explicit_size else "")
+                  or os.getenv("AEOS_IMAGE_ASPECT", "16:9"))
+        quality = request.params.get("quality") or os.getenv("AEOS_IMAGE_QUALITY", "high")
 
         try:
             if endpoint.is_openrouter:
-                url, b64 = self._generate_openrouter(endpoint, model, prompt, size)
+                url, b64 = self._generate_openrouter(endpoint, model, prompt, aspect, quality)
             else:
-                url, b64 = self._generate_openai(endpoint, model, prompt, size)
+                url, b64 = self._generate_openai(endpoint, model, prompt, size, quality)
         except Exception as exc:  # noqa: BLE001
             logger.warning("image generation failed (%s/%s): %s",
                            endpoint.provider, model, exc)
@@ -142,13 +149,14 @@ class ImageMCP(IMCPServer):
             local_path = str(saved)
             url = f"{self._public_base()}/static/uploads/{saved.name}"
 
-        logger.info("generated image for employee %s (%s/%s)",
-                    request.employee_id, endpoint.provider, model)
-        return MCPResponse.ok(url=url, local_path=local_path, prompt=prompt, model=model)
+        logger.info("generated image for employee %s (%s/%s, %s, %s)",
+                    request.employee_id, endpoint.provider, model, aspect, quality)
+        return MCPResponse.ok(url=url, local_path=local_path, prompt=prompt, model=model,
+                              aspect_ratio=aspect, quality=quality)
 
     # ---- providers -------------------------------------------------------
     @staticmethod
-    def _generate_openai(endpoint, model: str, prompt: str, size: str):
+    def _generate_openai(endpoint, model: str, prompt: str, size: str, quality: str = ""):
         """مسار OpenAI الأصلي عبر الـ SDK (``/images/generations``)."""
         from openai import OpenAI
 
@@ -156,29 +164,32 @@ class ImageMCP(IMCPServer):
         # لا نمرّر response_format: واجهة OpenAI الحالية ترفضه حتى مع dall-e-3
         # ‏(Unknown parameter، شوهد 2026-08-05). المعالجة أدناه تتعامل مع
         # الحالتين أصلاً: رابط مباشر أو b64 يُحفظ محلياً.
-        result = client.images.generate(model=model, prompt=prompt[:3800], size=size, n=1)
+        extra = {"quality": quality} if quality and model.startswith("gpt-image") else {}
+        result = client.images.generate(model=model, prompt=prompt[:3800], size=size, n=1, **extra)
         item = (getattr(result, "data", None) or [None])[0]
         if item is None:
             raise RuntimeError("image provider returned no data")
         return (getattr(item, "url", "") or ""), (getattr(item, "b64_json", "") or "")
 
     @staticmethod
-    def _generate_openrouter(endpoint, model: str, prompt: str, size: str):
+    def _generate_openrouter(endpoint, model: str, prompt: str, aspect: str, quality: str = ""):
         """مسار OpenRouter: ``POST /api/v1/images`` بطلب HTTP مباشر.
 
         لا نستعمل الـ SDK هنا لأنه يضرب ``/images/generations`` فيعيد 404.
-        و``size`` غير موجود في هذه الواجهة — البديل ``aspect_ratio``، فنشتقّه
-        من الأبعاد بدل إرسال مفتاح تتجاهله (أو ترفضه) الواجهة.
+        الواجهة تأخذ ``aspect_ratio`` (16:9، 1:1…) و``quality`` (low/medium/high) — من
+        توثيق OpenRouter؛ المزوّد الذي لا يدعم الجودة يتجاهلها.
         """
         import requests
 
         payload = {"model": model, "prompt": prompt[:3800]}
-        ratio = ImageMCP._aspect_ratio(size)
-        if ratio:
-            payload["aspect_ratio"] = ratio
+        if aspect:
+            payload["aspect_ratio"] = aspect
+        if quality:
+            payload["quality"] = quality
 
+        # جودة high بنسبة 16:9 تأخذ ~90 ثانية (توثيق OpenRouter: 94s لـ gpt-image-2)
         resp = requests.post(endpoint.images_url, headers=endpoint.auth_headers(),
-                             json=payload, timeout=180)
+                             json=payload, timeout=240)
         if resp.status_code != 200:
             raise RuntimeError(f"openrouter {resp.status_code}: {resp.text[:300]}")
         item = ((resp.json() or {}).get("data") or [None])[0]
