@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import random
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 from ..employee import x_algorithm
@@ -573,18 +573,24 @@ def _generate_post_text(brief: str, context: "ExecutionContext",
     return _normalize_post_text((gen.data.get("text", "") or "").strip())
 
 
-def _generate_quality_post(brief: str, context: "ExecutionContext") -> tuple:
+def _generate_quality_post(brief: str, context: "ExecutionContext",
+                           echo_ref: Optional[str] = None) -> tuple:
     """ولّد منشوراً يمرّ بوابة الجودة، بمحاولة تصحيح واحدة.
 
     الفشل الشائع سابقاً: ينشر قوالب فارغة («تحليل موضوعي… دعوة للنقاش») أو
     يعيد صياغة التعليمات نفسها. الآن نفحص المخرَج، ونعيد التوليد مرة واحدة
     بتوجيه تصحيحي صريح، ونصلح ميكانيكياً ما يمكن إصلاحه (هاشتاقات زائدة).
+
+    ``echo_ref``: نص **التعليمات وحدها** لفحص «إعادة صياغة التعليمات». كان الفحص يقارن بالبريف
+    كاملاً (مع نتائج البحث/الرسالة الإعلامية)، والنسبة «التقاطع ÷ الأصغر» = كلمات المنشور،
+    فمنشور يقتبس حقائق المصادر بأمانة كان يُعلَّم echo_brief ويُعاد توليده أو يُمنع.
     """
+    ref = brief if echo_ref is None else echo_ref
     text = _generate_post_text(brief, context)
     if not text:
         return "", ["empty"]
     text = _autofix_post_text(text)
-    issues = _quality_issues(text, context, brief)
+    issues = _quality_issues(text, context, ref)
     hard = [i for i in issues if i in _HARD_QUALITY_ISSUES]
     if not hard:
         return text, issues
@@ -595,7 +601,7 @@ def _generate_quality_post(brief: str, context: "ExecutionContext") -> tuple:
     retry = _autofix_post_text(_generate_post_text(brief, context, hints))
     if not retry:
         return text, issues
-    retry_issues = _quality_issues(retry, context, brief)
+    retry_issues = _quality_issues(retry, context, ref)
     retry_hard = [i for i in retry_issues if i in _HARD_QUALITY_ISSUES]
     # اختر الأفضل: الأقل عيوباً صلبة
     if len(retry_hard) < len(hard):
@@ -613,10 +619,16 @@ class PublishContentCapability(ICapability):
         if not text:
             # ask the content MCP to generate it from a brief/goal
             brief = request.params.get("brief") or "Write one engaging original post."
-            from ..employee import research
+            instructions = brief
+            media_brief = str(request.params.get("media_brief") or "").strip()
+            if media_brief:
+                # رسالة إعلامية من المنسّق (بحث عميق مسبق): يكتب منها، فلا بحث سطحي إضافي
+                brief = f"{brief}\n\n{media_brief}"
+            else:
+                from ..employee import research
 
-            brief = research.augment_brief(brief, request.params.get("research_query", ""), context)
-            text, issues = _generate_quality_post(brief, context)
+                brief = research.augment_brief(brief, request.params.get("research_query", ""), context)
+            text, issues = _generate_quality_post(brief, context, echo_ref=instructions)
         if not text:
             return CapabilityResult.fail("no content to publish", self.name)
 

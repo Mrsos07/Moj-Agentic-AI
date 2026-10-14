@@ -278,6 +278,20 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
     platform = get_platform()
     eid = cfg.id
 
+    # نشر موجّه بلا رسالة إعلامية بعد (أمر الحساب المثبّت/مهمّة نشر): بحث عميق أولاً
+    if payload.get("directed_topic") and not payload.get("media_brief"):
+        from . import media_brief as MB
+
+        brief = MB.attach(payload, cfg, getattr(platform, "llm", None))
+        if brief:
+            platform.notify_owner(
+                eid,
+                f"🔎 جهّزت رسالة إعلامية قبل الكتابة: **{brief.get('headline', '')}** — "
+                f"{len(brief.get('sources') or [])} مصدراً حديثاً "
+                f"({'، '.join(s['site'] for s in (brief.get('sources') or [])[:4])}).",
+                "aeos_cycle_thinking",
+            )
+
     for attempt in range(_RETRY_ATTEMPTS):
         fresh = platform.repository.get(eid)
         if fresh is None:

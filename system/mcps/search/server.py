@@ -28,20 +28,27 @@ def search_provider() -> tuple:
 
 
 def tavily_search(query: str, *, max_results: int = 5, topic: str = "general",
-                  time_range: str = "", timeout: float = 20) -> list:
-    """نداء Tavily واحد — يستخدمه البحث المدمج وكاشف الترندات. يرفع استثناءً عند الفشل."""
+                  time_range: str = "", timeout: float = 20, depth: str = "basic",
+                  include_answer: bool = False, full: bool = False):
+    """نداء Tavily واحد — يستخدمه البحث المدمج وكاشف الترندات والموجز الإعلامي.
+
+    ``depth="advanced"`` بحث عميق (رصيدان بدل رصيد) بمقتطفات أطول وأدق. ``full=True`` يعيد
+    الرد كاملاً (results + answer) بدل النتائج فقط. يرفع استثناءً عند الفشل."""
     import requests
 
     key = search_provider()[1]
     if not key:
         raise RuntimeError("TAVILY_API_KEY غير موجود في .env")
-    body = {"query": query, "max_results": max_results, "search_depth": "basic", "topic": topic}
+    body = {"query": query, "max_results": max_results, "search_depth": depth, "topic": topic}
     if time_range:
         body["time_range"] = time_range
+    if include_answer:
+        body["include_answer"] = "advanced" if depth == "advanced" else True
     resp = requests.post(TAVILY_SEARCH_URL, json=body, headers={"Authorization": f"Bearer {key}"},
                          timeout=timeout)
     resp.raise_for_status()
-    return resp.json().get("results") or []
+    data = resp.json()
+    return data if full else (data.get("results") or [])
 
 
 class SearchMCP(IMCPServer):

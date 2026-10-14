@@ -54,6 +54,15 @@
   (`--config-only` for no network, `--no-image` to skip the priciest check).
   A wrong key produces 401 on every path — which is exactly how you tell
   "wiring is right, key is wrong" apart from "wiring is wrong".
+- Directed publishing ("وجّه الموظفين للنشر عن X") is never blind: `order_publish` (and
+  `employee_mission.dispatch_directed` for pinned/mission paths, via `media_brief.attach`) first
+  builds a **media brief** (`app/aeos/services/media_brief.py`): Tavily `advanced` news search
+  (day → widen to week), then an editor LLM writes headline/summary/latest/facts/numbers/
+  statements (each with source [n]), angles and `do_not_claim` from the sources ONLY. Cached
+  30 min per (user, topic) so N employees = one search; each employee gets a different angle
+  (`assign_angle`). The skill writes from `media_brief` (no shallow research). The quality gate's
+  echo check uses `echo_ref` = instructions only — comparing against the full brief (with
+  research/facts) flagged faithful fact-quoting as `echo_brief`. Test: `verify_media_brief.py`.
 - Post images go through `app/aeos/employee/visual_director.py` (NOT a raw prompt): an LLM art
   director turns the post into a concrete, literal news scene (subject/setting/composition/
   lighting/camera/palette/mood) with banned clichés (chess, crowns, maps, flags…), Gulf cultural
