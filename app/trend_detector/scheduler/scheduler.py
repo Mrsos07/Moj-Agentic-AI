@@ -27,6 +27,11 @@ from app.trend_detector.pipeline.validator import ScoreGate
 from app.trend_detector.classifier.classifier import Classifier
 
 
+def _naive(dt: datetime) -> datetime:
+    """SQLite يعيد التواريخ بلا منطقة زمنية (UTC ضمناً) — وحّدها قبل المقارنة."""
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
 class TrendDetectorScheduler:
     """Main orchestrator for the trend detection pipeline (Tavily is the only source)."""
 
@@ -161,8 +166,7 @@ class TrendDetectorScheduler:
             if not due_entries:
                 return
 
-            print(f"[TrendScheduler] Re-checking {len(due_entries)} watchlist entries")
-
+            rescored, graduated, expired, idle = 0, 0, 0, 0
             for entry in due_entries:
                 candidate = (
                     db.query(Candidate)
@@ -170,10 +174,18 @@ class TrendDetectorScheduler:
                     .first()
                 )
 
-                if not candidate:
+                if not candidate or candidate.status in ("hot", "expired"):
+                    # رقّاه الجامع نفسه (اندمجت فيه مصادر جديدة) أو انتهى — لا نصنّفه مرة ثانية
                     entry.is_active = False
                     continue
 
+                # تغيّر المرشّح منذ آخر فحص؟ (اندمجت فيه إشارات جديدة من الجامع فتغيّرت
+                # مجاميعه). التقييم دالة في البيانات فقط: إعادة تقييم مرشّح لم يتغيّر
+                # تعطي الرقم نفسه دائماً — كان 53 مرشّحاً يُعاد تقييمها كل دورة فحص
+                # بدرجة 6.0 ثابتة، سطرين لكل واحد في السجل، بلا أي احتمال للترقّي.
+                last = entry.last_checked_at or entry.created_at
+                changed = bool(candidate.updated_at and last
+                               and _naive(candidate.updated_at) > _naive(last))
                 entry.check_count += 1
                 entry.last_checked_at = now
 
@@ -181,26 +193,32 @@ class TrendDetectorScheduler:
                 if entry.check_count >= entry.max_checks:
                     entry.is_active = False
                     candidate.status = "expired"
-                    print(f"[Watchlist] Candidate {candidate.id} expired after {entry.check_count} checks")
+                    expired += 1
                     continue
 
-                # Re-score the candidate
-                self.scoring_engine.process([candidate], db)
-
-                # Re-validate
-                hot = await self.validator.validate([candidate], db)
+                hot = []
+                if changed:
+                    rescored += 1
+                    self.scoring_engine.process([candidate], db, quiet=True)
+                    hot = await self.validator.validate([candidate], db, quiet=True)
+                else:
+                    idle += 1
 
                 if hot:
                     # Graduated to HOT
                     entry.is_active = False
+                    graduated += 1
                     await self.classifier.classify(hot, db)
-                    print(f"[Watchlist] Candidate {candidate.id} graduated to HOT!")
                 else:
                     # Increasing interval: 15min * (check_count + 1)
                     interval_minutes = WATCHLIST_CHECK_INTERVAL * (entry.check_count + 1)
                     entry.next_check_at = now + timedelta(minutes=interval_minutes)
 
             db.commit()
+            # سطر واحد للدفعة كلها، ولا شيء إن لم يتغيّر أي مرشّح (كانت عشرات الأسطر كل 15 دقيقة)
+            if rescored or graduated or expired:
+                print(f"[Watchlist] {len(due_entries)} due: {rescored} re-scored (new data), "
+                      f"{graduated} → HOT, {expired} expired, {idle} unchanged")
 
         except Exception as e:
             print(f"[TrendScheduler] Watchlist error: {e}")

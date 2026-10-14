@@ -66,7 +66,7 @@ class ScoringEngine:
 
         return score
 
-    def process(self, candidates: List[Candidate], db: Session) -> List[Candidate]:
+    def process(self, candidates: List[Candidate], db: Session, quiet: bool = False) -> List[Candidate]:
         """
         Score all provided candidates and update their score in the DB.
         Returns candidates sorted by score descending.
@@ -77,5 +77,6 @@ class ScoringEngine:
         db.commit()
 
         scored = sorted(candidates, key=lambda c: c.score, reverse=True)
-        print(f"[ScoringEngine] Scored {len(scored)} candidates — top score: {scored[0].score if scored else 0}")
+        if not quiet:
+            print(f"[ScoringEngine] Scored {len(scored)} candidates — top score: {scored[0].score if scored else 0}")
         return scored

@@ -117,15 +117,16 @@ def save(employee_id: str, raw: Dict[str, Any], registry=None, added_by: str = "
     from datetime import datetime, timezone
 
     transport = str(raw.get("transport") or raw.get("type") or ("http" if raw.get("url") else "")).lower()
-    if transport not in ("http", "streamable-http", "streamable_http"):
+    if transport not in ("http", "streamable-http", "streamable_http", "sse"):
         raise ValueError("أدوات الموظف: خوادم HTTP فقط. خوادم stdio والحزم يثبّتها المطوّر كأدوات للنظام")
+    http_mode = "sse" if transport == "sse" else str(raw.get("http_mode") or "")
     local = X.slug(raw.get("name") or raw.get("label") or "")
     if not local:
         raise ValueError("اسم الخادم مطلوب")
     check_public_url(str(raw.get("url") or ""))
     cfg = X.normalize_config({
         "name": registry_slug(employee_id, local), "label": raw.get("label") or raw.get("name") or local,
-        "transport": "http", "url": raw.get("url"), "headers": raw.get("headers") or {},
+        "transport": "http", "url": raw.get("url"), "http_mode": http_mode, "headers": raw.get("headers") or {},
         "allowed_tools": raw.get("allowed_tools"), "research_tool": raw.get("research_tool") or "",
         "research_arg": raw.get("research_arg") or "", "description": raw.get("description") or "",
         "scope": {"coordinator": False, "employees": True},

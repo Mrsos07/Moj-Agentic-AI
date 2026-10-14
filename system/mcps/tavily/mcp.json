@@ -5,9 +5,7 @@
   "url": "https://mcp.tavily.com/mcp/",
   "allowed_tools": [
     "tavily_search",
-    "tavily_extract",
-    "tavily_crawl",
-    "tavily_research"
+    "tavily_extract"
   ],
   "research_tool": "tavily_search",
   "research_arg": "query",

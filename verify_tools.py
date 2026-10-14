@@ -169,6 +169,14 @@ rctx.config.business_rules = {"web_search": False}
 check("فصل البحث يدوياً (web_search=False) يوقفه", research.augment_brief("اكتب", "صفقة", rctx) == "اكتب")
 _tu.available = _real_available
 os.environ.pop("TAVILY_API_KEY")
+CQ = research.clean_query
+check("أمر المالك ← موضوع بحث نظيف (لا «انشر منشوراً عن… بما يناسب»)",
+      CQ("انشر منشوراً عن هاشتاق #شكرا_ابطال_الدفاع_الجوي بما يناسب تخصصك ونبرة حسابك") == "شكرا ابطال الدفاع الجوي"
+      and CQ("ابيك تكتب تغريدة عن اجتماع مجلس الوزراء اليوم وخل النبرة رسمية") == "اجتماع مجلس الوزراء اليوم"
+      and CQ("أسعار النفط اليوم") == "أسعار النفط اليوم" and CQ("#نيوم") == "نيوم",
+      [CQ("ابيك تكتب تغريدة عن اجتماع مجلس الوزراء اليوم وخل النبرة رسمية")])
+check("كل بحث يُسجَّل في الدورة (research_log)", rctx.scratch.get("research_log")
+      and rctx.scratch["research_log"][0]["query"] == "صفقة", rctx.scratch.get("research_log"))
 
 print("3.5) الاكتفاء بـ Tavily: البحث وكاشف الترندات")
 check("Tavily المزوّد الوحيد للبحث", list(core_mcp.SEARCH_PROVIDER_KEYS) == ["tavily"])
@@ -232,6 +240,62 @@ check("قصة تغطيها عدة مصادر ← HOT", _score(**{"reshares_total
 check("مصدر واحد بصلة عالية جداً ← HOT", _score(views_total=95) >= VT["hot"]["min_score"])
 s1 = _score(views_total=60)
 check("مصدر واحد بصلة عادية ← EARLY (قائمة المراقبة)", VT["early"]["min_score"] <= s1 < VT["hot"]["min_score"], s1)
+
+# قائمة المراقبة: لا إعادة تقييم لمرشّح لم يتغيّر (كان يطبع عشرات الأسطر كل 15 دقيقة بلا فائدة)
+import contextlib  # noqa: E402
+import io as _io  # noqa: E402
+from datetime import datetime as _dt, timedelta as _td  # noqa: E402
+
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+
+from app.db.database import Base  # noqa: E402
+from app.trend_detector.models import Watchlist  # noqa: E402
+import app.trend_detector.scheduler.scheduler as TSCH  # noqa: E402
+
+_eng = create_engine("sqlite://")
+Base.metadata.create_all(_eng, tables=[Candidate.__table__, Watchlist.__table__])
+_S = sessionmaker(bind=_eng)
+_db = _S()
+_old = _dt.utcnow() - _td(hours=5)
+for i in range(3):
+    _db.add(Candidate(id=i + 1, fingerprint=f"f{i}", title=f"t{i}", platforms="tavily", views_total=60,
+                      reshares_total=1, platform_count=1, score=6.0, status="early", created_at=_old, updated_at=_old))
+    _db.add(Watchlist(candidate_id=i + 1, check_count=1, max_checks=6, next_check_at=_old,
+                      last_checked_at=_old + _td(minutes=1), is_active=True, created_at=_old))
+_db.commit()
+# المرشّح 2 وصلته مصادر جديدة بعد آخر فحص (مصدران ← HOT)، والمرشّح 3 رقّاه الجامع مسبقاً
+c2 = _db.get(Candidate, 2)
+c2.reshares_total, c2.updated_at = 2, _dt.utcnow() - _td(minutes=5)
+_db.get(Candidate, 3).status = "hot"
+_db.commit()
+_db.close()
+_classified = []
+sch = TSCH.TrendDetectorScheduler()
+
+
+async def _fake_classify(cands, db):
+    _classified.extend(c.id for c in cands)
+    return cands
+
+sch.classifier.classify = _fake_classify
+_real_sl = TSCH.SessionLocal
+TSCH.SessionLocal = _S
+_buf = _io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    asyncio.run(sch._recheck_watchlist())
+TSCH.SessionLocal = _real_sl
+_log = _buf.getvalue()
+_db = _S()
+check("قائمة المراقبة: مرشّح لم يتغيّر لا يُعاد تقييمه ولا يطبع شيئاً، ويُجدوَل لاحقاً",
+      _db.get(Candidate, 1).status == "early" and _db.query(Watchlist).filter_by(candidate_id=1).one().is_active
+      and "ScoringEngine" not in _log and "ScoreGate" not in _log, _log)
+check("ومرشّح وصلته بيانات جديدة ← يُعاد تقييمه ويترقّى HOT ويُصنَّف مرة واحدة",
+      _db.get(Candidate, 2).status == "hot" and _classified == [2], (_classified, _log))
+check("ومرشّح رقّاه الجامع مسبقاً ← تُغلق مراقبته بلا تصنيف مكرر",
+      not _db.query(Watchlist).filter_by(candidate_id=3).one().is_active and 3 not in _classified)
+check("سطر واحد للدفعة بدل سطرين لكل مرشّح", _log.count("\n") == 1 and "[Watchlist]" in _log, _log)
+_db.close()
 
 # ───────────────────────── 4) MCP خارجي حقيقي ─────────────────────────
 print("4) خادم MCP حقيقي من الـSDK الرسمي")

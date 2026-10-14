@@ -74,6 +74,7 @@ class MCPFormIn(BaseModel):
     description: str = ""
     transport: str = "http"     # http | stdio
     url: str = ""
+    http_mode: str = ""         # streamable | sse (فارغ = تلقائي)
     command: str = ""
     args: List[str] = []
     auth: MCPAuthIn = MCPAuthIn()

@@ -1,0 +1,144 @@
+{
+  "slug": "trendsmcp",
+  "label": "trendsmcp",
+  "transport": "http",
+  "url": "https://api.trendsmcp.ai/mcp",
+  "allowed_tools": null,
+  "research_tool": "",
+  "research_arg": "",
+  "description": "ترندات حية: Google Trends وX وTikTok وYouTube وReddit ونمو الكلمات",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": false
+  },
+  "source": "config",
+  "added_by": "saudallosh@gmail.com",
+  "added_at": "2026-10-13T23:42:13+00:00",
+  "server_info": {
+    "name": "trendsmcp",
+    "version": "1.0.0"
+  },
+  "tools": [
+    {
+      "name": "trends___get_growth",
+      "description": "Point-to-point growth for a keyword on one or more sources. Each window is a preset string (12M, 3M, YTD, and the other listed periods). Values are on a 0-100 scale, plus absolute volume when available. Designed for growth questions; for charting or custom math, get_time_series provides the full series. app downloads and app rankings are keyword sources (Android bundle ID). They are not the App Store / Google Play live boards on get_top_trends. Returns a plan-limit message when the request is rate limited or the monthly quota is used up.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "description": "One source, or comma-separated sources (e.g. 'amazon, tiktok, youtube'). Valid: 'google search', 'google images', 'google news', 'google shopping', 'youtube', 'wikipedia', 'tiktok', 'reddit', 'amazon', 'news sentiment', 'news volume', 'npm', 'python', 'steam', 'app downloads', 'app rankings'.",
+            "type": "string"
+          },
+          "keyword": {
+            "description": "What to look up. The string format is required by source. Standard sources (google search, google images, google news, google shopping, youtube, wikipedia, tiktok, reddit, amazon, news sentiment, news volume): any name or phrase, e.g. 'nike'. npm: exact npmjs.com package name, case-sensitive. Right: 'react', '@babel/core'. Wrong: 'React', 'React.js'. python: exact PyPI project name. Right: 'pandas', 'requests'. Wrong: 'Pandas'. steam: game display name in plain English, not a Steam App ID. Right: 'Elden Ring', 'CS2'. First Steam store search result wins, so use an unambiguous name. app downloads and app rankings: Android bundle ID only (the id= value on Google Play). Right: 'com.openai.chatgpt', 'com.whatsapp'. Wrong: 'ChatGPT', 'WhatsApp', an iOS App Store ID, or a bundle ID that is not Android. Find it at play.google.com/store/apps/details?id=THIS_PART. If the request includes app downloads or app rankings with other sources, keyword must still be the Android bundle ID.",
+            "type": "string"
+          },
+          "percent_growth": {
+            "description": "Growth windows. Default if omitted: ['12M']. Each item must be a preset string: '7D', '1W', '14D', '2W', '30D', '1M', '2M', '3M', '6M', '9M', '12M', '1Y', '18M', '24M', '2Y', '36M', '3Y', '48M', '4Y', '60M', '5Y', 'MTD', 'QTD', 'YTD'. Every preset is a two-date comparison.",
+            "type": "array",
+            "items": {
+              "description": "A preset period such as '12M', '3M', or 'YTD'.",
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "keyword",
+          "source"
+        ]
+      }
+    },
+    {
+      "name": "trends___get_time_series",
+      "description": "Full historical series for one keyword and one source (0-100 values, plus volume when available). Suited for charting or custom math. Live 'what's trending now' boards are on get_top_trends. get_growth answers most growth questions with less data. Returns a plan-limit message when the request is rate limited or the monthly quota is used up.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "description": "Exactly one source per request. Valid: 'google search', 'google images', 'google news', 'google shopping', 'youtube', 'wikipedia', 'tiktok', 'reddit', 'amazon', 'news sentiment', 'news volume', 'npm', 'python', 'steam', 'app downloads', 'app rankings'.",
+            "type": "string"
+          },
+          "keyword": {
+            "description": "What to look up. The string format is required by source. Standard sources (google search, google images, google news, google shopping, youtube, wikipedia, tiktok, reddit, amazon, news sentiment, news volume): any name or phrase, e.g. 'tesla'. npm: exact npmjs.com package name, case-sensitive. Right: 'react', '@babel/core'. Wrong: 'React', 'React.js'. python: exact PyPI project name. Right: 'pandas', 'requests'. Wrong: 'Pandas'. steam: game display name in plain English, not a Steam App ID. Right: 'Elden Ring', 'CS2'. First Steam store search result wins, so use an unambiguous name. app downloads and app rankings: Android bundle ID only (the id= value on Google Play). Right: 'com.openai.chatgpt', 'com.whatsapp'. Wrong: 'ChatGPT', 'WhatsApp', an iOS App Store ID, or a bundle ID that is not Android. Find it at play.google.com/store/apps/details?id=THIS_PART.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "keyword",
+          "source"
+        ]
+      }
+    },
+    {
+      "name": "trends___get_top_posts",
+      "description": "Live top posts for one hashtag on one social source. Fetched live on every call; nothing is stored. For when the user already has a hashtag and wants the posts winning on it. get_top_trends ranks the hashtags themselves. Returns a plan-limit message when the request is rate limited or the monthly quota is used up.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "description": "Max posts to return. Default 20, min 1, max 20.",
+            "type": "integer"
+          },
+          "source": {
+            "description": "Exactly one source per request. Valid: 'tiktok', 'instagram'.",
+            "type": "string"
+          },
+          "keyword": {
+            "description": "The hashtag, with or without '#'. Spaces are removed. Example: 'bookstagram' or '#fitness'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "keyword",
+          "source"
+        ]
+      }
+    },
+    {
+      "name": "trends___get_top_trends",
+      "description": "Live top-trending board for exactly one feed type. No keyword. For 'Amazon Best Sellers by Category', 'Google Trends by Category', 'Top Websites', 'Substack by Category', and 'TikTok Trending Hashtags by Category', category selects the board. Default sort is current rank. Use sort='rank_change' for climbers vs a prior snapshot (window 1d, 3d, 7d, 14d, or 30d). If the requested board is not in the database yet (for example a country that is not collected on the schedule), the board is fetched live. App Store Top Free, App Store Top Paid, and Google Play are live store boards, not keyword lookups. App history is available via get_growth or get_time_series with source app downloads or app rankings and an Android bundle ID. Live boards are only available here, not via get_time_series. Returns a plan-limit message when the request is rate limited or the monthly quota is used up.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "country": {
+            "description": "Optional ISO 3166-1 alpha-2 code (US, GB, JP). Aliases like 'USA' or 'United States' resolve to US. Omit for the default US board. Only for Google Trends, Google Trends by Category, YouTube Trending, TikTok Trending Hashtags, TikTok Trending Hashtags by Category, and X (Twitter) Trending.",
+            "type": "string"
+          },
+          "offset": {
+            "description": "Rows to skip for pagination. Default 0.",
+            "type": "integer"
+          },
+          "limit": {
+            "description": "Max rows to return. Default 25, min 1, max 200.",
+            "type": "integer"
+          },
+          "sort": {
+            "description": "How to rank the board. 'rank' (default): current leaders. 'rank_change': biggest climbers vs a prior snapshot. Mover rows include rank, keyword, prev_rank, and rank_change.",
+            "type": "string"
+          },
+          "window": {
+            "description": "Lookback used only when sort is 'rank_change'. One of '1d', '3d', '7d', '14d', '30d'. Default '30d'. Short windows only work on daily feeds; weekly and monthly feeds return a note pointing to a longer window.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Exactly one live feed. Valid: 'Amazon Best Sellers Top Rated', 'Amazon Best Sellers by Category', 'App Store Top Free', 'App Store Top Paid', 'GitHub', 'Google News Top News', 'Google Play', 'Google Trends', 'Google Trends by Category', 'IMDb MOVIEmeter', 'Open Library Trending Books', 'Reddit Hot Posts', 'Reddit World News', 'Top Websites', 'Spotify Top Podcasts', 'Steam Most Played', 'Substack', 'Substack by Category', 'TikTok Trending Hashtags', 'TikTok Trending Hashtags by Category', 'TikTok Trending Searches', 'Wikipedia Trending', 'X (Twitter) Trending', 'YouTube Trending'.",
+            "type": "string"
+          },
+          "category": {
+            "description": "Pass this whenever type is 'Amazon Best Sellers by Category', 'Google Trends by Category', 'Top Websites', 'Substack by Category', or 'TikTok Trending Hashtags by Category'. Use the official name. Without it those feeds mix every board. Only omit on a first pull to learn the official names.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      }
+    }
+  ],
+  "env_keys": [],
+  "header_keys": [
+    "Authorization"
+  ],
+  "query_keys": []
+}

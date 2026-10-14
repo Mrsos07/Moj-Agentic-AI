@@ -87,13 +87,44 @@ def block(items: List[Dict[str, Any]]) -> str:
     )
 
 
+#: كلمات توجيه في أوامر المالك («انشر منشوراً عن…») — ليست موضوع البحث
+_DIRECTIVE_HEAD = re.compile(
+    r"^(?:(?:لو\s+سمحت|رجاءً?|من\s+فضلك|يا\s+\S+)\s+)?"
+    r"(?:(?:انشر|أنشر|اكتب|أكتب|جهّز|جهز|حضّر|حضر|سوّ|سوي|اعمل|أنشئ|انشئ|ابي|أبي|ابغى|أبغى|ابيك|أبيك|نبي|"
+    r"ودي|أريد|اريد|غرّد|غرد|تكتب|تنشر|تجهّز|تجهز|تسوّي|تسوي|تعمل|تغرّد|تغرد)\s+)*"
+    r"(?:(?:لي|لنا)\s+)?"
+    r"(?:(?:منشوراً|منشورا|منشور|تغريدة|تغريده|بوست|ثريداً|ثريدا|ثريد|محتوى(?:\s+قوي)?|مقالاً|مقال|اقتباس(?:اً)?)\s+)*"
+    r"(?:(?:عن|حول|بخصوص|بشأن|في)\s+)?"
+    r"(?:(?:هاشتاق|هاشتاغ|الهاشتاق|وسم|الوسم|ترند|الترند|موضوع|خبر)\s+)?")
+_DIRECTIVE_TAIL = re.compile(
+    r"\s+(?:بما\s+يناسب|بصياغة|بأسلوب|باسلوب|بنبرة|بلهجة|مع\s+زاوية|مع\s+ذكر|مع\s+صورة|دون\s|بدون\s|"
+    r"وخلّ|وخل\s|وركّز|وركز\s|بشكل\s|باختصار|بحيث|على\s+أن|مناسب\s+ل)")
+
+
+def clean_query(text: str) -> str:
+    """أمر المالك ← موضوع صالح لمحرّك البحث. قيس في السجلات: كان Tavily يُسأل حرفياً
+    «انشر منشوراً عن هاشتاق #… بما يناسب تخصصك ونبرة» بدل «شكرا ابطال الدفاع الجوي»."""
+    q = re.sub(r"\s+", " ", (text or "").replace("«", " ").replace("»", " ")).strip()
+    q = re.sub(r"#(\w+)", lambda m: m.group(1).replace("_", " "), q)      # الوسم ← كلماته
+    q = _DIRECTIVE_HEAD.sub("", q, count=1)
+    cut = _DIRECTIVE_TAIL.search(q)
+    if cut and len(q[:cut.start()].split()) >= 2:
+        q = q[:cut.start()]
+    q = q.strip(" ،,.:؛-—")
+    return q if len(q.split()) >= 1 and len(q) >= 3 else re.sub(r"\s+", " ", text or "").strip()
+
+
 def augment_brief(brief: str, query: str, context: "ExecutionContext", material: str = "") -> str:
     """أضف كتلة البحث للبريف إن كان البحث مفعّلاً ومتاحاً ووُجدت نتائج.
     ``material``: نص الموضوع/التغريدة — يُقرأ منه أول رابط خارجي بأداة «قراءة صفحات»."""
     rules = context.config.business_rules or {}
     if not query or not bool(rules.get("research_before_writing", True)):
         return brief
+    query = clean_query(query)
     items = gather(context, query, material or brief)
+    # سجلّ الدورة: أي أداة استُخدمت ولأي استعلام (كان غير مسجّل فلا يُعرف هل بحث الموظف أصلاً)
+    context.scratch.setdefault("research_log", []).append(
+        {"query": query[:160], "sources": list(dict.fromkeys(i.get("source", "") for i in items)), "items": len(items)})
     if not items:
         return brief
     context.scratch["research"] = {"query": query, "items": items}
