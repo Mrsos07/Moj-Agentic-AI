@@ -20,9 +20,14 @@
 """
 from __future__ import annotations
 
+import contextvars
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+#: مالك النداءات الجارية في هذا الخيط/السياق: (user_id, purpose). تضبطه دورة الموظف
+#: (purpose="employee") فيوجّه ``RoutedLLMProvider`` كل نداءات الدورة لنموذج مالكه.
+LLM_OWNER: contextvars.ContextVar = contextvars.ContextVar("llm_owner", default=None)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini"
@@ -87,6 +92,14 @@ class LLMEndpoint:
         return bool(self.api_key) and self.provider != "none"
 
     @property
+    def cache_key(self) -> tuple:
+        """هوية العميل (بلا المفتاح نصاً) — لإعادة استخدام عميل واحد لكل مزوّد/نموذج/مفتاح."""
+        import hashlib
+
+        return (self.provider, self.base_url or "", self.model,
+                hashlib.sha256(self.api_key.encode()).hexdigest()[:16])
+
+    @property
     def is_openrouter(self) -> bool:
         return self.provider == "openrouter"
 
@@ -140,12 +153,24 @@ class LLMEndpoint:
         return kwargs
 
 
-def resolve_llm(model: Optional[str] = None) -> LLMEndpoint:
-    """اختر المزوّد الفعّال. OpenRouter أولاً، ثم OpenAI، ثم لا شيء.
+def resolve_llm(model: Optional[str] = None, *, user_id: Optional[int] = None,
+                purpose: str = "chat") -> LLMEndpoint:
+    """اختر المزوّد الفعّال. اختيار المستخدم أولاً (إن مُرّر ``user_id`` وربط مزوّداً لهذا
+    الغرض)، وإلا إعداد النظام: OpenRouter، ثم OpenAI، ثم لا شيء.
 
     Args:
         model: تجاوز صريح لاسم الموديل (يُستخدم كما هو دون تأهيل).
+        user_id/purpose: ``purpose`` = "chat" (المنسّق والمحادثات) أو "employee" (دورات الموظفين).
     """
+    if user_id:
+        try:
+            from app.services.user_llm import endpoint_for
+
+            ep = endpoint_for(user_id, purpose)
+            if ep is not None:
+                return ep
+        except Exception:  # noqa: BLE001 - إعدادات المستخدم لا توقف الاستدلال: نرجع للنظام
+            pass
     max_tokens = _int_setting("OPENAI_MAX_TOKENS", 2000)
     temperature = _float_setting("OPENAI_TEMPERATURE", 0.7)
 

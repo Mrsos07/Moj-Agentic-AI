@@ -300,11 +300,17 @@ class RuntimeManager(IRuntimeManager):
 
         # 3) RUN one cognitive cycle
         cycle: CognitiveCycle = self._cycle_factory()
+        # كل نداءات LLM في هذه الدورة تذهب لنموذج «الموظفين» الذي اختاره مالكه (إن اختار)
+        from app.core.llm_provider import LLM_OWNER
+
+        owner_token = LLM_OWNER.set((getattr(config, "user_id", None), "employee"))
         try:
             report = cycle.run(context)
         except Exception as exc:  # noqa: BLE001
             logger.exception("cycle crashed for %s", employee_id)
             report = {"cycle_id": cycle_id, "employee_id": employee_id, "error": str(exc)}
+        finally:
+            LLM_OWNER.reset(owner_token)
 
         # 4) PERSIST
         try:

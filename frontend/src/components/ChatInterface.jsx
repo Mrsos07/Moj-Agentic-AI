@@ -7,6 +7,7 @@ import MessageInput from './MessageInput'
 import AccountsDrawer from './AccountsDrawer'
 import AgentsDrawer from './AgentsDrawer'
 import TeamBar from './TeamBar'
+import ChatModelPicker from './ChatModelPicker'
 import authHeaders from '../authHeaders'
 import usePinnedAccount from '../hooks/usePinnedAccount'
 import logoLight from '../assets/logos/logo-light.png'
@@ -583,6 +584,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
               <span className="hidden md:inline text-sm font-bold">
                 {employeeChat ? `🤖 الموظف @${employeeChat}` : '🧭 المنسّق العام'}
               </span>
+              <ChatModelPicker />
               {pinnedAccount && (
                 <div
                   className="flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full bg-primary/10 text-primary border border-primary/20"

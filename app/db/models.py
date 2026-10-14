@@ -195,6 +195,22 @@ class TelegramIntegration(Base):
 # configuration; the runtime that operates it is temporary.
 # ══════════════════════════════════════════════════════════════════════════
 
+class UserLLMSettings(Base):
+    """مزوّد النماذج الذي ربطه المستخدم: مفاتيحه (مشفّرة بالخزنة) واختياره لنموذج الشات
+    ونموذج الموظفين. جدول جديد ⇒ يُنشأ تلقائياً بـ create_all بلا ترحيل."""
+    __tablename__ = "user_llm_settings"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    keys_json = Column(Text, nullable=True)          # {"openai": "<fernet token>", ...} — لا نص صريح أبداً
+    chat_provider = Column(String(30), nullable=True)
+    chat_model = Column(String(200), nullable=True)
+    employee_provider = Column(String(30), nullable=True)
+    employee_model = Column(String(200), nullable=True)
+    status_json = Column(Text, nullable=True)        # آخر اختبار لكل مزوّد {provider: {ok, error, at}}
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class AIEmployee(Base):
     """Permanent, isolated configuration of one autonomous AI Employee."""
     __tablename__ = "ai_employees"

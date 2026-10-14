@@ -25,6 +25,18 @@
   `OPENROUTER_API_KEY` directly in a new call site** — the choice lives in one
   place because there are 8 call sites and a forgotten one silently talks to the
   wrong provider (or the wrong account's bill).
+- **Per-user model provider** (Settings → «مزوّد النماذج», chat header picker): a user links
+  OpenRouter / OpenAI / Claude / Google / Ollama with their OWN key (Fernet-encrypted in
+  `user_llm_settings`, never returned — last 4 chars only) and picks two independent models:
+  `chat` (coordinator + chat conversations) and `employee` (automated cycles).
+  `resolve_llm(user_id=…, purpose="chat"|"employee")` returns the user's endpoint or falls back
+  to the system one; calls WITHOUT `user_id` are unchanged. Employee cycles reach it through
+  `RoutedLLMProvider` (the injected platform LLM) + the `LLM_OWNER` contextvar set around
+  `cycle.run` in `runtime/manager.py`; the WebSocket handler sets `(user, "chat")`. A failing user
+  model (key/credit) falls back to the system model for that call. Embeddings and images ALWAYS
+  stay on the system endpoint. Ollama's URL is server config (`OLLAMA_BASE_URL`), never user
+  input (SSRF). Catalog: `app/core/llm_catalog.py`; service: `app/services/user_llm.py`; API:
+  `/api/llm/*`; test: `verify_llm_providers.py [--live]`.
 - OpenRouter wins whenever `OPENROUTER_API_KEY` is set; OpenAI is the fallback.
   Both use the same `openai` package — only `base_url` and the model name differ.
 - **Model names must be provider-qualified**: `openai/gpt-4o-mini`, not `gpt-4`.
