@@ -29,6 +29,7 @@ class XPlatformMCP(IMCPServer):
     _TOOLS = [
         "post_tweet", "post_thread", "quote", "reply", "retweet", "like",
         "follow", "unfollow", "bookmark", "delete_tweet", "update_profile",
+        "unlike", "unretweet", "unbookmark",
         "schedule_post", "cancel_scheduled_post", "list_scheduled_posts",
         "list_cookies", "stats",
     ]
@@ -101,7 +102,14 @@ class XPlatformMCP(IMCPServer):
             elif tool == "bookmark":
                 res = x_bridge.bookmark(cookie_label=label, tweet_url=p["tweet_url"])
             elif tool == "delete_tweet":
-                res = x_bridge.delete_tweet(cookie_label=label, tweet_id=p["tweet_id"])
+                res = x_bridge.delete_tweet(cookie_label=label, tweet_id=str(p["tweet_id"]),
+                                            expected_handle=p.get("expected_handle", ""))
+            elif tool == "unlike":
+                res = x_bridge.undo_like(cookie_label=label, tweet_url=p["tweet_url"])
+            elif tool == "unretweet":
+                res = x_bridge.undo_repost(cookie_label=label, tweet_url=p["tweet_url"])
+            elif tool == "unbookmark":
+                res = x_bridge.undo_bookmark(cookie_label=label, tweet_url=p["tweet_url"])
             elif tool == "update_profile":
                 res = x_bridge.update_profile(cookie_label=label, **{
                     k: p.get(k, "") for k in

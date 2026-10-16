@@ -259,6 +259,41 @@ defences it forced are still in the code and still required if you set
 - The xsuite server (`app/x/app.py`, port 5789) is a child process that imports
   these modules at startup: after editing `x_post.py`/`x_actions.py`, kill the
   5789 listener — the bridge respawns it with fresh code on the next X action.
+- **Scope every button to the target.** On a `/status/` page the parent tweet is
+  rendered ABOVE a reply: use `x_actions.focal_tweet()` (the article whose time
+  link ends in `/status/<id>`), never `page.locator(...).first`. On a profile the
+  sidebar «Who to follow» always has ~3 `-follow` buttons (measured): use
+  `[data-testid="primaryColumn"] [data-testid="placementTracking"]` — the old
+  unscoped `follow_user` could follow a suggested account instead.
+- Undo actions are idempotent and verified: `undo_like/undo_repost/undo_bookmark/
+  unfollow/follow` return `"done"` (state flipped) or `"already"` (nothing to undo);
+  the old ones clicked `like`/`bookmark` when `unlike`/`removeBookmark` was absent,
+  i.e. they LIKED/BOOKMARKED instead of undoing. The API returns `already` so the
+  owner is told «لم يكن قائماً» instead of a fake success.
+- Delete (`x_delete.py`) = focal tweet + `expected_handle` ownership check + the
+  exact «Delete/حذف» menuitem + `DeleteTweet` GraphQL 200 without `errors`
+  (fallback: tweet gone after reload). `/api/delete-tweet` used to ignore the
+  `False` return and answer «تم الحذف ✅» for a tweet it never found.
+
+## Owner-driven X account management from the coordinator (`x_account`)
+- `app/aeos/services/x_control.py`, coordinator/employee tool `x_account`:
+  list_posts (from the cycle log; `live=true` reads X), delete_post, unlike,
+  unretweet, unbookmark, like, retweet, bookmark, follow, unfollow,
+  update_profile, list_scheduled, cancel_scheduled. Runs directly on the `x` MCP
+  with the employee's cookie (no cycle/LLM), in the background; the verified
+  result is pushed via `notify_owner`.
+- Irreversible actions (delete_post, unfollow, update_profile, cancel_scheduled)
+  are two-phase: preview + `confirmation_id`, executable only from a LATER owner
+  message (`_Tools.turn`), same user/employee/action. Tool results are not in
+  chat history, so pending previews are injected into the next system prompt
+  (`pending_brief`), and the next message either confirms or drops them
+  (`drop_stale`). While a preview is pending, main-chat messages route to the
+  coordinator (`has_pending_x`), as do delete/undo messages (`is_x_management`)
+  — the legacy X agent deleted immediately with no ownership check.
+- Deleted ids → `flags.deleted_posts` (hidden from listings, «آخر» moves on);
+  undone targets → `flags.engaged_urls` so cycles don't redo them.
+  Test: `verify_x_control.py` (80 checks, offline). Live checks so far were
+  read-only («already» paths + delete refusal on another account's tweet).
 
 ## Backend "hangs" are usually a zombie reloader, not a blocked event loop
 - Symptom: port 8000 accepts TCP but answers nothing (even `/api/aeos/health`),

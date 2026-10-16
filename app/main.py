@@ -1105,7 +1105,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # ── المنسّق العام: رسالة للفريق كله (≥2 موظف مذكور أو «كل الموظفين») ──
                 team_mentions = orchestrator.mentioned_employees(user_message, user_id)
-                if orchestrator.is_fleet_message(user_message, team_mentions):
+                # إدارة حساب X بلا موظف مخاطَب (حذف/تراجع/إلغاء متابعة) ⇒ المنسّق أيضاً:
+                # معاينة + تأكيد + تحقق ملكية، بدل وكيل X القديم الذي ينفّذ فوراً.
+                # ويشمل ردّ المالك على معاينة معلّقة («نعم أكّد»): لو ذهب لمسار الموظف المثبّت
+                # أو الوكلاء القدامى لما وصل التأكيد للمنسّق الذي طلبه.
+                x_mgmt = (len(team_mentions) != 1 and not str(session_id or "").startswith("emp_")
+                          and (orchestrator.is_x_management(user_message)
+                               or orchestrator.has_pending_x(_norm_uid(user_id))))
+                if orchestrator.is_fleet_message(user_message, team_mentions) or x_mgmt:
                     coord = await _run_coordinator(user_message, user_id, pinned_account,
                                                    db, session_id)
                     if coord:

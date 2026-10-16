@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from typing import Optional
 
@@ -367,8 +368,40 @@ def repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_a
             browser.close()
 
 
-def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
-    """Undo repost (unretweet) a tweet by URL."""
+def focal_tweet(page: Page, tweet_url: str):
+    """التغريدة الرئيسية في صفحة ``/status/<id>`` (رابط وقتها ينتهي بالمعرّف).
+
+    ``page.locator(...).first`` خطأ هنا: صفحة الرد تعرض التغريدة الأصلية فوقه، فكان
+    التراجع عن إعجاب/ريتويت يقع على تغريدة أخرى. إن لم نجد المعرّف نعود لأول تغريدة."""
+    m = re.search(r"/status/(\d+)", tweet_url or "")
+    if m:
+        loc = page.locator(f"article[data-testid='tweet']:has(a[href$='/status/{m.group(1)}'] time)")
+        try:
+            loc.first.wait_for(state="visible", timeout=15_000)
+            return loc.first
+        except Exception:
+            pass
+    return page.locator("article").first
+
+
+def _state_in(scope, testid: str, timeout_ms: int = 8_000) -> bool:
+    """انتظر ظهور زر بحالة معيّنة (like/unlike/retweet/unretweet...) داخل النطاق."""
+    deadline = time.time() + (timeout_ms / 1000.0)
+    loc = scope.locator(f"[data-testid='{testid}']")
+    while time.time() < deadline:
+        try:
+            if loc.count() and loc.first.is_visible():
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
+
+def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000) -> str:
+    """Undo repost (unretweet). Returns ``"done"`` (verified) or ``"already"`` (was not reposted).
+
+    كان يضغط نص «Undo repost» الإنجليزي فقط، بلا أي تحقق، على أول تغريدة في الصفحة."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
         context = browser.new_context(storage_state=storage_state_path)
@@ -376,22 +409,31 @@ def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, w
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
             _goto_tweet(page, tweet_url)
-
-            # Step 1: click unretweet button
-            page.get_by_test_id("unretweet").click()
-            page.wait_for_timeout(1000)
-
-            # Step 2: click "Undo repost" text
-            page.get_by_text("Undo repost").click()
-
+            tweet = focal_tweet(page, tweet_url)
+            if not _state_in(tweet, "unretweet", timeout_ms=3_000):
+                if _state_in(tweet, "retweet", timeout_ms=3_000):
+                    return "already"
+                raise RuntimeError("لم أجد زر إعادة النشر في التغريدة")
+            tweet.locator("[data-testid='unretweet']").first.click()
+            confirm = page.locator("[data-testid='unretweetConfirm']")
+            if not _state_in(page, "unretweetConfirm", timeout_ms=5_000):
+                confirm = page.locator("div[role='menu'] [role='menuitem']").filter(
+                    has_text=re.compile(r"Undo repost|التراجع عن إعادة النشر|إلغاء إعادة النشر", re.I))
+            confirm.first.click(timeout=8_000)
+            if not _state_in(tweet, "retweet", timeout_ms=8_000):
+                raise RuntimeError("لم يتأكد التراجع عن إعادة النشر (لم يعد الزر إلى retweet)")
             page.wait_for_timeout(wait_after_ms)
+            return "done"
         finally:
             context.close()
             browser.close()
 
 
-def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
-    """Undo like (unlike) a tweet by URL."""
+def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000) -> str:
+    """Undo like. Returns ``"done"`` (verified) or ``"already"`` (was not liked).
+
+    كان يضغط ``like`` أيضاً إن لم يجد ``unlike`` — أي أنه **يُعجب** بتغريدة لم تكن
+    معجَباً بها بدل أن يتراجع."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
         context = browser.new_context(storage_state=storage_state_path)
@@ -399,22 +441,16 @@ def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wai
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
             _goto_tweet(page, tweet_url)
-
-            # Same selectors - clicking again will unlike
-            selectors = [
-                "div[data-testid='unlike']",
-                "button[data-testid='unlike']",
-                "div[role='button'][data-testid='unlike']",
-                "div[data-testid='like']",
-                "button[data-testid='like']",
-                "[aria-label*='Unlike']",
-                "[aria-label*='Liked']",
-                "[aria-label*='إلغاء الإعجاب']",
-                "[aria-label*='أعجبني']",
-            ]
-            _click_first_visible(page, selectors, timeout_ms=60_000)
-
+            tweet = focal_tweet(page, tweet_url)
+            if not _state_in(tweet, "unlike", timeout_ms=3_000):
+                if _state_in(tweet, "like", timeout_ms=3_000):
+                    return "already"
+                raise RuntimeError("لم أجد زر الإعجاب في التغريدة")
+            tweet.locator("[data-testid='unlike']").first.click()
+            if not _state_in(tweet, "like", timeout_ms=8_000):
+                raise RuntimeError("لم يتأكد إلغاء الإعجاب (لم يعد الزر إلى like)")
             page.wait_for_timeout(wait_after_ms)
+            return "done"
         finally:
             context.close()
             browser.close()

@@ -1,8 +1,15 @@
+import json
 import os
+import re
+import time
 from typing import Optional
+
 from playwright.sync_api import sync_playwright
 
 DEFAULT_TIMEOUT = 30_000
+
+#: عنصر قائمة «حذف» بالضبط — لا أي نص يحوي «حذف» في الصفحة
+_DELETE_ITEM = re.compile(r"^\s*(Delete|حذف)\s*$", re.I)
 
 
 def build_tweet_url_by_id(tweet_id: str) -> str:
@@ -11,64 +18,61 @@ def build_tweet_url_by_id(tweet_id: str) -> str:
     return f"https://x.com/i/status/{tweet_id}"
 
 
-def delete_tweet_by_id(storage_state_path: str, tweet_id: str, headless: bool = True, wait_after_ms: int = 3000) -> bool:
-    """
-    حذف تغريدة من X باستخدام ID التغريدة فقط.
-    
-    Args:
-        storage_state_path: مسار ملف الكوكيز
-        tweet_id: ID التغريدة
-        headless: تشغيل بدون واجهة
-        wait_after_ms: وقت الانتظار بعد الحذف
-    
-    Returns:
-        True إذا تم الحذف بنجاح
-    """
+def _tweet_id(url: str) -> str:
+    m = re.search(r"/status/(\d+)", url or "")
+    return m.group(1) if m else ""
+
+
+def delete_tweet_by_id(storage_state_path: str, tweet_id: str, headless: bool = True,
+                       wait_after_ms: int = 3000, expected_handle: str = "") -> bool:
+    """حذف تغريدة من X باستخدام ID التغريدة فقط (انظر ``delete_tweet``)."""
     tweet_url = build_tweet_url_by_id(tweet_id)
-    return delete_tweet(storage_state_path, tweet_url, headless, wait_after_ms)
+    return delete_tweet(storage_state_path, tweet_url, headless, wait_after_ms,
+                        expected_handle=expected_handle)
 
 
-def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True, wait_after_ms: int = 3000) -> bool:
+def _delete_confirmed(resp_box: list) -> Optional[bool]:
+    """نتيجة طلب DeleteTweet الملتقَط: True نجح، False رفضه X، None لم يصل بعد."""
+    for resp in resp_box:
+        try:
+            if resp.status != 200:
+                return False
+            body = json.loads(resp.text() or "{}")
+        except Exception:
+            continue
+        if body.get("errors"):
+            return False
+        return True
+    return None
+
+
+def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
+                 wait_after_ms: int = 3000, expected_handle: str = "") -> bool:
+    """حذف تغريدة يملكها الحساب، مع تأكيد فعلي.
+
+    - الهدف هو التغريدة **الرئيسية** في الصفحة (رابط وقتها ينتهي بـ ``/status/<id>``)
+      لا أول تغريدة: صفحة الرد تعرض التغريدة الأصلية فوقه.
+    - ``expected_handle``: إن مُرّر نرفض الحذف إن لم يكن كاتب التغريدة هو الحساب نفسه.
+    - النجاح = ردّ X على طلب ``DeleteTweet`` بلا أخطاء، أو اختفاء التغريدة بعد إعادة
+      التحميل. إغلاق نافذة التأكيد وحده ليس دليلاً.
+
+    يعيد True عند التأكد فقط، ويرمي RuntimeError بسبب واضح في كل فشل.
     """
-    حذف تغريدة من X باستخدام رابطها.
-    
-    Args:
-        storage_state_path: مسار ملف الكوكيز
-        tweet_url: رابط التغريدة المراد حذفها
-        headless: تشغيل بدون واجهة
-        wait_after_ms: وقت الانتظار بعد الحذف
-    
-    Returns:
-        True إذا تم الحذف بنجاح، False إذا فشل
-    """
+    tweet_id = _tweet_id(tweet_url)
+    if not tweet_id:
+        raise RuntimeError("رابط/معرّف التغريدة غير صالح")
+    expected = (expected_handle or "").strip().lstrip("@").lower()
     chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-    
+
     with sync_playwright() as p:
-        # إعدادات أفضل للـ headless
-        launch_args = {
-            "channel": chrome_channel,
-            "headless": headless,
-        }
-        
-        # في وضع headless، أضف إعدادات إضافية لتجنب المشاكل
+        launch_args = {"channel": chrome_channel, "headless": headless}
         if headless:
-            launch_args.update({
-                "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-web-security",
-                    "--disable-features=VizDisplayCompositor",
-                    "--window-size=1920,1080"
-                ]
-            })
-        
+            launch_args["args"] = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                                   "--window-size=1920,1080"]
         try:
             browser = p.chromium.launch(**launch_args)
         except Exception:
             browser = p.chromium.launch(headless=headless)
-        
-        # إعدادات السياق مع viewport مناسب
         context = browser.new_context(
             storage_state=storage_state_path,
             viewport={"width": 1920, "height": 1080},
@@ -76,86 +80,56 @@ def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
         )
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
-        
+        delete_responses: list = []
+        page.on("response", lambda r: delete_responses.append(r)
+                if "/DeleteTweet" in r.url and r.request.method == "POST" else None)
+        focal_sel = f"article[data-testid='tweet']:has(a[href$='/status/{tweet_id}'] time)"
+
         try:
-            # الذهاب إلى صفحة التغريدة
-            print(f"[DEBUG] Navigating to: {tweet_url}")
             page.goto(tweet_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-            
-            # تحقق إذا كانت الصفحة تعرض خطأ (تغريدة محذوفة)
-            current_url = page.url
-            print(f"[DEBUG] Current URL after navigation: {current_url}")
-            
-            if "status" not in current_url and "i/web/status" not in current_url:
-                print("[DEBUG] Tweet not found or deleted")
-                return False
-            
-            # انتظار ظهور التغريدة مع تحقق أفضل
-            tweet = page.get_by_test_id("tweet")
-            if tweet.count() == 0:
-                print("[DEBUG] No tweet elements found with test_id='tweet'")
-                # جرب selectors أخرى
-                tweet = page.locator('[data-testid="tweet"]')
-                if tweet.count() == 0:
-                    tweet = page.locator('article[role="article"]')
-                    if tweet.count() == 0:
-                        print("[DEBUG] No tweet found with any selector")
-                        return False
-            
-            print(f"[DEBUG] Found {tweet.count()} tweet elements")
-            tweet.first.wait_for(state="visible", timeout=30_000)
-            
-            # الضغط على زر القائمة (caret)
-            caret = tweet.get_by_test_id("caret")
-            if not caret.count():
-                # fallback: البحث عن زر المزيد
-                caret = page.locator('[aria-label="More"]').first
-                if not caret.count():
-                    caret = page.locator('[aria-label="المزيد"]').first
-            
-            caret.first.wait_for(state="visible", timeout=15_000)
-            caret.first.click()
-            page.wait_for_timeout(800)
-            
-            # الضغط على Delete
-            delete_btn = page.get_by_text("Delete")
-            if not delete_btn.count():
-                delete_btn = page.get_by_text("حذف")
-            if not delete_btn.count():
-                # fallback: البحث في menuitem
-                delete_btn = page.locator("div[role='menuitem']:has-text('Delete')")
-                if not delete_btn.count():
-                    delete_btn = page.locator("div[role='menuitem']:has-text('حذف')")
-            if not delete_btn.count():
-                # fallback: البحث بأي طريقة ممكنة
-                delete_btn = page.locator("[role='menuitem']").filter(has_text="Delete")
-                if not delete_btn.count():
-                    delete_btn = page.locator("[role='menuitem']").filter(has_text="حذف")
-            if not delete_btn.count():
-                # fallback: بحث عام
-                delete_btn = page.locator("text=Delete")
-                if not delete_btn.count():
-                    delete_btn = page.locator("text=حذف")
-            
-            print(f"[DEBUG] Found {delete_btn.count()} delete buttons")
-            if delete_btn.count() == 0:
-                print("[DEBUG] No delete button found, taking screenshot for debug")
-                page.screenshot(path="debug_delete_menu.png")
-                return False
-            
-            delete_btn.first.wait_for(state="visible", timeout=10_000)
-            delete_btn.first.click()
-            page.wait_for_timeout(800)
-            
-            # تأكيد الحذف
+            focal = page.locator(focal_sel)
+            try:
+                focal.first.wait_for(state="visible", timeout=25_000)
+            except Exception:
+                raise RuntimeError("التغريدة غير موجودة أو محذوفة مسبقاً أو لا يمكن عرضها")
+            focal = focal.first
+
+            href = focal.locator(f"a[href$='/status/{tweet_id}']").first.get_attribute("href") or ""
+            author = href.strip("/").split("/")[0].lower() if href else ""
+            if expected and author and author != expected:
+                raise RuntimeError(f"رفض الحذف: التغريدة لحساب @{author} وليست لـ @{expected}")
+
+            focal.get_by_test_id("caret").first.click()
+            item = page.locator("div[role='menu'] [role='menuitem']").filter(has_text=_DELETE_ITEM)
+            try:
+                item.first.wait_for(state="visible", timeout=10_000)
+            except Exception:
+                page.keyboard.press("Escape")
+                raise RuntimeError("لا يوجد خيار «حذف» — التغريدة ليست من منشورات هذا الحساب")
+            item.first.click()
+
             confirm = page.get_by_test_id("confirmationSheetConfirm")
             confirm.wait_for(state="visible", timeout=10_000)
             confirm.click()
-            
-            page.wait_for_timeout(wait_after_ms)
+
+            deadline = time.time() + 15
+            verdict = None
+            while time.time() < deadline and verdict is None:
+                page.wait_for_timeout(300)
+                verdict = _delete_confirmed(delete_responses)
+            if verdict is False:
+                raise RuntimeError("رفض X طلب الحذف")
+            if verdict is None:
+                # لم نلتقط ردّ الشبكة: التحقق بإعادة فتح التغريدة
+                page.goto(tweet_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(6000)
+                if page.locator(focal_sel).count():
+                    raise RuntimeError("لم يتأكد الحذف: التغريدة ما زالت ظاهرة")
+            page.wait_for_timeout(min(wait_after_ms, 1500))
             return True
-            
+
+        except RuntimeError:
+            raise
         except Exception as e:
             try:
                 page.screenshot(path="debug_delete.png", full_page=True)
