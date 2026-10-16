@@ -1781,7 +1781,7 @@ class DeleteOwnPostCapability(ICapability):
 
         res = context.mcp.call(MCPRequest(
             employee_id=context.config.id, tool="delete_tweet",
-            params={"tweet_id": tweet_id}, context=_x_context(context),
+            params={"tweet_id": tweet_id, "expected_handle": handle}, context=_x_context(context),
         ))
         if not res.success:
             return CapabilityResult.fail(res.error, self.name)

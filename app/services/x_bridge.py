@@ -49,6 +49,7 @@ _BROWSER_ENDPOINTS = (
     "/api/post", "/api/post-thread", "/api/quote", "/api/reply", "/api/repost",
     "/api/like", "/api/follow", "/api/unfollow", "/api/bookmark",
     "/api/delete-tweet", "/api/profile/update",
+    "/api/undo-like", "/api/undo-repost", "/api/undo-bookmark",
 )
 
 
@@ -465,14 +466,32 @@ def quote(cookie_label: str, tweet_url: str, text: str, media_url: str = "",
 
 
 # ── حذف تغريدة ──
-def delete_tweet(cookie_label: str, tweet_id: str, headless: bool = True) -> Dict[str, Any]:
-    """حذف تغريدة عبر API"""
+def delete_tweet(cookie_label: str, tweet_id: str, headless: bool = True,
+                 expected_handle: str = "") -> Dict[str, Any]:
+    """حذف تغريدة عبر API. ``expected_handle``: يرفض الخادم الحذف إن لم تكن التغريدة لهذا الحساب."""
     payload = {
         "cookie_label": cookie_label,
         "tweet_id": tweet_id,
         "headless": headless,
+        "expected_handle": expected_handle,
     }
     return _api_call("POST", "/api/delete-tweet", json=payload)
+
+
+# ── تراجع عن تفاعل (إعجاب / إعادة نشر / حفظ) — يعيد already=True إن لم يكن موجوداً ──
+def undo_like(cookie_label: str, tweet_url: str, headless: bool = True) -> Dict[str, Any]:
+    return _api_call("POST", "/api/undo-like", json={
+        "cookie_label": cookie_label, "tweet_url": tweet_url, "headless": headless})
+
+
+def undo_repost(cookie_label: str, tweet_url: str, headless: bool = True) -> Dict[str, Any]:
+    return _api_call("POST", "/api/undo-repost", json={
+        "cookie_label": cookie_label, "tweet_url": tweet_url, "headless": headless})
+
+
+def undo_bookmark(cookie_label: str, tweet_url: str, headless: bool = True) -> Dict[str, Any]:
+    return _api_call("POST", "/api/undo-bookmark", json={
+        "cookie_label": cookie_label, "tweet_url": tweet_url, "headless": headless})
 
 
 # ── جدولة تغريدة (مع نشر تلقائي في app/x) ──

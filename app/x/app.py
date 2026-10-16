@@ -1077,9 +1077,9 @@ def api_undo_repost():
     storage_state_path = str(COOKIES_DIR / c['filename'])
     op_id = log_operation('undo_repost', cookie_label, 'pending', 'بدأت عملية التراجع عن إعادة النشر', meta_json=json.dumps({'headless': headless, 'tweet_url': tweet_url}, ensure_ascii=False))
     try:
-        undo_repost_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, headless=headless, wait_after_ms=2000)
+        state = undo_repost_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, headless=headless, wait_after_ms=2000)
         log_operation('undo_repost', cookie_label, 'success', 'تم التراجع عن إعادة النشر ✅')
-        return jsonify({'success': True, 'task_id': op_id, 'message': 'تم التراجع عن إعادة النشر ✅'}), 200
+        return jsonify({'success': True, 'verified': True, 'already': state == 'already', 'task_id': op_id, 'message': 'تم التراجع عن إعادة النشر ✅'}), 200
     except Exception as e:
         log_operation('undo_repost', cookie_label, 'error', f'فشل التراجع عن إعادة النشر: {e}')
         return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
@@ -1103,9 +1103,9 @@ def api_undo_like():
     storage_state_path = str(COOKIES_DIR / c['filename'])
     op_id = log_operation('undo_like', cookie_label, 'pending', 'بدأت عملية التراجع عن الإعجاب', meta_json=json.dumps({'headless': headless, 'tweet_url': tweet_url}, ensure_ascii=False))
     try:
-        undo_like_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, headless=headless, wait_after_ms=2000)
+        state = undo_like_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, headless=headless, wait_after_ms=2000)
         log_operation('undo_like', cookie_label, 'success', 'تم التراجع عن الإعجاب ✅')
-        return jsonify({'success': True, 'task_id': op_id, 'message': 'تم التراجع عن الإعجاب ✅'}), 200
+        return jsonify({'success': True, 'verified': True, 'already': state == 'already', 'task_id': op_id, 'message': 'تم التراجع عن الإعجاب ✅'}), 200
     except Exception as e:
         log_operation('undo_like', cookie_label, 'error', f'فشل التراجع عن الإعجاب: {e}')
         return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
@@ -1129,9 +1129,9 @@ def api_undo_bookmark():
     storage_state_path = str(COOKIES_DIR / c['filename'])
     op_id = log_operation('undo_bookmark', cookie_label, 'pending', 'بدأت عملية التراجع عن البوك مارك', meta_json=json.dumps({'headless': headless, 'tweet_url': tweet_url}, ensure_ascii=False))
     try:
-        undo_bookmark_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, headless=headless, wait_after_ms=2000)
+        state = undo_bookmark_tweet(storage_state_path=storage_state_path, tweet_url=tweet_url, headless=headless, wait_after_ms=2000)
         log_operation('undo_bookmark', cookie_label, 'success', 'تم التراجع عن البوك مارك ✅')
-        return jsonify({'success': True, 'task_id': op_id, 'message': 'تم التراجع عن البوك مارك ✅'}), 200
+        return jsonify({'success': True, 'verified': True, 'already': state == 'already', 'task_id': op_id, 'message': 'تم التراجع عن البوك مارك ✅'}), 200
     except Exception as e:
         log_operation('undo_bookmark', cookie_label, 'error', f'فشل التراجع عن البوك مارك: {e}')
         return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
@@ -1463,9 +1463,9 @@ def api_follow():
         return jsonify({"success": False, "error": "cookie not found"}), 404
 
     try:
-        follow_user(cookie_path, profile_url, headless=headless, wait_after_ms=wait_after_ms)
+        state = follow_user(cookie_path, profile_url, headless=headless, wait_after_ms=wait_after_ms)
         db_log_action(cookie_label, "follow", profile_url, True, "")
-        return jsonify({"success": True})
+        return jsonify({"success": True, "verified": True, "already": state == "already"})
     except Exception as e:
         db_log_action(cookie_label, "follow", profile_url, False, str(e))
         return jsonify({"success": False, "error": str(e)}), 500
@@ -1489,9 +1489,9 @@ def api_unfollow():
         return jsonify({"success": False, "error": "cookie not found"}), 404
 
     try:
-        unfollow_user(cookie_path, profile_url, headless=headless, wait_after_ms=wait_after_ms)
+        state = unfollow_user(cookie_path, profile_url, headless=headless, wait_after_ms=wait_after_ms)
         db_log_action(cookie_label, "unfollow", profile_url, True, "")
-        return jsonify({"success": True})
+        return jsonify({"success": True, "verified": True, "already": state == "already"})
     except Exception as e:
         db_log_action(cookie_label, "unfollow", profile_url, False, str(e))
         return jsonify({"success": False, "error": str(e)}), 500
@@ -1628,12 +1628,15 @@ def api_tweet_delete(tweet_id: int):
 def api_delete_tweet_by_id():
     data = request.get_json(force=True, silent=True) or {}
     cookie_label = (data.get('cookie_label') or '').strip()
-    tweet_id = (data.get('tweet_id') or '').strip()
+    tweet_id = str(data.get('tweet_id') or '').strip()
+    expected_handle = (data.get('expected_handle') or '').strip()
     headless = bool(data.get('headless', True))
-    
+
     if not cookie_label or not tweet_id:
         return jsonify({'success': False, 'error': 'cookie_label and tweet_id required'}), 400
-    
+    if not tweet_id.isdigit():
+        return jsonify({'success': False, 'error': 'tweet_id must be numeric'}), 400
+
     c = get_cookie_by_label(cookie_label)
     if not c:
         return jsonify({'success': False, 'error': 'cookie not found'}), 404
@@ -1642,9 +1645,13 @@ def api_delete_tweet_by_id():
     op_id = log_operation('delete_tweet', cookie_label, 'pending', f'بدأت عملية حذف التغريدة: {tweet_id}')
     
     try:
-        delete_tweet_by_id(storage_state_path, tweet_id, headless=headless)
+        # يرمي عند أي فشل؛ True فقط بعد تأكيد X (ردّ DeleteTweet أو اختفاء التغريدة)
+        if not delete_tweet_by_id(storage_state_path, tweet_id, headless=headless,
+                                  expected_handle=expected_handle):
+            raise RuntimeError('لم يتأكد الحذف')
         log_operation('delete_tweet', cookie_label, 'success', f'تم حذف التغريدة: {tweet_id}')
-        return jsonify({'success': True, 'task_id': op_id, 'message': 'تم حذف التغريدة بنجاح ✅'}), 200
+        return jsonify({'success': True, 'verified': True, 'tweet_id': tweet_id, 'task_id': op_id,
+                        'message': 'تم حذف التغريدة بنجاح ✅'}), 200
     except Exception as e:
         log_operation('delete_tweet', cookie_label, 'error', f'فشل حذف التغريدة: {e}')
         return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500
