@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
+import clonePersona from '../hooks/clonePersona'
 import {
   MdClose,
   MdArrowBack,
@@ -285,19 +286,20 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
     const handle = (form.clone_handle || '').trim().replace(/^@/, '')
     if (!handle) { onNotify?.('❗ أدخل يوزر الحساب المراد استنساخه أولاً.'); return }
     setBusy('clone')
-    onNotify?.(`🧬 جارِ تحليل أسلوب @${handle}... قد يستغرق دقيقة أو دقيقتين.`)
+    onNotify?.(`🧬 جارِ استنساخ هوية @${handle} بعمق (مئات التغريدات والردود من أشهر مختلفة)... من 3 إلى 5 دقائق.`)
     try {
-      const res = await axios.post('/api/aeos/persona/clone', {
+      const data = await clonePersona({
         account_username: form.account,
         target_handle: handle,
-        limit: 40,
         language: form.language || 'ar',
-      }, { headers: authHeaders(), timeout: 300000 })
-      applyPersona(res.data?.persona)
-      set('voice_profile', res.data?.voice_profile || null)
-      const tgt = res.data?.target || {}
-      const score = res.data?.fidelity?.score
+      }, { headers: authHeaders(), onProgress: (msg) => onNotify?.(`🧬 ${msg}`) })
+      applyPersona(data?.persona)
+      set('voice_profile', data?.voice_profile || null)
+      const tgt = data?.target || {}
+      const cov = tgt.coverage || {}
+      const score = data?.fidelity?.score
       onNotify?.(`🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} تغريدة و${tgt.reply_count ?? '?'} رداً (${tgt.pairs ?? 0} مع سياقها)` +
+        (cov.from ? ` من ${cov.from} إلى ${cov.to}` : '') +
         (score != null ? ` · درجة المطابقة ${score}%` : '') + '. راجع الحقول.')
     } catch (e) {
       onNotify?.(`❌ تعذّر استنساخ @${handle}: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)

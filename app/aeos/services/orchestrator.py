@@ -326,10 +326,10 @@ TOOLS: List[Dict[str, Any]] = [
     }},
     {"type": "function", "function": {
         "name": "clone_identity",
-        "description": ("استنسخ هوية حساب X (الأسلوب، الشخصية، طريقة الرد والتفاعل، المواضيع) "
-                        "إلى موظف: يحلّل تغريداته وردوده مع سياقها ويطبّقها على الموظف. يجري "
-                        "في الخلفية (~دقيقة) وتصل النتيجة ودرجة المطابقة للشات. لا يُنقل اسم "
-                        "الحساب الأصلي."),
+        "description": ("استنسخ هوية حساب X بعمق (الأسلوب، الشخصية، طريقة الرد والتفاعل) إلى "
+                        "موظف: مئات التغريدات والردود مع ما ردّ عليه، موزّعة على أشهر لا آخر "
+                        "أسبوعين. يجري في الخلفية (3-5 دقائق) وتصل النتيجة ودرجة المطابقة للشات. "
+                        "تبقى توجيهات المالك السابقة للموظف. لا يُنقل اسم الحساب الأصلي."),
         "parameters": {"type": "object", "properties": {
             "employee": _employee_param(),
             "target_handle": {"type": "string", "description": "يوزر الحساب المراد استنساخ هويته"},
@@ -688,15 +688,17 @@ class _Tools:
 
             platform = _platform()
             try:
-                res = clone_persona(cfg.account_username, target, platform.llm,
-                                    limit=40, replies_limit=30)
+                # استنساخ عميق (الافتراضي): مجمّع ردود كبير موزّع زمنياً + فترات أقدم بالبحث
+                res = clone_persona(cfg.account_username, target, platform.llm)
                 fresh = platform.repository.get(cfg.id) or cfg
                 apply_to_employee(fresh, res["persona"], res["voice_profile"], platform.repository)
                 t, fid = res.get("target") or {}, res.get("fidelity") or {}
                 a = (res["voice_profile"].get("analysis") or {})
+                cov = t.get("coverage") or {}
                 msg = (f"🧬 **استنسخت هوية @{target} إلى @{cfg.account_username}**\n"
                        f"العيّنة: {t.get('tweet_count', 0)} تغريدة و{t.get('reply_count', 0)} رداً "
-                       f"({t.get('pairs', 0)} مع سياقها)."
+                       f"({t.get('pairs', 0)} مع سياقها) من {cov.get('from', '?')} إلى {cov.get('to', '?')}، "
+                       f"حُلّل منها {t.get('analyzed_replies', 0)} رداً موزّعة على {cov.get('days', '?')} يوماً."
                        + (f"\nالصوت: {a['voice_summary'][:300]}" if a.get("voice_summary") else "")
                        + (f"\nدرجة المطابقة في الاختبار: **{fid['score']}%**" if fid.get("score") is not None else "")
                        + "\nراجع «بصمة الصوت» في بطاقة الموظف، ويمكنك تعديلها في أي وقت.")
@@ -708,7 +710,7 @@ class _Tools:
         threading.Thread(target=run, daemon=True).start()
         self._mark(cfg)
         return {"started": True, "employee": cfg.account_username, "target": f"@{target}",
-                "note": "يجري في الخلفية (~دقيقة)؛ النتيجة تصل للشات."}
+                "note": "استنساخ عميق يجري في الخلفية (3-5 دقائق)؛ النتيجة تصل للشات."}
 
     def web_search(self, args):
         from . import tools_service as TS

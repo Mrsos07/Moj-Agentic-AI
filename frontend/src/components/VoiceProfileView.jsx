@@ -3,6 +3,7 @@ import { useState } from 'react'
 /** عرض «بصمة الصوت» المستنسخة: القياسات، الصوت، دليل الردود، الأمثلة، واختبار المطابقة. */
 const pct = (v) => `${Math.round((v || 0) * 100)}%`
 const LABELS = { agree: 'الموافق', disagree: 'المخالف', question: 'السائل', attack: 'المهاجم', praise: 'الشاكر', general: 'عموماً' }
+const KINDS = { courtesy: 'مجاملة/دعاء', agree: 'موافقة', disagree: 'اعتراض', question: 'سؤال', humor: 'دعابة', reaction: 'تعليق قصير', substantive: 'تعليق بمضمون' }
 const CHECKS = { length: 'الطول', emoji: 'الإيموجي', dialect: 'اللهجة', reply_length: 'طول الرد', original: 'غير منسوخ' }
 
 const Row = ({ k, children }) => (
@@ -32,10 +33,21 @@ const VoiceProfileView = ({ profile, pending, fidelity }) => {
       </button>
       <div className="text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
         عيّنة: {s.tweets || 0} تغريدة · {s.replies || 0} رد ({s.pairs || 0} مع سياقها){s.threads ? ` · ${s.threads} ثريد` : ''}
+        {s.coverage?.from && ` · من ${s.coverage.from} إلى ${s.coverage.to} (${s.coverage.days} يوماً، حُلّل ${s.analyzed_replies} رداً)`}
+        {profile.version < 2 && <span className="mr-1 text-amber-600"> — استنساخ قديم سطحي، أعد الاستنساخ للعمق</span>}
       </div>
       {open && (
         <div className="space-y-2 pt-1">
           {a.voice_summary && <p className="text-[11px] leading-relaxed text-text-primary-light dark:text-text-primary-dark">{a.voice_summary}</p>}
+          {a.identity_core?.length > 0 && <Row k="ثوابت هويته">{a.identity_core.join('؛ ')}</Row>}
+          {st.reply_kinds && Object.keys(st.reply_kinds).length > 0 && (
+            <Row k="أنواع ردوده">
+              {Object.entries(st.reply_kinds).map(([k, v]) => `${KINDS[k] || k} ${pct(v.share)} (≈${v.len_median} حرفاً)`).join(' · ')}
+            </Row>
+          )}
+          {(a.era_topics?.length > 0 || st.era_phrases?.length > 0) && (
+            <Row k="مواضيع مرحلة (لا تُقلَّد)">{(a.era_topics?.length ? a.era_topics : st.era_phrases).slice(0, 6).join('، ')}</Row>
+          )}
           <div className="space-y-0.5">
             <Row k="الطول">{st.len_p25}–{st.len_p75} حرفاً (الردود ≈ {st.reply_len_median})</Row>
             <Row k="اللهجة">{st.dialect_guess || '—'}{a.register ? ` · ${a.register}` : ''}</Row>

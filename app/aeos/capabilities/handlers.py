@@ -432,15 +432,24 @@ def _recent_reply_texts(context: "ExecutionContext") -> List[str]:
     return [str(t) for t in (flags.get("recent_reply_texts") or []) if t]
 
 
-def _remember_reply_text(context: "ExecutionContext", text: str) -> None:
+def flags_kinds(context: "ExecutionContext") -> List[str]:
+    """أنواع ردود الموظف الأخيرة (مجاملة/تعليق بمضمون…) — لتخفيف تكرار النوع نفسه."""
+    return [str(k) for k in (context.config.runtime_state.flags.get("recent_reply_kinds") or []) if k]
+
+
+def _remember_reply_text(context: "ExecutionContext", text: str, kind: str = "") -> None:
+    from ..employee.voice_profile import RECENT_REPLIES_KEEP
+
     text = (text or "").strip()
     if not text:
         return
     flags = context.config.runtime_state.flags
-    history = flags.setdefault("recent_reply_texts", [])
-    history.append(text[:200])
-    if len(history) > 12:
-        del history[: len(history) - 12]
+    # 30 لا 12: القالب المتكرر («بالميدان لا بالبيان») يظهر عبر عشرات الردود، و12 لا تكفي لرصده
+    for key, value in (("recent_reply_texts", text[:200]), ("recent_reply_kinds", kind or "")):
+        history = flags.setdefault(key, [])
+        history.append(value)
+        if len(history) > RECENT_REPLIES_KEEP:
+            del history[: len(history) - RECENT_REPLIES_KEEP]
 
 
 def _question_allowed(recent: Sequence[str]) -> bool:
@@ -741,7 +750,18 @@ class ReplyToUserCapability(ICapability):
             from ..employee import voice_profile
 
             vp = voice_profile.get(context.config)
-            if vp and (vp.get("analysis") or {}).get("reply_playbook"):
+            # خطة الرد من سلوك الحساب المستنسخ الحقيقي (نوع الرد حسب ما يُردّ عليه، طوله، أمثلة
+            # مطابقة، والقوالب المستهلكة الممنوعة الآن). بلا بصمة: القوالب الممنوعة فقط.
+            plan = voice_profile.reply_plan(
+                vp, original, own_replies, flags_kinds(context), seed=str(tweet_url), brief=brief,
+                names=[w for w in ((getattr(persona, "display_name", "") or "").split()[:1]
+                                   + [context.config.account_username]) if w],
+            ) if vp else {"kind": "", "length_line": "", "block": "",
+                          "banned": voice_profile.banned_for(voice_profile.overused_phrases(own_replies), original)}
+            kind = plan.get("kind") or ""
+            if kind:
+                mode = f"«{voice_profile.REPLY_KINDS.get(kind, kind)}» كما في «طريقة ردّك هنا» أدناه."
+            elif vp and (vp.get("analysis") or {}).get("reply_playbook"):
                 # هوية مستنسخة: طريقة الرد تحددها نبرة التغريدة ودليل ردوده الحقيقي،
                 # لا نمط يتناوب آلياً (كان يجعل «الشاكر» و«المهاجم» يُردّ عليهما بالقالب نفسه)
                 mode = "طبّق «دليل ردودك» أدناه حسب نبرة التغريدة (موافقة/خلاف/سؤال/هجوم/تحية)."
@@ -751,44 +771,77 @@ class ReplyToUserCapability(ICapability):
                     mode = _REPLY_MODES[0]
             # نبرة الطول: في وضع الاختصار الشديد (ردود التنبيهات) نطلب جملة واحدة
             # قصيرة جداً؛ وإلا حتى ثلاث جمل.
-            length_line = (voice_profile.reply_length_line(vp, brief) if vp else "") or (
+            length_line = plan.get("length_line") or (
                 "- جملة واحدة قصيرة جداً فقط (أقل من 120 حرفاً)، بلا هاشتاقات، وبدون إيموجي أو إيموجي واحد كحد أقصى.\n"
                 if brief else
                 "- جملة إلى ثلاث جمل كحد أقصى، بلا هاشتاقات، وإيموجي واحد كحد أقصى.\n"
             )
-            voice_reply = ("\n" + voice_profile.voice_block(vp, "reply") + "\n") if vp else ""
-            prompt = (
+            voice_reply = ""
+            if vp:
+                voice_reply = "\n" + (voice_profile.voice_block(vp, "reply") + "\n" + plan["block"]
+                                      if kind else plan["block"]) + "\n"
+            elif plan["banned"]:
+                voice_reply = ("\n❌ قوالب كررتها في ردودك الأخيرة — ممنوعة هذه المرة: "
+                               + "، ".join(f"«{b}»" for b in plan["banned"]) + "\n")
+            # المجاملة والتعليق القصير أسلوبٌ حقيقي عند بعض الحسابات: «لا مجاملات» كانت تناقض
+            # بصمة حساب نصف ردوده دعاء وشكر فتنتج شعاراً بدل الرد الطبيعي
+            value_line = (
+                "- مجاملة طبيعية بصياغتك أنت، مرتبطة بصاحب التغريدة ومناسبتها لا عامة.\n"
+                if kind in ("courtesy", "reaction") else
+                "- أضف قيمة فعلية: معلومة، رأي محدد، أو ملاحظة دقيقة — لا مجاملات عامة.\n")
+            prompt_base = (
                 f"هذه تغريدة رأيتها الآن:\n«{original}»\n\n"
                 f"اكتب رداً قصيراً طبيعياً باللغة ({lang}) بصوت الشخصية دون ادعاء هوية بشرية:\n"
                 f"{dialect_line}"
                 f"{recent_line}"
-                "- أضف قيمة فعلية: معلومة، رأي محدد، أو ملاحظة دقيقة — لا مجاملات عامة.\n"
+                f"{value_line}"
                 f"- نمط الرد المطلوب هذه المرة (يتغير في كل رد): {mode}\n"
                 f"{_question_rule_line(question_ok)}\n"
                 "- لا تلتزم بقالب واحد: تنوّع في المطلع والطول والإيقاع مثل البشر، مع "
                 "ثبات الشخصية والقيم والتخصص.\n"
+                "- قوالب بناء المنشورات في تعليماتك (الخطاف، التقطيع السطري، الخاتمة الحاسمة) "
+                "خاصة بالمنشورات؛ الرد كلام طبيعي في محادثة، بلا خاتمة شعارية ولا مقابلات جاهزة.\n"
                 f"{length_line}"
+                # قيس حيّاً: رد «اعتراض» نفى الخبر بواقعة مخترعة («الهجوم كان على أرامكو»)
+                "- لا تخترع وقائع أو أرقاماً أو أسماء ليست في التغريدة ولست متيقناً منها؛ عند "
+                "الاعتراض اعترض على الاستنتاج أو التفسير، لا بمعلومة مختلقة.\n"
                 "- لا تذكر أنك ترد أو تعلّق، اكتب الرد مباشرة وبدون علامات اقتباس.\n"
                 "- إن كان النص الأصلي خارج مجال تخصصك أو يبدو إعلانياً/ترويجياً فلا تنجرف وراءه، وحافظ على رد مهني ضمن اختصاصك فقط.\n"
                 "- التزم حرفياً بتعليمات الشخصية ومحظوراتها (Do/Don't) وقيمها الواردة في تعليمات النظام.\n"
-                "- اجعل الرد إنسانياً ومباشراً ويضيف قيمة فعلية قصيرة (Insight) لا مجاملة عامة.\n"
                 + voice_reply
                 + x_algorithm.algo_prompt_block("reply")
             )
-            prompt = _trend_prompt(request.params, prompt)
+            prompt_base = _trend_prompt(request.params, prompt_base)
             # أدوات الموظف (Tavily…) قبل الرد — معطّل افتراضياً: الردود كثيرة ورصيد المزوّد محدود
             if not brief and (context.config.business_rules or {}).get("research_before_replies", False):
-                prompt = _with_tool_research(prompt, original, context)
-            gen = context.mcp.call(MCPRequest(
-                employee_id=context.config.id, tool="generate",
-                params={"prompt": prompt,
-                        "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
-                        "temperature": 0.9, "max_tokens": 60 if brief else 150},
-                context={"server": "content"},
-            ))
-            reply_text = gen.data.get("text", "").strip()
-            if not question_ok:
-                reply_text = _drop_trailing_question(reply_text)
+                prompt_base = _with_tool_research(prompt_base, original, context)
+
+            def _generate_reply(hint: str = "") -> str:
+                gen = context.mcp.call(MCPRequest(
+                    employee_id=context.config.id, tool="generate",
+                    params={"prompt": prompt_base + (f"\n⚠️ تصحيح: {hint}\n" if hint else ""),
+                            "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
+                            "temperature": 0.9, "max_tokens": 60 if brief else 220},
+                    context={"server": "content"},
+                ))
+                text = (gen.data.get("text", "") if gen.success else "").strip()
+                return text if question_ok else _drop_trailing_question(text)
+
+            reply_text = _generate_reply()
+            issues = voice_profile.reply_repetition(reply_text, own_replies, plan["banned"]) if reply_text else []
+            if issues:
+                logger.info("reply repetition retry (issues=%s): %r", issues, reply_text[:80])
+                retry = _generate_reply(
+                    "ردّك المقترح «" + reply_text[:120] + "» يكرر ردودك السابقة أو قوالبها المستهلكة. "
+                    "اكتب رداً مختلفاً فكرةً وصياغةً ومطلعاً وخاتمة، مرتبطاً بتفاصيل هذه التغريدة نفسها.")
+                if retry:
+                    reply_text = retry
+                    issues = voice_profile.reply_repetition(reply_text, own_replies, plan["banned"])
+            if issues and bool((context.config.business_rules or {}).get("quality_gate", True)):
+                return CapabilityResult.fail(
+                    f"رُفض الرد في بوابة التكرار ({', '.join(issues)}): «{reply_text[:80]}»", self.name)
+        else:
+            kind = ""
         if not reply_text:
             return CapabilityResult.fail("no reply text generated", self.name)
         from ..employee import voice_profile as _vp
@@ -817,9 +870,11 @@ class ReplyToUserCapability(ICapability):
             handle=request.params.get("handle", ""),
             text=(request.params.get("original_text") or reply_text),
         )
-        _remember_reply_text(context, reply_text)
+        _remember_reply_text(context, reply_text, kind)
         output = dict(res.data)
         output.setdefault("reply_text", reply_text)
+        if kind:
+            output.setdefault("reply_kind", kind)
         return CapabilityResult.ok(self.name, **output)
 
 

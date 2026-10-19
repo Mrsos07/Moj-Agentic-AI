@@ -4,6 +4,7 @@ import EmployeeWizard from './EmployeeWizard'
 import ToolsPanel from './ToolsPanel'
 import VoiceProfileView from './VoiceProfileView'
 import MemoryPanel from './MemoryPanel'
+import clonePersona from '../hooks/clonePersona'
 import {
   MdSmartToy,
   MdClose,
@@ -449,20 +450,20 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
     const row = rows.find(r => r.label === label)
     const running = !!row?.agent?.enabled
     onNotify?.(
-      `🧬 جارِ استنساخ هوية @${handle} بعمق: تغريداته مع تفاعلها، وردوده مع ما ردّ عليه، ثم تحليل الصوت وطريقة التفاعل واختبار مطابقة — عادةً من 40 إلى 90 ثانية.`
+      `🧬 جارِ استنساخ هوية @${handle} بعمق: مئات التغريدات والردود مع ما ردّ عليه، موزّعة على أشهر لا آخر أسبوعين، ثم تحليل الهوية وأنواع الردود واختبار مطابقة — عادةً من 3 إلى 5 دقائق.`
       + (running ? ' ⚠️ الموظف يعمل الآن وقد يحتجز المتصفح؛ إن تعذّرت العملية فأوقفه مؤقتاً ثم أعد المحاولة.' : '')
     )
     try {
       const token = localStorage.getItem('token')
-      const res = await axios.post('/api/aeos/persona/clone', {
+      const data = await clonePersona({
         account_username: label,
         target_handle: handle,
-        limit: 40,
         language: f.language || 'ar',
       }, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
-        timeout: 240000,
+        onProgress: (msg) => onNotify?.(`🧬 ${msg}`),
       })
+      const res = { data }
       const p = res.data?.persona
       const tgt = res.data?.target || {}
       if (p) {
@@ -479,9 +480,12 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         setP(label, 'voice_pending', res.data?.voice_profile || null)
         setP(label, 'clone_fidelity', res.data?.fidelity || null)
         const score = res.data?.fidelity?.score
+        const cov = tgt.coverage || {}
         onNotify?.(
           `🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} تغريدة و${tgt.reply_count ?? '?'} رداً ` +
-          `(${tgt.pairs ?? 0} منها مع سياقها)` + (tgt.scrape_seconds ? ` في ${tgt.scrape_seconds} ثانية` : '') +
+          `(${tgt.pairs ?? 0} منها مع سياقها)` +
+          (cov.from ? ` من ${cov.from} إلى ${cov.to}، حُلّل منها ${tgt.analyzed_replies ?? '?'} رداً موزّعة على ${cov.days} يوماً` : '') +
+          (tgt.scrape_seconds ? ` · السحب ${tgt.scrape_seconds} ثانية` : '') +
           (res.data?.source === 'ai' ? '' : ' — تحليل إحصائي فقط (LLM غير متاح)') +
           (score != null ? ` · درجة المطابقة ${score}%` : '') +
           '. راجع بصمة الصوت والعيّنات ثم اضغط حفظ.'
