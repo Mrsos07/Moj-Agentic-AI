@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List
+import threading
+import time
+import uuid
+from datetime import date, timedelta
+from typing import Any, Callable, Dict, List, Optional
 
 from ..employee import voice_profile as VP
 
@@ -27,22 +31,42 @@ logger = logging.getLogger("aeos.services.persona_clone")
 
 _TONES = ("professional", "casual", "witty", "formal", "friendly")
 
+#: الاستنساخ العميق (الافتراضي): كان 40 تغريدة و30 رداً من آخر أسبوعين — أي «مواضيع
+#: المرحلة» لا الهوية. الآن مجمّع ردود كبير (يُوزَّع زمنياً عند التحليل، ≥100 رد) وفترات
+#: أقدم بالبحث. قيس على @halgawi: 202 تغريدة و451 رداً (380 بسياقها) على سنة كاملة في ~110 ث.
+DEEP = {"limit": 100, "replies_limit": 400, "tab_budget_seconds": 45.0,
+        "replies_budget_seconds": 120.0, "history_budget_seconds": 10.0, "history_per_window": 40}
+#: فترات البحث في التاريخ: (بداية قبل كم يوم، طول الفترة بالأيام)
+HISTORY_OFFSETS = ((75, 20), (165, 20), (255, 20), (350, 20))
+
+
+def history_windows(today: Optional[date] = None) -> List[List[str]]:
+    today = today or date.today()
+    return [[(today - timedelta(days=start)).isoformat(),
+             (today - timedelta(days=start - span)).isoformat()] for start, span in HISTORY_OFFSETS]
+
 
 # ─────────────────────────── scraping ───────────────────────────
-def scrape_profile(cookie_label: str, handle: str, limit: int = 40,
-                   replies_limit: int = 30, headless: bool = True,
+def scrape_profile(cookie_label: str, handle: str, limit: int = DEEP["limit"],
+                   replies_limit: int = DEEP["replies_limit"], headless: bool = True,
                    lock_timeout: float = 45.0,
-                   tab_budget_seconds: float = 30.0) -> Dict[str, Any]:
-    """اسحب تغريدات الحساب وردوده (مع سياقها) بميزانية زمنية صريحة لكل تبويب."""
+                   tab_budget_seconds: float = DEEP["tab_budget_seconds"],
+                   deep: bool = True) -> Dict[str, Any]:
+    """اسحب تغريدات الحساب وردوده (مع سياقها) — وفي الوضع العميق فترات أقدم بالبحث."""
     from ..mcp.base import MCPRequest
     from ..mcp.servers.playwright_x_mcp import PlaywrightXMCP
 
+    params = {"handle": handle, "limit": limit, "replies_limit": replies_limit,
+              "headless": headless, "lock_timeout": lock_timeout,
+              "tab_budget_seconds": tab_budget_seconds}
+    if deep:
+        params.update({"replies_budget_seconds": DEEP["replies_budget_seconds"],
+                       "history_windows": history_windows(),
+                       "history_budget_seconds": DEEP["history_budget_seconds"],
+                       "history_per_window": DEEP["history_per_window"]})
     res = PlaywrightXMCP().call(MCPRequest(
         employee_id="persona_clone", tool="read_user_profile",
-        params={"handle": handle, "limit": limit, "replies_limit": replies_limit,
-                "headless": headless, "lock_timeout": lock_timeout,
-                "tab_budget_seconds": tab_budget_seconds},
-        context={"cookie_label": cookie_label},
+        params=params, context={"cookie_label": cookie_label},
     ))
     if not res.success:
         raise RuntimeError(res.error or "failed to scrape target profile")
@@ -56,6 +80,8 @@ def _instructions(handle: str, voice: Dict[str, Any]) -> str:
     parts = []
     if a.get("voice_summary"):
         parts.append(a["voice_summary"])
+    if a.get("identity_core"):
+        parts.append("ثوابتك: " + "؛ ".join(a["identity_core"]) + ".")
     if a.get("pillars"):
         parts.append("تدور منشوراتك حول: " + "، ".join(p["name"] for p in a["pillars"]) + ".")
     inter = a.get("interaction") or {}
@@ -153,11 +179,13 @@ def fidelity_test(profile: Dict[str, Any], voice: Dict[str, Any],
     replies: List[str] = []
     parent = _held_out_parent(profile, voice)
     if parent:
+        # نفس خطة الرد التي يستعملها الموظف فعلاً (النوع والطول والأمثلة المطابقة)
+        plan = VP.reply_plan(voice, parent, seed="fidelity")
         text = llm.complete(
-            _persona_system(persona, voice, "reply"),
-            f"اكتب ردّك على هذه التغريدة: «{parent}».\n{VP.reply_length_line(voice, False)}"
+            _persona_system(persona, voice, "reply") + "\n" + plan["block"],
+            f"اكتب ردّك على هذه التغريدة: «{parent}».\n{plan['length_line']}"
             "اكتب الرد فقط.",
-            temperature=0.8, max_tokens=150) or ""
+            temperature=0.8, max_tokens=200) or ""
         if text.strip():
             replies.append(text.strip().strip('"«»'))
     return {**VP.fidelity(voice, posts, replies),
@@ -183,14 +211,24 @@ def build_cloned_persona(profile: Dict[str, Any], llm: Any, language: str = "ar"
     return result
 
 
-def clone_persona(cookie_label: str, handle: str, llm: Any, limit: int = 40,
+def clone_persona(cookie_label: str, handle: str, llm: Any, limit: int = DEEP["limit"],
                   language: str = "ar", lock_timeout: float = 45.0,
-                  tab_budget_seconds: float = 30.0, replies_limit: int = 30,
-                  test: bool = True) -> Dict[str, Any]:
+                  tab_budget_seconds: float = DEEP["tab_budget_seconds"],
+                  replies_limit: int = DEEP["replies_limit"], test: bool = True,
+                  deep: bool = True,
+                  progress: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """التدفّق الكامل: سحب ← بصمة صوت ← برسونا ← اختبار مطابقة."""
+    step = progress or (lambda _msg: None)
+    step(f"سحب تغريدات @{handle} وردوده مع ما ردّ عليه، ومن فترات أقدم (2-4 دقائق)…")
     profile = scrape_profile(cookie_label, handle, limit=limit, replies_limit=replies_limit,
-                             lock_timeout=lock_timeout, tab_budget_seconds=tab_budget_seconds)
+                             lock_timeout=lock_timeout, tab_budget_seconds=tab_budget_seconds,
+                             deep=deep)
+    cov = profile.get("coverage") or {}
+    step(f"سُحب {profile.get('tweet_count', 0)} تغريدة و{profile.get('reply_count', 0)} رداً "
+         f"({cov.get('pairs', 0)} بسياقها) من {cov.get('from', '?')} إلى {cov.get('to', '?')} — "
+         "جارِ تحليل الهوية وأنواع الردود…")
     result = build_cloned_persona(profile, llm, language=language, test=test)
+    sample = (result.get("voice_profile") or {}).get("sample", {})
     result["target"] = {
         "handle": profile.get("handle", f"@{handle}"),
         "display_name": profile.get("display_name", ""),
@@ -198,18 +236,75 @@ def clone_persona(cookie_label: str, handle: str, llm: Any, limit: int = 40,
         "followers": profile.get("followers", ""),
         "tweet_count": profile.get("tweet_count", 0),
         "reply_count": profile.get("reply_count", 0),
-        "pairs": (result.get("voice_profile") or {}).get("sample", {}).get("pairs", 0),
+        "pairs": sample.get("pairs", 0),
+        "analyzed_replies": sample.get("analyzed_replies", 0),
+        "coverage": cov,
         "scrape_seconds": profile.get("scrape_seconds"),
     }
     return result
 
 
+def _owner_lines(instructions: str) -> List[str]:
+    """توجيهات علّمها المالك للموظف (``_handle_teach`` يضيفها أسطراً تبدأ بـ«- »)."""
+    return [ln for ln in (instructions or "").splitlines() if ln.strip().startswith("- ")]
+
+
 def apply_to_employee(cfg, persona: Dict[str, Any], voice: Dict[str, Any], repo) -> None:
-    """احفظ البرسونا والبصمة معاً. الاسم/النبذة الفارغان يُبقيان قيم الموظف الحالية."""
+    """احفظ البرسونا والبصمة معاً. الاسم/النبذة الفارغان يُبقيان قيم الموظف الحالية.
+
+    إعادة الاستنساخ تستبدل وصف الهوية، لكن **توجيهات المالك** المضافة بعده تبقى: كانت
+    تُمسح مع التعليمات القديمة دون أن يعلم المالك.
+    """
     from ..employee.models import Persona
 
     current = cfg.persona.to_dict() if cfg.persona else {}
     merged = {**current, **{k: v for k, v in persona.items() if v not in ("", None, [])}}
+    kept = [ln for ln in _owner_lines(current.get("instructions", ""))
+            if ln not in (merged.get("instructions") or "")]
+    if kept:
+        merged["instructions"] = ((merged.get("instructions") or "").rstrip() + "\n" + "\n".join(kept)).strip()
     cfg.persona = Persona.from_dict(merged)
     cfg.business_rules = {**(cfg.business_rules or {}), VP.STORE_KEY: voice}
     repo.save(cfg)
+
+
+# ─────────────────────────── background jobs ───────────────────────────
+#: الاستنساخ العميق يستغرق دقائق: طلب HTTP متزامن كان يصطدم بمهلة الواجهة (240-300 ث)
+_JOBS: Dict[str, Dict[str, Any]] = {}
+_JOBS_LOCK = threading.Lock()
+_JOB_TTL = 3600
+
+
+def start_job(owner_id: Any, run: Callable[[Callable[[str], None]], Dict[str, Any]]) -> str:
+    """شغّل ``run(progress)`` في الخلفية وأعد معرّف المهمة. النتيجة/الخطأ يُقرآن بـ``get_job``."""
+    job_id = uuid.uuid4().hex[:12]
+    job = {"id": job_id, "owner": owner_id, "status": "running", "progress": "بدأ الاستنساخ…",
+           "started": time.time(), "result": None, "error": ""}
+    with _JOBS_LOCK:
+        for k in [k for k, v in _JOBS.items() if time.time() - v["started"] > _JOB_TTL]:
+            _JOBS.pop(k, None)
+        _JOBS[job_id] = job
+
+    def progress(msg: str) -> None:
+        job["progress"] = msg
+
+    def worker() -> None:
+        try:
+            job["result"] = run(progress)
+            job["status"] = "done"
+        except Exception as exc:  # noqa: BLE001 - يُعرض للمالك كما هو
+            logger.exception("persona clone job %s failed", job_id)
+            job["error"] = str(exc) or exc.__class__.__name__
+            job["status"] = "error"
+
+    threading.Thread(target=worker, daemon=True, name=f"clone-{job_id}").start()
+    return job_id
+
+
+def get_job(job_id: str, owner_id: Any) -> Optional[Dict[str, Any]]:
+    """حالة المهمة لمالكها فقط (مستخدم آخر لا يرى نتيجة استنساخ غيره)."""
+    job = _JOBS.get(job_id)
+    if not job or job["owner"] != owner_id:
+        return None
+    return {k: job[k] for k in ("id", "status", "progress", "result", "error")} | {
+        "elapsed": round(time.time() - job["started"])}

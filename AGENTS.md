@@ -347,8 +347,43 @@ defences it forced are still in the code and still required if you set
   URLs as `exclude` so progress is measured on NEW items — otherwise the first
   screen looks idle and collection stops immediately (persona cloning returned
   exactly 1 reply because of this).
-- Persona cloning: ~25s scrape + ~20s LLM. Verified on a real account
-  (@halgawi: 20 tweets + 10 replies in 24s).
+- Persona cloning is DEEP since 2026-10-19 (voice profile v2). The old 40 tweets + 30
+  replies were 1-2 weeks of «era topics», and the clone turned them into identity:
+  @emaad5079's replies collapsed into one slogan («… بالميدان لا بالبيان باذن الله», the
+  same reply posted twice in 2h) because (a) topical n-grams («الوعد صنعاء», «غارات جوية»)
+  became signature phrases/lexicon injected into every prompt, (b) the reply length was
+  ONE median (24 chars, dominated by «الله يحفظك») so a news reply became a 5-word
+  slogan, (c) only 4 courtesy exemplars, (d) the owner's post-format instructions
+  («خطاف… خاتمة حاسمة») applied to replies too, (e) only the last 4 replies were checked.
+- Scrape (`playwright_x._read_user_profile`): `_CELLS_JS` + `pair_cells()` read
+  `cellInnerDiv`s — a cell without an article separates conversations; inside one the
+  previous card is the real parent; a card labelled «ردًا على @…» (parent hidden) is a
+  loose reply — the old "previous card = parent" attached random own replies as
+  «thread continuations». Replies pool up to 400 (120s), plus `history_windows` searched
+  with `from:<h> since: until:` (4 windows back to ~1 year). Measured: 202 tweets + 451
+  replies (380 with parent), 2025-10 → 2026-10, 108s.
+- Analysis (`voice_profile` v2): `stratify()` caps items per day (one day had 134 of 451
+  replies); ≥100 replies analysed (`MIN_ANALYZED_REPLIES`). `phrase_spread()`: signature =
+  recurs across ≥20% of weeks; era = concentrated (courtesy formulas excluded from era —
+  they cluster on congratulation days). `reply_kind`/`parent_kind` (social occasions are
+  NOT «content», or news replies inherit condolences), `reply_kind_stats` (length per
+  kind), `reply_policy` (what he does per parent kind), `phrase_kind_rates`, and a
+  stratified exemplar bank (~40 pairs with kind/parent_kind/date).
+- Replies (`ReplyToUserCapability`): `reply_plan()` picks the kind from the policy for this
+  parent (seeded, recent kinds damped), the kind's real length, 4 matching exemplars
+  (rotated), and `overused_phrases()` (≥3 of last 20 / ≥2 of last 5 / repeated endings /
+  a single word in ≥3 of last 10 — «الضجيج» was the next tic) as banned, minus words
+  present in the tweet itself (`banned_for`); `reply_repetition()` (formula words like
+  «بيض الله وجهك» ignored, Arabic tashkeel normalised) → one regeneration → `fail`
+  («بوابة التكرار») if it still repeats. 30 own replies + kinds kept in flags. The prompt
+  forbids invented facts (a «disagree» reply once denied the news with a made-up one) and
+  titles («أستاذ/يا الغالي») towards news accounts.
+- Live A/B on the same 10 tweets @emaad5079 had answered with the slogan: the new replies
+  mixed agree/substantive/courtesy/reaction with lengths 15-180 chars and no template.
+- Re-cloning keeps owner-taught lines (`- …` appended by `_handle_teach`). The API runs
+  the clone as a background job (`background: true` → `GET /persona/clone/jobs/{id}`;
+  UI helper `frontend/src/hooks/clonePersona.js`) — a deep clone takes 3-5 min.
+  Test: `verify_voice.py` (82 checks).
 
 ## Per-employee custom skills: a SPEC, never generated code
 - `app/aeos/skills/custom.py` + `CustomSkillRunner` (registered in

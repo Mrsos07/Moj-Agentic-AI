@@ -55,11 +55,12 @@ class PersonaCloneIn(BaseModel):
     """Clone the style of a target X account into a persona proposal."""
     account_username: str             # الحساب المرتبط (مصدر الكوكيز)
     target_handle: str                # يوزر الحساب المراد استنساخه
-    limit: int = 40                   # عدد التغريدات الأصلية (الردود ~ ثلاثة أرباعها)
+    limit: int = 100                  # التغريدات الأصلية؛ الردود مجمّع عميق ثابت (≥100 تُحلَّل)
     language: str = "ar"
     test: bool = True                 # اختبار مطابقة بعيّنات مولَّدة (نداءان إضافيان)
     employee_id: str = ""             # مع apply=true: احفظ الهوية على هذا الموظف مباشرة
     apply: bool = False
+    background: bool = False          # مهمة خلفية (دقائق) تُتابَع بـ GET /persona/clone/jobs/{id}
 
 
 class GoalIn(BaseModel):
@@ -532,7 +533,7 @@ def persona_clone(body: PersonaCloneIn,
     المرتبط، تحليل الأسلوب والمواضيع وطريقة النقاش، ثم إرجاع برسونا مقترحة
     يراجعها المستخدم في الواجهة قبل الحفظ (لا تُحفظ هنا).
     """
-    from ..services.persona_clone import apply_to_employee, clone_persona
+    from ..services import persona_clone as PC
 
     handle = (body.target_handle or "").strip().lstrip("@")
     if not handle:
@@ -543,18 +544,23 @@ def persona_clone(body: PersonaCloneIn,
     label_or_404(body.account_username.strip(), current_user)
     cfg = _employee_or_404(body.employee_id, current_user) if body.apply else None
 
-    limit = max(10, min(int(body.limit or 40), 60))
+    limit = max(40, min(int(body.limit or PC.DEEP["limit"]), 150))
+
+    def run(progress) -> Dict[str, Any]:
+        # استنساخ عميق دائماً: مجمّع ردود كبير موزّع زمنياً + فترات أقدم بالبحث
+        result = PC.clone_persona(
+            cookie_label=body.account_username.strip(), handle=handle, llm=get_platform().llm,
+            limit=limit, language=body.language or "ar", test=body.test, progress=progress)
+        if cfg is not None:
+            PC.apply_to_employee(cfg, result["persona"], result["voice_profile"],
+                                 get_platform().repository)
+            result["applied"] = True
+        return {"ok": True, **result}
+
+    if body.background:
+        return {"ok": True, "job_id": PC.start_job(current_user.id, run)}
     try:
-        result = clone_persona(
-            cookie_label=body.account_username.strip(),
-            handle=handle,
-            llm=get_platform().llm,
-            # عيّنة أعمق: البصمة تحتاج أزواج (تغريدة ← رد) وتوزيعاً للمواضيع، والسحب
-            # مقيّد زمنياً لكل تبويب فلا يطول بلا فائدة عند نفاد المحتوى الجديد
-            limit=limit, replies_limit=max(8, limit * 3 // 4),
-            language=body.language or "ar",
-            test=body.test,
-        )
+        return run(lambda _msg: None)
     except RuntimeError as exc:
         # أسباب متوقّعة ومفهومة للمستخدم (متصفح مشغول/حساب محمي/كوكيز منتهية)
         raise HTTPException(422, str(exc))
@@ -562,11 +568,16 @@ def persona_clone(body: PersonaCloneIn,
         logger.exception("persona clone failed for @%s", handle)
         raise HTTPException(500, f"تعذّر الاستنساخ: {exc}")
 
-    if cfg is not None:
-        apply_to_employee(cfg, result["persona"], result["voice_profile"],
-                          get_platform().repository)
-        result["applied"] = True
-    return {"ok": True, **result}
+
+@router.get("/persona/clone/jobs/{job_id}")
+def persona_clone_job(job_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """حالة استنساخ يجري في الخلفية: running (مع وصف المرحلة) أو done (النتيجة) أو error."""
+    from ..services import persona_clone as PC
+
+    job = PC.get_job(job_id, current_user.id)
+    if job is None:
+        raise HTTPException(404, "مهمة غير موجودة أو انتهت صلاحيتها")
+    return {"ok": True, **job}
 
 
 @router.get("/agent/status")

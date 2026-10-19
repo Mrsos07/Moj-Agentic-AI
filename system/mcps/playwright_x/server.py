@@ -62,11 +62,9 @@ def _browser_slot(timeout: float):
 # نفس مجلد الكوكيز المستخدم في رفع الكوكيز وأتمتة X
 _COOKIES_DIR = Path(__file__).resolve().parents[3] / "app" / "x" / "cookies"
 
-# JS لاستخراج التغريدات الظاهرة على التايم لاين
-_EXTRACT_JS = r"""
-() => {
-  const arts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
-  return arts.map(a => {
+# دالة JS لاستخراج بطاقة تغريدة واحدة — مشتركة بين قارئ التايم لاين وقارئ الخلايا
+_ARTICLE_FN = r"""
+  const readArticle = a => {
     const textEl = a.querySelector('div[data-testid="tweetText"]');
     const text = textEl ? textEl.innerText : '';
     let url = '';
@@ -103,9 +101,73 @@ _EXTRACT_JS = r"""
     const viewsLink = a.querySelector('a[href*="/analytics"]');
     if (viewsLink) { per['views'] = viewsLink.getAttribute('aria-label') || viewsLink.innerText || ''; }
     return { author, handle, text, url, media, created_at, group_label, counts_text, per_button: per };
-  }).filter(t => t.url && t.text);
+  };
+"""
+
+# JS لاستخراج التغريدات الظاهرة على التايم لاين
+_EXTRACT_JS = r"""
+() => {""" + _ARTICLE_FN + r"""
+  return Array.from(document.querySelectorAll('article[data-testid="tweet"]'))
+    .map(readArticle).filter(t => t.url && t.text);
 }
 """
+
+# JS بمستوى الخلايا (cellInnerDiv) لتبويب الردود والبحث: الخلية بلا بطاقة فاصلُ «محادثة».
+# داخل المحادثة البطاقة السابقة لردّ الحساب هي ما ردّ عليه فعلاً. أما الرد الذي أُخفي أصله
+# فيحمل وسم «ردًا على @…» — وكان يُنسب له خطأً أصلٌ هو آخر بطاقة ظاهرة (غالباً ردّ آخر
+# للحساب نفسه فيُعدّ «تكملة ثريد»). قيس حيّاً على @halgawi.
+_CELLS_JS = r"""
+() => {""" + _ARTICLE_FN + r"""
+  const LABEL = /^(ردًا على|رداً على|ردا على|Replying to)/;
+  return Array.from(document.querySelectorAll('div[data-testid="cellInnerDiv"]')).map(c => {
+    const a = c.querySelector('article[data-testid="tweet"]');
+    if (!a) { return { sep: true }; }
+    const t = readArticle(a);
+    const lines = (a.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const li = lines.findIndex(l => LABEL.test(l));
+    t.reply_to = [];
+    if (li >= 0 && li < 8) {
+      for (const l of lines.slice(li, li + 4)) {
+        const m = l.match(/@\w{1,30}/g);
+        if (m) { t.reply_to.push(...m); }
+      }
+      if (!t.reply_to.length) { t.reply_to.push('?'); }
+    }
+    return t;
+  }).filter(t => t.sep || (t.url && t.text));
+}
+"""
+
+
+def pair_cells(cells: List[Dict[str, Any]], target: str, pairing: bool = True) -> Dict[str, List[Dict[str, Any]]]:
+    """صنّف بطاقات الحساب الهدف في لقطة خلايا واحدة إلى ردود (بسياقها أو بلا سياق) وأصلية.
+
+    ``pairing=False`` لنتائج البحث: كل بطاقة مستقلة هناك، فالسابقة ليست أصلاً للرد.
+    ``target`` بصيغة ``@handle`` بأحرف صغيرة.
+    """
+    out: Dict[str, List[Dict[str, Any]]] = {"pairs": [], "loose": [], "originals": []}
+    prev: Optional[Dict[str, Any]] = None
+    for c in cells:
+        if c.get("sep"):
+            prev = None
+            continue
+        own = (c.get("handle") or "").lower() == target
+        if own:
+            item = {k: v for k, v in c.items() if k != "reply_to"}
+            if c.get("reply_to"):
+                item["replying_to"] = [h for h in c["reply_to"] if h != "?"]
+                out["loose"].append(item)
+            elif pairing and prev is not None and prev.get("text"):
+                item["in_reply_to"] = {
+                    "handle": prev.get("handle", ""),
+                    "text": (prev.get("text") or "")[:400],
+                    "self": (prev.get("handle") or "").lower() == target,
+                }
+                out["pairs"].append(item)
+            else:
+                out["originals"].append(item)
+        prev = c if pairing else None
+    return out
 
 # JS لاستخراج الترندات من تبويب Explore/Trending
 # بطاقة الترند تحوي عادةً: رقم ترتيب + سطر تصنيف («Trending in …»/«رائج») +
@@ -356,6 +418,10 @@ class PlaywrightXMCP(IMCPServer):
                     lock_timeout=float(p.get("lock_timeout", 45.0)),
                     tab_budget_seconds=float(p.get("tab_budget_seconds", 18.0)),
                     replies_limit=int(p.get("replies_limit", 0) or 0),
+                    replies_budget_seconds=float(p.get("replies_budget_seconds", 0) or 0),
+                    history_windows=p.get("history_windows") or [],
+                    history_budget_seconds=float(p.get("history_budget_seconds", 10.0)),
+                    history_per_window=int(p.get("history_per_window", 40)),
                 )
                 return MCPResponse.ok(account=label, **profile)
 
@@ -557,13 +623,21 @@ class PlaywrightXMCP(IMCPServer):
                            limit: int, headless: bool,
                            lock_timeout: float = 45.0,
                            tab_budget_seconds: float = 18.0,
-                           replies_limit: int = 0) -> Dict[str, Any]:
+                           replies_limit: int = 0,
+                           replies_budget_seconds: float = 0.0,
+                           history_windows: Optional[List[List[str]]] = None,
+                           history_budget_seconds: float = 10.0,
+                           history_per_window: int = 40) -> Dict[str, Any]:
         """Scrape a target user's bio + tweets + replies (for persona cloning).
 
         Reads ``x.com/<handle>`` for original tweets and ``/with_replies`` for
         the reply/discussion style, in ONE browser session. Tweets not authored
         by the target (retweets/quoted context cards) are filtered out by
         matching the handle.
+
+        ``history_windows``: ``[[since, until], ...]`` (YYYY-MM-DD) — بحث
+        ``from:<handle>`` في فترات أقدم، لأن التبويبين يعيدان الأحدث فقط: هوية
+        مأخوذة من آخر أسبوعين هي «مواضيع المرحلة» لا الشخصية.
         """
         from playwright.sync_api import sync_playwright
 
@@ -645,6 +719,51 @@ class PlaywrightXMCP(IMCPServer):
                 page.wait_for_timeout(900)
             return list(seen.values())[:cap]
 
+        def _collect_cells(url: str, cap: int, seconds: float, pairing: bool,
+                           skip: set) -> Dict[str, Dict[str, Any]]:
+            """اجمع بطاقات الحساب من تبويب الردود/البحث مصنّفةً (رد بسياق / بلا سياق / أصلي).
+
+            اللقطة تتغيّر مع التمرير (قائمة افتراضية): بطاقة رآها المتصفح أولاً بلا أصلها
+            قد تظهر لاحقاً مع أصلها، فنحتفظ بأفضل تصنيف لكل رابط (بسياق > بلا سياق > أصلي).
+            """
+            rank = {"pairs": 3, "loose": 2, "originals": 1}
+            found: Dict[str, Dict[str, Any]] = {}
+            page.goto(url, wait_until="domcontentloaded")
+            try:
+                page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=15_000)
+            except Exception:  # noqa: BLE001
+                logger.info("no tweet cards at %s", url)
+                return found
+            deadline = time.time() + seconds
+            idle = 0
+            while time.time() < deadline:
+                try:
+                    cells = page.evaluate(_CELLS_JS) or []
+                except Exception:  # noqa: BLE001
+                    cells = []
+                def count() -> int:  # تبويب الردود يُقاس بالردود، والبحث بكل البطاقات
+                    return sum(1 for v in found.values() if not pairing or v["kind"] != "originals")
+
+                before = count()
+                for kind, items in pair_cells(cells, target, pairing).items():
+                    for it in items:
+                        u = it.get("url")
+                        if not u or u in skip:
+                            continue
+                        old = found.get(u)
+                        if old is None or rank[kind] > rank[old["kind"]]:
+                            found[u] = {"kind": kind, "item": _with_metrics(it)}
+                got = count()
+                if got >= cap:
+                    break
+                # تبويب الردود يحمّل ببطء كلما تعمّقنا: ست جولات بلا جديد = نهاية المتاح
+                idle = idle + 1 if got == before else 0
+                if idle >= 6:
+                    break
+                page.mouse.wheel(0, 2600)
+                page.wait_for_timeout(1000)
+            return found
+
         started = time.time()
         with _browser_slot(lock_timeout), sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
@@ -667,19 +786,34 @@ class PlaywrightXMCP(IMCPServer):
                     logger.info("profile header not found for @%s", handle)
                 profile["tweets"] = _collect(
                     page, f"https://x.com/{handle}", want, navigate=False)
-                # 2) تبويب الردود: أسلوب النقاش والرد — عيّنة أصغر تكفي للأسلوب،
-                #    وأي خطأ فيها لا يُسقط العملية (لدينا التغريدات أصلاً)
+                # 2) تبويب الردود: بطاقات مصنّفة بالخلايا (الأصل الحقيقي لكل رد)، بميزانية
+                #    أطول لأن الردود نصف الشخصية. أي خطأ لا يُسقط العملية.
+                tweet_urls = {t["url"] for t in profile.get("tweets", [])}
+                cap = int(replies_limit or max(6, want // 2))
                 try:
-                    # الردود = ما ليس في تغريدات الملف؛ نستثنيها من الجمع نفسه
-                    tweet_urls = {t["url"] for t in profile.get("tweets", [])}
-                    profile["replies"] = _collect(
-                        page, f"https://x.com/{handle}/with_replies",
-                        int(replies_limit or max(6, want // 2)), exclude=tweet_urls,
-                        with_context=True,
-                    )
+                    found = _collect_cells(f"https://x.com/{handle}/with_replies", cap,
+                                           float(replies_budget_seconds or budget), True, tweet_urls)
                 except Exception as exc:  # noqa: BLE001
                     logger.info("replies tab failed for @%s: %s", handle, exc)
-                    profile["replies"] = []
+                    found = {}
+                profile["replies"] = [v["item"] for v in found.values() if v["kind"] != "originals"]
+                # منشورات أصلية ظهرت في تبويب الردود ولم تظهر في الملف (أقدم) تُضاف للعيّنة
+                profile["tweets"] += [v["item"] for v in found.values() if v["kind"] == "originals"]
+                # 3) فترات أقدم بالبحث: ردود بلا سياق (البحث يخفي الأصل) وتغريدات أصلية
+                known = {t["url"] for t in profile["tweets"]} | {r["url"] for r in profile["replies"]}
+                for since, until in (history_windows or [])[:8]:
+                    q = f"from:{handle} since:{since} until:{until}"
+                    try:
+                        found = _collect_cells(
+                            "https://x.com/search?f=live&q=" + q.replace(" ", "%20").replace(":", "%3A"),
+                            int(history_per_window), float(history_budget_seconds), False, known)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.info("history window %s..%s failed for @%s: %s", since, until, handle, exc)
+                        continue
+                    for v in found.values():
+                        v["item"]["source"] = "history"
+                        known.add(v["item"]["url"])
+                        (profile["replies"] if v["kind"] != "originals" else profile["tweets"]).append(v["item"])
             finally:
                 context.close()
                 browser.close()
@@ -687,6 +821,15 @@ class PlaywrightXMCP(IMCPServer):
 
         profile["tweet_count"] = len(profile.get("tweets", []))
         profile["reply_count"] = len(profile.get("replies", []))
+        dates = sorted(str(x.get("created_at") or "")[:10]
+                       for x in profile.get("tweets", []) + profile.get("replies", []) if x.get("created_at"))
+        profile["coverage"] = {
+            "from": dates[0] if dates else "", "to": dates[-1] if dates else "",
+            "days": len(set(dates)),
+            "pairs": sum(1 for r in profile.get("replies", []) if r.get("in_reply_to")),
+            "history_items": sum(1 for x in profile.get("tweets", []) + profile.get("replies", [])
+                                 if x.get("source") == "history"),
+        }
         return profile
 
     def _read_trends(self, storage_state_path: str, limit: int, headless: bool) -> List[Dict[str, Any]]:
