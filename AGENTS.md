@@ -335,6 +335,13 @@ defences it forced are still in the code and still required if you set
   succeed), then `FunCaptchaClassification` (3 points, synchronous) + clicking the
   tile in the page. The emulator has no JS injection, so it only uses the
   classification + tap path (`j4.solve_captcha`).
+- Measured with the owner's key (2026-10-21): `getBalance` 46,958 points;
+  `ImageToTextTaskOcrBase` returned `ABCD5` exactly; `FunCaptchaClassification` on
+  the docs' sample (`q62`, an **arrows** puzzle) returned `objects: [1]`.
+- Arrows puzzles are therefore **skipped, not tapped**: the classification answers
+  «which image», not «which cell», and the docs describe switching with the arrows
+  — a 3×2 tile tap would be a wrong click that burns attempts. Only `Pick the …`
+  6-tile grids use the tap path. Don't «fix» this by guessing an arrow count.
 - The image/OCR path (`solve_image`) is for X's own text captcha; the emulator
   cannot crop it from the WebView, so it only handles the Arkose grid.
 - Never log a captcha key. Errors keep the provider code (`ERROR_…`, `HTTP_401`) so

@@ -267,6 +267,11 @@ def _arkose_grid_click(page, info: Dict[str, Any], solver, log: _LOG,
         if not question:
             log("⚠️ تعذّر قراءة سؤال Arkose — لا يمكن تصنيف البلاطة")
             return False
+        if "arrow" in question.lower():
+            # لغز الأسهم: المزوّد يرجع «أي صورة» لا «أي بلاطة»؛ النقر على شبكة هنا
+            # خطأ صريح (يقيسه المزوّد: عيّنة q62 الحقيقية رجعت objects=[1]).
+            log("⚠️ لغز Arkose من نوع الأسهم — لا ننقر شبكة (تخطٍّ آمن)")
+            return False
         try:
             handle = page.locator(f'[data-moj-captcha="{info["el"]}"]').first
             box = handle.bounding_box()
