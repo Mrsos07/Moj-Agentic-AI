@@ -12,6 +12,9 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+# حل كابتشا Arkose يضيف حتى CAPTCHA_TIMEOUT قبل إكمال الدخول — لا تقتل العملية قبله
+_LOGIN_TIMEOUT = max(120, int(os.getenv("CAPTCHA_TIMEOUT", "150") or 150) + 120)
+
 
 class TwitterLoginAdvanced:
     def _safe_cookie_filename(self, username: str) -> str:
@@ -28,7 +31,7 @@ class TwitterLoginAdvanced:
         x_auth_dir = Path(__file__).parent
         result = subprocess.run(
             [sys.executable, "-m", "x_auth.login_sync", username, password, cookies_dir],
-            capture_output=True, text=True, encoding="utf-8", timeout=120,
+            capture_output=True, text=True, encoding="utf-8", timeout=_LOGIN_TIMEOUT,
             cwd=str(x_auth_dir)
         )
         output = result.stdout + result.stderr

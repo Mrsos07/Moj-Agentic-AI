@@ -62,6 +62,14 @@ def _browser_slot(timeout: float):
 # نفس مجلد الكوكيز المستخدم في رفع الكوكيز وأتمتة X
 _COOKIES_DIR = Path(__file__).resolve().parents[3] / "app" / "x" / "cookies"
 
+
+def _guard_captcha(page) -> None:
+    """كابتشا في مسار القراءة = «لا تغريدات» كاذبة؛ نحلها أو نفشل بوضوح."""
+    from app.core.captcha_browser import guard_page
+
+    guard_page(page, log=logger.info)
+
+
 # دالة JS لاستخراج بطاقة تغريدة واحدة — مشتركة بين قارئ التايم لاين وقارئ الخلايا
 _ARTICLE_FN = r"""
   const readArticle = a => {
@@ -467,6 +475,7 @@ class PlaywrightXMCP(IMCPServer):
             page.set_default_timeout(60_000)
             try:
                 page.goto(url, wait_until="domcontentloaded")
+                _guard_captcha(page)
                 # انتظر ظهور أول تغريدة (يؤكد نجاح الدخول بالكوكيز). في الوضع
                 # الليّن (soft) لا نفشل الدورة إن لم توجد تغريدات (مثلاً لا توجد
                 # منشنات) بل نرجع قائمة فارغة.
@@ -523,6 +532,7 @@ class PlaywrightXMCP(IMCPServer):
             page.set_default_timeout(60_000)
             try:
                 page.goto(self._TOP_POSTS_URL, wait_until="domcontentloaded")
+                _guard_captcha(page)
                 # انتظار ليّن: إن لم تظهر بطاقات تغريدات خلال 20 ثانية نرجع فارغاً
                 try:
                     page.locator('article[data-testid="tweet"]').first.wait_for(
@@ -578,6 +588,7 @@ class PlaywrightXMCP(IMCPServer):
             page.set_default_timeout(60_000)
             try:
                 page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                _guard_captcha(page)
                 try:
                     page.locator('article[data-testid="tweet"]').first.wait_for(
                         state="visible", timeout=25_000
@@ -676,6 +687,7 @@ class PlaywrightXMCP(IMCPServer):
             seen: Dict[str, Dict[str, Any]] = {}
             if navigate:
                 page.goto(url, wait_until="domcontentloaded")
+                _guard_captcha(page)
             try:
                 page.locator('article[data-testid="tweet"]').first.wait_for(
                     state="visible", timeout=15_000
@@ -729,6 +741,7 @@ class PlaywrightXMCP(IMCPServer):
             rank = {"pairs": 3, "loose": 2, "originals": 1}
             found: Dict[str, Dict[str, Any]] = {}
             page.goto(url, wait_until="domcontentloaded")
+            _guard_captcha(page)
             try:
                 page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=15_000)
             except Exception:  # noqa: BLE001
@@ -777,6 +790,7 @@ class PlaywrightXMCP(IMCPServer):
                 # 1) الصفحة الرئيسية: البايو + التغريدات الأصلية (تحميل واحد فقط —
                 #    كان الكود يعيد الانتقال إلى نفس الرابط مرتين بلا داعٍ)
                 page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                _guard_captcha(page)
                 try:
                     page.locator('div[data-testid="UserName"]').first.wait_for(
                         state="visible", timeout=20_000
@@ -849,6 +863,7 @@ class PlaywrightXMCP(IMCPServer):
             page.set_default_timeout(60_000)
             try:
                 page.goto("https://x.com/explore/tabs/trending", wait_until="domcontentloaded")
+                _guard_captcha(page)
                 page.locator('[data-testid="trend"]').first.wait_for(
                     state="visible", timeout=45_000
                 )

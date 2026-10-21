@@ -36,6 +36,9 @@ _process: Optional[subprocess.Popen] = None
 _log_fh = None  # مقبض ملف سجل السيرفر الابن (نمنع تجمّده على أنبوب غير مقروء)
 XSUITE_LOG = XSUITE_DIR / "xsuite_server.log"
 API_TIMEOUT = 180  # مهلة معقولة لعمليات playwright؛ تضمن عدم حجب الـworker للأبد
+# النشر/الثريد يحلّان كابتشا **بعد** الإرسال أيضاً، فوق زمن رفع الميديا (90s) —
+# بمهلة 180s كان العميل يستسلم بينما الخادم يكمل، فيظهر فشل كاذب لنشر ناجح.
+_POST_TIMEOUT = max(API_TIMEOUT, int(os.getenv("CAPTCHA_TIMEOUT", "150") or 150) + 120)
 
 # ─── قفل المتصفح العام ───────────────────────────────────────
 # playwright (sync API) غير آمن للاستخدام المتزامن عبر عدة خيوط، وسيرفر app/x
@@ -363,7 +366,10 @@ def _api_call(method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
     وتتسبّبا في تجمّد السيرفر.
     """
     url = f"{XSUITE_BASE_URL}{endpoint}"
-    kwargs.setdefault("timeout", API_TIMEOUT)
+    if endpoint.startswith(("/api/post", "/api/post-thread")):
+        kwargs.setdefault("timeout", _POST_TIMEOUT)
+    else:
+        kwargs.setdefault("timeout", API_TIMEOUT)
     kwargs.setdefault("headers", _HEADERS)
 
     needs_lock = any(endpoint.startswith(e) for e in _BROWSER_ENDPOINTS)

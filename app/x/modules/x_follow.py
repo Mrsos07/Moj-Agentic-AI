@@ -2,6 +2,7 @@ import os
 from playwright.sync_api import sync_playwright
 
 from .x_unfollow import unfollow_user  # noqa: F401 - المسار القديم لإلغاء المتابعة
+from .x_captcha import guard as _captcha_guard
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -34,6 +35,7 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool, wait_
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
             page.goto(profile_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             follow_sel = f'{_HEADER} [data-testid$="-follow"]'
             unfollow_sel = f'{_HEADER} [data-testid$="-unfollow"]'
             if not _visible(page, follow_sel, 20_000):

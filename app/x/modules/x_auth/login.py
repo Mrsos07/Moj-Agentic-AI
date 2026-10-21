@@ -21,6 +21,7 @@ from curl_cffi import Response
 from .castle import CastleToken
 from .transaction import ClientTransaction
 from .ui_metrics import solve_ui_metrics
+from . import captcha_bridge
 
 
 # ============ Constants ============
@@ -235,6 +236,78 @@ class LoginFlow:
             }
         }
 
+    def arkose_login(self, token):
+        """تسليم توكن Arkose بالشكل الذي يطلبه X فعلياً (web_modal + deeplink)."""
+        self.subtask_inputs['ArkoseLogin'] = {
+            'web_modal': {
+                'completion_deeplink': (
+                    f'twitter://onboarding/web_modal/next_link?access_token={token}'),
+                'link': 'next_link',
+            }
+        }
+
+
+def _find_arkose_blob(obj):
+    """blob إن أرسله X مع خطوة Arkose (اختياري — المزوّد يعمل بدونه)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if 'blob' in str(k).lower() and isinstance(v, str) and v:
+                return v
+        for v in obj.values():
+            found = _find_arkose_blob(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_arkose_blob(v)
+            if found:
+                return found
+    return ""
+
+
+def _find_arkose_key(obj):
+    """المفتاح العام إن أرسله X؛ وإلا مفتاح الدخول المعروف في captcha_solver."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() in ('public_key', 'sitekey', 'website_public_key',
+                                  'websitekey', 'arkose_key') and isinstance(v, str) and v:
+                return v
+        for v in obj.values():
+            found = _find_arkose_key(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_arkose_key(v)
+            if found:
+                return found
+    return ""
+
+
+def _user_agent():
+    for name in ('DEFAULT_HEADERS', '_COMMON_HEADERS', 'NAVIGATION_HEADERS'):
+        ua = (globals().get(name) or {}).get('User-Agent')
+        if ua:
+            return ua
+    return ""
+
+
+async def _solve_arkose(subtask):
+    """حل كابتشا Arkose في خيط منفصل (الحلّال متزامن ويعمل بالاستقصاء)."""
+    if not captcha_bridge.enabled():
+        raise RuntimeError(
+            'X طلب تحقق Arkose (كابتشا) ولا يوجد مفتاح مزوّد في .env — '
+            'أضف YESCAPTCHA_KEY أو TWOCAPTCHA_KEY أو CAPMONSTER_KEY أو ANTICAPTCHA_KEY')
+    try:
+        return await asyncio.to_thread(
+            captcha_bridge.solve_arkose,
+            blob=_find_arkose_blob(subtask),
+            public_key=_find_arkose_key(subtask),
+            user_agent=_user_agent(),
+        )
+    except Exception as e:
+        raise RuntimeError(f'فشل حل كابتشا Arkose: {e}') from e
+
 
 # ============ Complete Login Flow ============
 async def _complete_login(flow, user_identifiers, password):
@@ -264,6 +337,12 @@ async def _complete_login(flow, user_identifiers, password):
             code = input('[?] أدخل رمز التأكيد من الإيميل: ').strip()
             flow.enter_confirmation(code)
 
+        elif 'ArkoseLogin' in subtask_ids:
+            print('[?] X طلب تحقق Arkose (كابتشا) — جاري حله…')
+            token = await _solve_arkose(flow._get_subtask('ArkoseLogin') or {})
+            print('[+] تم حل كابتشا Arkose')
+            flow.arkose_login(token)
+
         elif 'LoginSuccessSubtask' in subtask_ids:
             print('[+] تم تسجيل الدخول بنجاح!')
             break
@@ -272,6 +351,12 @@ async def _complete_login(flow, user_identifiers, password):
             raise Exception(f'تم رفض تسجيل الدخول: {flow.subtasks}')
 
         else:
+            captcha_steps = [s for s in subtask_ids
+                             if s and ('captcha' in s.lower() or 'arkose' in s.lower())]
+            if captcha_steps:
+                raise RuntimeError(
+                    f'X طلب خطوة تحقق غير مدعومة: {captcha_steps} — '
+                    f'أرسل حمولة الخطوة لتوسيع الحل')
             raise ValueError(f'خطوة غير معروفة: {subtask_ids}')
 
         await flow.execute_subtasks()

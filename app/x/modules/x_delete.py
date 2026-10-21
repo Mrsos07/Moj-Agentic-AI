@@ -6,6 +6,8 @@ from typing import Optional
 
 from playwright.sync_api import sync_playwright
 
+from .x_captcha import guard as _captcha_guard
+
 DEFAULT_TIMEOUT = 30_000
 
 #: عنصر قائمة «حذف» بالضبط — لا أي نص يحوي «حذف» في الصفحة
@@ -87,6 +89,7 @@ def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
 
         try:
             page.goto(tweet_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             focal = page.locator(focal_sel)
             try:
                 focal.first.wait_for(state="visible", timeout=25_000)
@@ -123,6 +126,7 @@ def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
                 # لم نلتقط ردّ الشبكة: التحقق بإعادة فتح التغريدة
                 page.goto(tweet_url, wait_until="domcontentloaded")
                 page.wait_for_timeout(6000)
+                _captcha_guard(page, log=print)
                 if page.locator(focal_sel).count():
                     raise RuntimeError("لم يتأكد الحذف: التغريدة ما زالت ظاهرة")
             page.wait_for_timeout(min(wait_after_ms, 1500))

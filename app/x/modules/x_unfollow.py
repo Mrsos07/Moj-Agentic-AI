@@ -1,6 +1,8 @@
 import os
 from playwright.sync_api import sync_playwright
 
+from .x_captcha import guard as _captcha_guard
+
 DEFAULT_TIMEOUT = 30_000
 
 
@@ -29,6 +31,7 @@ def unfollow_user(storage_state_path: str, profile_url: str, headless: bool, wai
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
             page.goto(profile_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             # زر رأس الملف فقط: الشريط الجانبي («من تتابع») فيه دائماً أزرار ‎-follow‎ لحسابات
             # أخرى — قيس: 3 منها على كل ملف، فكان «ظهور زر متابعة» سيؤكد إلغاءً لم يحدث.
             header = '[data-testid="primaryColumn"] [data-testid="placementTracking"]'
