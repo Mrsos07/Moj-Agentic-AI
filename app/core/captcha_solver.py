@@ -112,6 +112,7 @@ class Config:
     timeout: int
     poll: float
     funcaptcha_type: str
+    cloudflare_type: str
     x_login_key: str
     x_signup_key: str
 
@@ -145,6 +146,7 @@ def load_config() -> Config:
         timeout=max(30, _env_int("CAPTCHA_TIMEOUT", 150)),
         poll=max(1.0, float(_env_int("CAPTCHA_POLL", 5))),
         funcaptcha_type=_env("CAPTCHA_YESCAPTCHA_FUNCAPTCHA_TYPE", "FunCaptchaTaskProxylessM1"),
+        cloudflare_type=_env("CAPTCHA_YESCAPTCHA_CLOUDFLARE_TYPE", "CloudFlareTaskS3"),
         x_login_key=_env("CAPTCHA_X_ARKOSE_KEY", X_ARKOSE_LOGIN_KEY),
         x_signup_key=_env("CAPTCHA_X_SIGNUP_ARKOSE_KEY", X_ARKOSE_SIGNUP_KEY),
     )
@@ -481,6 +483,29 @@ class Solver:
         raise CaptchaError(f"رد المزوّد بلا توكن: {list(sol)[:6]}", code="NO_TOKEN",
                            provider=self.cfg.provider)
 
+    # ── صفحة تحدي Cloudflare («Just a moment…») ──
+    def solve_cloudflare(self, page_url: str, proxy: str = "") -> Dict[str, Any]:
+        """يعيد ``solution`` كاملاً (cookies/cf_clearance + user_agent + content).
+
+        يحتاج **بروكسي عاماً**: المزوّد يفتح الصفحة عبره و``cf_clearance`` يُربط
+        بمخرج الـIP والـUA — لذلك بعد الحل يجب استخدام نفس البروكسي والـUA.
+        """
+        if self.cfg.provider != "yescaptcha":
+            raise CaptchaError("حل صفحة Cloudflare مدعوم في YesCaptcha فقط",
+                               code="UNSUPPORTED", provider=self.cfg.provider)
+        proxy = (proxy or self.cfg.proxy or "").strip()
+        if not proxy:
+            raise CaptchaError(
+                "Cloudflare يحتاج بروكسي عاماً: ضع CAPTCHA_PROXY=http://user:pass@host:port "
+                "(العناوين المحلية/الخاصة مرفوضة من المزوّد)",
+                code="PROXY_REQUIRED", provider=self.cfg.provider)
+        return self._p.solve({
+            "type": self.cfg.cloudflare_type,
+            "websiteURL": page_url,
+            "proxy": proxy,
+            "requiredCookies": ["cf_clearance"],
+        })
+
     # ── صورة (OCR) ──
     def solve_image(self, image: bytes, *, numeric: bool = False, case: bool = False,
                     math: bool = False, min_length: int = 0, max_length: int = 0) -> str:
@@ -580,6 +605,7 @@ def status(check_balance: bool = False) -> Dict[str, Any]:
         "timeout": cfg.timeout,
         "x_login_key": cfg.x_login_key,
         "x_signup_key": cfg.x_signup_key,
+        "proxy": bool(cfg.proxy),
         "configured_keys": {name: bool(_env(meta["key_env"]) or _env("CAPTCHA_KEY"))
                             for name, meta in PROVIDERS.items()},
     }

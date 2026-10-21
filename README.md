@@ -234,6 +234,11 @@ copy .env.example .env      # ثم عدّل القيم
 | `CAPTCHA_PROXY` | اختياري لمهام التوكن الحسّاسة للـIP |
 | `CAPTCHA_TIMEOUT` | ثانية (افتراضي 150) |
 | `CAPTCHA_ARKOSE_GRID` | `1` لحل لغز Arkose بالنقر إن لم يُرجع المزوّد توكناً |
+| `CAPTCHA_PROXY` | **إلزامي لصفحة Cloudflare** («Just a moment»): بروكسي عام `http://user:pass@host:port` |
+
+ملاحظة Cloudflare: الصفحة ليست كابتشا Arkose بل تحقّق يحل محل الموقع؛ حلها عبر
+`CloudFlareTaskS3` يحتاج بروكسي عاماً، و`cf_clearance` الناتج مربوط بالـIP والـUA —
+لذلك يُحقن فقط إن كان UA المتصفح مطابقاً، وإلا يُطلب إعادة تشغيل المتصفح بالـUA الناتج.
 
 الفحص: `GET /api/x/captcha-status` (يعرض المزوّد والرصيد وآخر 4 أحرف من المفتاح)،
 و`.\venv\Scripts\python.exe verify_captcha.py` (`--live` يتحقق من المفتاح فعلياً).
