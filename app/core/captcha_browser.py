@@ -103,6 +103,10 @@ _DETECT_JS = r"""
   const cfForm = !!document.querySelector('#challenge-form, #cf-challenge-running, .cf-browser-verification');
   if (cfTitle || cfUrl || cfForm) out.kinds.push({kind: 'cloudflare'});
 
+  // X يقفل الحساب مؤقتاً فيحوّل كل طلب إلى /account/access (Cloudflare يحميها).
+  // هذا ليس كابتشا: لا مزوّد يحلّه — يلزم تسجيل دخول/تحقق من المالك.
+  if (/^\/account\/access/.test(location.pathname)) out.kinds.push({kind: 'account_locked'});
+
   // حجب لا يحلّه مزوّد كابتشا (لا تُخفِه كأنه كابتشا)
   const block = [
     [/whoa there/i, 'X حجب الطلب مؤقتاً (Whoa there)'],
@@ -358,6 +362,9 @@ def solve(page, *, log: Optional[_LOG] = None, rounds: int = 3,
                             "image", "cloudflare")
                 if _kind(info, k)]
     if not solvable:
+        if _kind(info, "account_locked"):
+            log("⛔ الحساب مقفل/يحتاج تحققاً (/account/access) — لا كابتشا تُحل هنا")
+            return False
         blocked = _kind(info, "blocked")
         if blocked:
             log(f"⛔ {blocked.get('message')}")
@@ -501,6 +508,11 @@ def guard_page(page, *, log: Optional[_LOG] = None) -> None:
     info = detect(page)
     if not info:
         return
+    if _kind(info, "account_locked"):
+        raise CaptchaError(
+            "X يحوّل الحساب إلى /account/access — الحساب مقفل مؤقتاً أو يحتاج تحققاً. "
+            "افتحه بتسجيل الدخول من https://x.com/account/access "
+            "(قد يطلب كابتشا أو رمز بريد) ثم أعد المحاولة")
     blocked = _kind(info, "blocked")
     if blocked and not any(_kind(info, k) for k in
                            ("recaptcha_v2", "hcaptcha", "turnstile", "funcaptcha",
@@ -520,3 +532,80 @@ def guard_page(page, *, log: Optional[_LOG] = None) -> None:
 
     if detect(page):
         raise CaptchaError("كابتشا ما زالت ظاهرة بعد محاولة الحل")
+
+
+# ── Cloudflare: الحل **قبل** إنشاء السياق (cf_clearance مربوط بالـUA والـIP) ──
+_CLEARANCE_CACHE: Dict[Any, Any] = {}
+
+
+def _proxy_dict(proxy: str) -> Dict[str, str]:
+    """`http://user:pass@host:port` → صيغة proxy في Playwright."""
+    from urllib.parse import urlparse
+
+    p = urlparse(proxy)
+    if not p.hostname or not p.port:
+        raise CaptchaError(f"صيغة CAPTCHA_PROXY غير صالحة (host:port مطلوب): {proxy}")
+    out = {"server": f"{p.scheme or 'http'}://{p.hostname}:{p.port}"}
+    if p.username:
+        out["username"] = p.username
+    if p.password:
+        out["password"] = p.password
+    return out
+
+
+def launch_proxy_kwargs() -> Dict[str, Any]:
+    """``proxy=`` لـ``chromium.launch`` عند ضبط ``CAPTCHA_PROXY``.
+
+    البروكسي **عام للمتصفح** لا لكل سياق: Playwright يرفض بروكسي سياق بلا بروكسي
+    عام، والأهم أن cf_clearance مربوط بمخرج الـIP — فكل طلب يجب أن يخرج منه.
+    """
+    proxy = os.getenv("CAPTCHA_PROXY", "").strip()
+    return {"proxy": _proxy_dict(proxy)} if proxy else {}
+
+
+def cloudflare_clearance(page_url: str, proxy: str = "", *, log: Optional[_LOG] = None,
+                         max_age: int = 2700) -> Dict[str, Any]:
+    """cf_clearance + UA عبر المزوّد، مع كاش 45 دقيقة (الكوكي يبقى صالحاً ~ساعة)."""
+    key = (page_url.split("?")[0], proxy)
+    hit = _CLEARANCE_CACHE.get(key)
+    if hit and time.time() - hit[0] < max_age:
+        return hit[1]
+    solver = _solver.get_solver()
+    if solver is None:
+        raise CaptchaError("لا مفتاح مزوّد كابتشا في .env — لا يمكن تجهيز Cloudflare")
+    sol = solver.solve_cloudflare(page_url, proxy=proxy)
+    _CLEARANCE_CACHE[key] = (time.time(), sol)
+    if log:
+        log(f"✅ Cloudflare: cf_clearance جاهز ({len(sol.get('cookies') or {})} كوكي)")
+    return sol
+
+
+def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/home",
+                proxy: Optional[str] = None, presolve: Optional[bool] = None,
+                log: Optional[_LOG] = None, **kwargs):
+    """بديل ``browser.new_context``: يجهّز Cloudflare قبل الإنشاء إن وُجد بروكسي.
+
+    بلا بروكسي ⇒ سلوك Playwright الافتراضي حرفياً. مع بروكسي ⇒ نحل أولاً ثم ننشئ
+    السياق بالـUA الناتج ونحقن الكوكيز؛ الحقن بعد الإنشاء يُرفض لأن cf_clearance
+    مربوط بالـUA (قياس حقيقي: 3 محاولات بكروم مرئي/مخفي لم تمرّ بلا بروكسي).
+    """
+    log = log or (lambda _m: None)
+    proxy = (proxy if proxy is not None else os.getenv("CAPTCHA_PROXY", "")).strip()
+    if presolve is None:
+        presolve = os.getenv("CAPTCHA_CLOUDFLARE_PRESOLVE", "1").lower() not in (
+            "0", "false", "no", "off")
+    if proxy and presolve:
+        try:
+            sol = cloudflare_clearance(page_url, proxy, log=log)
+            ua = (sol.get("user_agent") or "").strip()
+            if ua:
+                kwargs["user_agent"] = ua
+            ctx = browser.new_context(storage_state=storage_state, **kwargs)
+            cookies = sol.get("cookies") or {}
+            if cookies:
+                ctx.add_cookies([{"name": str(k), "value": str(v), "url": page_url}
+                                 for k, v in cookies.items()])
+            return ctx
+        except Exception as e:  # noqa: BLE001 - سياق عادي بدل إفشال العملية كلها
+            log(f"⚠️ تعذّر تجهيز Cloudflare مسبقاً: {e} — سياق عادي")
+    return browser.new_context(storage_state=storage_state, **kwargs)

@@ -355,9 +355,24 @@ defences it forced are still in the code and still required if you set
   proxy** (`CAPTCHA_PROXY`); local/private addresses are rejected by the provider.
   `cf_clearance` is bound to the exit IP **and** the User-Agent, and YesCaptcha
   passes the check with desktop Chrome on **Linux**. So the returned cookies only
-  help a context launched with the returned `user_agent` (and the same proxy);
-  `captcha_browser.solve()` refuses to inject when the UA differs. Doing this
-  properly means pre-solving before `new_context()` — not a mid-page injection.
+  help a context launched with the returned `user_agent` (and the same proxy).
+- Pre-solving is implemented: `captcha_browser.new_context()` (wired in `x_post`,
+  `x_actions`, `x_delete`, `x_follow`, `x_unfollow`, `x_profile`, `x_bookmark`, and
+  the `playwright_x` reads) solves `CloudFlareTaskS3` **before** creating the
+  context when `CAPTCHA_PROXY` is set, then creates it with the returned UA and
+  injects `cf_clearance`; results are cached 45 min (`_CLEARANCE_CACHE`). The proxy
+  must be **global at launch** (`launch_proxy_kwargs()`), not per-context:
+  Playwright refuses a per-context proxy without a global one, and `cf_clearance`
+  is IP-bound anyway — so every request has to leave through it.
+  `CAPTCHA_CLOUDFLARE_PRESOLVE=0` disables the pre-solve.
+- Measured 2026-10-21 on @emaad5079 (valid `auth_token`+`ct0`): the real blocker was
+  **not** a captcha. `api.x.com` GraphQL returned code 326 «this account is
+  temporarily locked … log in to https://twitter.com to unlock», and every browser
+  request bounced to `/account/access` (which Cloudflare fronts). So `detect()`
+  reports `kind: "account_locked"` and the guard raises «الحساب مقفل مؤقتاً … افتحه
+  من /account/access» before any paid call. **No captcha provider can unlock an
+  account** — only the owner can, by logging in (which is where Arkose solving
+  applies, if X asks for it).
 - The image/OCR path (`solve_image`) is for X's own text captcha; the emulator
   cannot crop it from the WebView, so it only handles the Arkose grid.
 - Never log a captcha key. Errors keep the provider code (`ERROR_…`, `HTTP_401`) so

@@ -3,6 +3,8 @@ from playwright.sync_api import sync_playwright
 
 from .x_unfollow import unfollow_user  # noqa: F401 - المسار القديم لإلغاء المتابعة
 from .x_captcha import guard as _captcha_guard
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -27,10 +29,11 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool, wait_
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.launch(channel=chrome_channel, headless=headless)
+            browser = p.chromium.launch(channel=chrome_channel, headless=headless,
+                                            **_launch_proxy_kwargs())
         except Exception:
-            browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+            browser = p.chromium.launch(headless=headless, **_launch_proxy_kwargs())
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:

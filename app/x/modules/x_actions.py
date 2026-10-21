@@ -6,6 +6,8 @@ from typing import Optional
 from playwright.sync_api import Page, sync_playwright
 
 from .x_captcha import guard as _captcha_guard
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
 
 
 DEFAULT_TIMEOUT = 30_000
@@ -14,11 +16,12 @@ DEFAULT_TIMEOUT = 30_000
 def _launch_browser(p, headless: bool):
     """Launch Chromium with optional Chrome channel (defaults to installed Chrome)."""
     chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
+    proxy = _launch_proxy_kwargs()
     try:
-        return p.chromium.launch(channel=chrome_channel, headless=headless)
+        return p.chromium.launch(channel=chrome_channel, headless=headless, **proxy)
     except Exception:
         # Fallback if channel isn't available
-        return p.chromium.launch(headless=headless)
+        return p.chromium.launch(headless=headless, **proxy)
 
 
 def _norm_tweet_url(url: str) -> str:
@@ -268,7 +271,7 @@ def like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_aft
     """Like a tweet by URL."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -304,7 +307,7 @@ def repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_a
     """Repost (retweet) a tweet by URL."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -408,7 +411,7 @@ def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, w
     كان يضغط نص «Undo repost» الإنجليزي فقط، بلا أي تحقق، على أول تغريدة في الصفحة."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -440,7 +443,7 @@ def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wai
     معجَباً بها بدل أن يتراجع."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -476,7 +479,7 @@ def reply_to_tweet(
 
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -558,7 +561,7 @@ def bookmark_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait
     """Bookmark a tweet by URL."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -606,7 +609,7 @@ def quote_tweet(
 
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -713,7 +716,7 @@ def share_copy_link(storage_state_path: str, tweet_url: str, headless: bool, wai
     """Open share menu and click 'Copy link' (share via OS sheet is not reliable in automation)."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -758,7 +761,7 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool = True
 
     with sync_playwright() as p:
         browser = p.chromium.launch(channel=chrome_channel, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(60_000)
 
@@ -833,7 +836,7 @@ def unfollow_user(storage_state_path: str, profile_url: str, headless: bool = Tr
 
     with sync_playwright() as p:
         browser = p.chromium.launch(channel=chrome_channel, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(60_000)
 

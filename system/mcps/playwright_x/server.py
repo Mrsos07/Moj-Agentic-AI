@@ -70,6 +70,15 @@ def _guard_captcha(page) -> None:
     guard_page(page, log=logger.info)
 
 
+def _new_context(browser, storage_state_path: str, *, viewport=None,
+                 page_url: str = "https://x.com/home"):
+    """سياق يجهّز Cloudflare مسبقاً إن وُجد CAPTCHA_PROXY (وإلا سياق عادي)."""
+    from app.core.captcha_browser import new_context
+
+    kwargs = {"viewport": viewport} if viewport else {}
+    return new_context(browser, storage_state_path, page_url=page_url, **kwargs)
+
+
 # دالة JS لاستخراج بطاقة تغريدة واحدة — مشتركة بين قارئ التايم لاين وقارئ الخلايا
 _ARTICLE_FN = r"""
   const readArticle = a => {
@@ -467,10 +476,8 @@ class PlaywrightXMCP(IMCPServer):
         # safe to run concurrently across threads and would deadlock the fleet.
         with browser_lock, sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
@@ -524,10 +531,8 @@ class PlaywrightXMCP(IMCPServer):
         seen: Dict[str, Dict[str, Any]] = {}
         with browser_lock, sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
@@ -580,10 +585,8 @@ class PlaywrightXMCP(IMCPServer):
         seen: Dict[str, Dict[str, Any]] = {}
         with browser_lock, sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 1000},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 1000})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
@@ -780,10 +783,8 @@ class PlaywrightXMCP(IMCPServer):
         started = time.time()
         with _browser_slot(lock_timeout), sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(30_000)
             try:
@@ -855,10 +856,8 @@ class PlaywrightXMCP(IMCPServer):
 
         with browser_lock, sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
