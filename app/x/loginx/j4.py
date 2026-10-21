@@ -904,6 +904,11 @@ class LDPlayerChromeAutomation:
         if not question:
             self.log("⚠️ كابتشا بلا سؤال مقروء — نوع غير مدعوم على المحاكي", "ERROR")
             return False
+        if "arrow" in question.lower():
+            # لغز الأسهم: التصنيف يعطي «أي صورة» لا «أي بلاطة»؛ ننقر شبكة فيكون
+            # النقر خطأً (عيّنة المزوّد الحقيقية q62 رجعت objects=[1]).
+            self.log("⚠️ لغز Arkose من نوع الأسهم — لا ننقر شبكة (تخطٍّ آمن)", "ERROR")
+            return False
 
         try:
             cols = max(1, int(os.getenv("CAPTCHA_ARKOSE_COLS", "3")))

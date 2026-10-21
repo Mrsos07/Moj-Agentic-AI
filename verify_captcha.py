@@ -605,6 +605,18 @@ auto2._captcha_module = lambda: type("M", (), {
     "is_enabled": staticmethod(lambda: False), "get_solver": staticmethod(lambda: None)})()
 check("بلا مفتاح: المحاكي يرجع False (لا يدّعي النجاح)", auto2.solve_captcha() is False)
 
+# لغز الأسهم: المزوّد يرجع «أي صورة» لا «أي بلاطة» (عيّنة حقيقية: objects=[1]) —
+# النقر على شبكة هنا خطأ صريح، فنرفض بدل التخمين.
+ARROW_Q = "Use the arrows to change the number of objects until it matches the left image"
+arrow = FakeDevice()
+arrow.texts = ["Verify you are human", ARROW_Q]
+arrow.dump_hierarchy = lambda: (f'<?xml version="1.0"?><hierarchy><node text="{ARROW_Q}" '
+                                f'bounds="[90,500][990,560]"/></hierarchy>')
+auto3 = j4.LDPlayerChromeAutomation(log_callback=lambda *_a: None)
+auto3.d = arrow
+auto3._captcha_module = lambda: FakeModule
+check("لغز الأسهم: رفض بلا نقر أعمى", auto3.solve_captcha() is False and not arrow.clicks)
+
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n8) الربط: كل مسار نشر/تفاعل يمر على البوابة")
 import inspect  # noqa: E402
