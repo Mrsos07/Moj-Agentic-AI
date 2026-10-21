@@ -5,6 +5,8 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from .x_captcha import guard as _captcha_guard
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
 
 
 # =================
@@ -575,9 +577,11 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
                 "--disable-web-security", "--disable-features=VizDisplayCompositor",
                 "--window-size=1920,1080",
             ]
+        launch_args.update(_launch_proxy_kwargs())
         browser = p.chromium.launch(**launch_args)
-        context = browser.new_context(
-            storage_state=storage_state_path,
+        context = _captcha_context(
+            browser, storage_state_path,
+            page_url="https://x.com/home",
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -739,11 +743,13 @@ def post_to_x(storage_state_path: str, text: str, media_path: Optional[str], hea
                 ]
             })
         
+        launch_args.update(_launch_proxy_kwargs())
         browser = p.chromium.launch(**launch_args)
         
         # إعدادات السياق مع viewport مناسب
-        context = browser.new_context(
-            storage_state=storage_state_path,
+        context = _captcha_context(
+            browser, storage_state_path,
+            page_url="https://x.com/home",
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )

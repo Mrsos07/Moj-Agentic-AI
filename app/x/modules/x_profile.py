@@ -5,6 +5,8 @@ from typing import List, Optional, Tuple
 from playwright.sync_api import sync_playwright
 
 from .x_captcha import guard as _captcha_guard
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
 
 
 def _file_inputs_in_edit_dialog(page):
@@ -108,10 +110,11 @@ def update_profile_on_x(
     chrome_channel = os.getenv('XSUITE_CHROME_CHANNEL', '').strip() or "chrome"
     with sync_playwright() as p:
         try:
-            browser = p.chromium.launch(channel=chrome_channel, headless=headless)
+            browser = p.chromium.launch(channel=chrome_channel, headless=headless,
+                                            **_launch_proxy_kwargs())
         except Exception:
-            browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+            browser = p.chromium.launch(headless=headless, **_launch_proxy_kwargs())
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
 
         page.goto("https://x.com/settings/profile", wait_until="domcontentloaded")

@@ -609,6 +609,63 @@ try:
               "Cloudflare" in msg and "CAPTCHA_PROXY" in msg, msg)
         browser.close()
         cf_srv2.stop()
+
+        # ── حساب مقفل: X يحوّل إلى /account/access (لا كابتشا تُحل) ──
+        lock_srv = PageServer()
+        browser = pw.chromium.launch(channel="chrome", headless=True)
+        page = browser.new_page()
+        page.goto(lock_srv.base + "account/access")
+        check("كشف /account/access (حساب مقفل/يحتاج تحققاً)",
+              CB._kind(CB.detect(page) or {"kinds": []}, "account_locked") is not None,
+              str(CB.detect(page)))
+        with env(CAPTCHA_PROXY="http://u:p@1.2.3.4:8080"):
+            try:
+                CB.guard_page(page)
+                msg = ""
+            except CB.CaptchaError as e:
+                msg = str(e)
+        check("قفل الحساب: رسالة صريحة بلا محاولة دفع",
+              "account/access" in msg and "مقفل" in msg, msg)
+        browser.close()
+        lock_srv.stop()
+
+        # ── new_context: تجهيز Cloudflare قبل الإنشاء (لا حقن بعدها) ──
+        calls = {"n": 0}
+        fake3 = FakeSolver()
+
+        def fake_cf(_url, proxy=""):
+            calls["n"] += 1
+            return {"cookies": {"cf_clearance": "CF"}, "user_agent": "UA-Linux-Test"}
+
+        fake3.solve_cloudflare = fake_cf
+        CB._solver.get_solver = lambda: fake3
+        CB._CLEARANCE_CACHE.clear()
+        with env(CAPTCHA_PROXY="http://u:p@1.2.3.4:8080"):
+            kw = CB.launch_proxy_kwargs()
+        check("بروكسي الإطلاق يُحوَّل لصيغة Playwright",
+              kw.get("proxy") == {"server": "http://1.2.3.4:8080",
+                                  "username": "u", "password": "p"}, str(kw))
+        browser = pw.chromium.launch(channel="chrome", headless=True)
+        with env(CAPTCHA_PROXY="http://u:p@1.2.3.4:8080"):
+            ctx = CB.new_context(browser, None, page_url="https://x.com/home",
+                                 viewport={"width": 800, "height": 600})
+            p2 = ctx.new_page()
+            check("new_context ببروكسي: UA من الحل (شرط cf_clearance)",
+                  p2.evaluate("() => navigator.userAgent") == "UA-Linux-Test")
+            check("new_context: cf_clearance محقون",
+                  any(c["name"] == "cf_clearance" for c in ctx.cookies()))
+            ctx2 = CB.new_context(browser, None, page_url="https://x.com/home",
+                                  viewport={"width": 800, "height": 600})
+            check("new_context: كاش يمنع دفعاً ثانياً", calls["n"] == 1)
+            ctx.close()
+            ctx2.close()
+        with env(CAPTCHA_PROXY=""):
+            ctx3 = CB.new_context(browser, None, viewport={"width": 800, "height": 600})
+            p3 = ctx3.new_page()
+            check("new_context بلا بروكسي: سلوك افتراضي (لا UA مُستعار)",
+                  p3.evaluate("() => navigator.userAgent") != "UA-Linux-Test")
+            ctx3.close()
+        browser.close()
 except Exception as e:  # noqa: BLE001
     check("Playwright/Chrome متاح لاختبار المتصفح", False, f"{type(e).__name__}: {e}")
 
