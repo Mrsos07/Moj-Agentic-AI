@@ -96,6 +96,13 @@ _DETECT_JS = r"""
       'input[placeholder*="رمز" i], input[placeholder*="الأحرف" i]');
   if (img && input) out.kinds.push({kind: 'image', el: tag(img), input: tag(input)});
 
+  // Cloudflare «Just a moment…» — صفحة تحقق تحل محل الموقع، ليست كابتشا Arkose
+  const cfTitle = /just a moment|checking your browser|performing security verification|لحظة|جاري التحقق|تحقق أمني/i
+      .test(document.title || '');
+  const cfUrl = /\/cdn-cgi\/challenge-platform\//.test(location.href);
+  const cfForm = !!document.querySelector('#challenge-form, #cf-challenge-running, .cf-browser-verification');
+  if (cfTitle || cfUrl || cfForm) out.kinds.push({kind: 'cloudflare'});
+
   // حجب لا يحلّه مزوّد كابتشا (لا تُخفِه كأنه كابتشا)
   const block = [
     [/whoa there/i, 'X حجب الطلب مؤقتاً (Whoa there)'],
@@ -347,7 +354,8 @@ def solve(page, *, log: Optional[_LOG] = None, rounds: int = 3,
 
     # صفحة الحجب قد تحمل كابتشا أيضاً («Whoa there» + Arkose): نحاول الحل أولاً،
     # ولا نرمي رسالة الحجب إلا إذا لم يكن في الصفحة ما يُحل.
-    solvable = [k for k in ("recaptcha_v2", "hcaptcha", "turnstile", "funcaptcha", "image")
+    solvable = [k for k in ("recaptcha_v2", "hcaptcha", "turnstile", "funcaptcha",
+                            "image", "cloudflare")
                 if _kind(info, k)]
     if not solvable:
         blocked = _kind(info, "blocked")
@@ -366,6 +374,43 @@ def solve(page, *, log: Optional[_LOG] = None, rounds: int = 3,
         user_agent = page.evaluate("() => navigator.userAgent") or ""
     except Exception:  # noqa: BLE001
         pass
+
+    cloudflare = _kind(info, "cloudflare")
+    if cloudflare:
+        proxy = (os.getenv("CAPTCHA_PROXY", "").strip()
+                 or solver_mod.load_config().proxy)
+        if not proxy:
+            log("⛔ Cloudflare «Just a moment» — ليس كابتشا؛ يحتاج CAPTCHA_PROXY عاماً")
+            return False
+        log("🧩 Cloudflare — طلب cf_clearance عبر البروكسي…")
+        try:
+            sol = solver.solve_cloudflare(page_url, proxy=proxy)
+        except Exception as e:  # noqa: BLE001
+            log(f"⚠️ فشل Cloudflare: {e}")
+            return False
+        ua_solved = (sol.get("user_agent") or "").strip()
+        if ua_solved and user_agent and ua_solved != user_agent:
+            # cf_clearance مربوط بالـUA والـIP؛ حقنه في جلسة بUA آخر يُرفض
+            log("⚠️ حُلّ Cloudflare بـUA مختلف — أعد تشغيل المتصفح بالـUA الناتج "
+                "(cf_clearance مربوط بالـUA والـIP)")
+            return False
+        cookies = sol.get("cookies") or {}
+        if not cookies:
+            log("⚠️ خدمة الحل لم تُرجع كوكيز Cloudflare")
+            return False
+        try:
+            page.context.add_cookies([
+                {"name": str(k), "value": str(v), "url": page_url}
+                for k, v in cookies.items()])
+        except Exception as e:  # noqa: BLE001
+            log(f"⚠️ تعذّر ضبط كوكيز Cloudflare: {e}")
+            return False
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        gone = not _kind(detect(page) or {}, "cloudflare")
+        log("✅ زال تحدّي Cloudflare" if gone
+            else "⚠️ تحدّي Cloudflare ما زال قائماً بعد الحقن")
+        return gone
 
     recaptcha = _kind(info, "recaptcha_v2")
     if recaptcha and recaptcha.get("sitekey"):
@@ -458,12 +503,18 @@ def guard_page(page, *, log: Optional[_LOG] = None) -> None:
         return
     blocked = _kind(info, "blocked")
     if blocked and not any(_kind(info, k) for k in
-                           ("recaptcha_v2", "hcaptcha", "turnstile", "funcaptcha", "image")):
+                           ("recaptcha_v2", "hcaptcha", "turnstile", "funcaptcha",
+                            "image", "cloudflare")):
         raise CaptchaError(blocked.get("message") or "X حجب الطلب")
     if not solve(page, log=log):
         blocked = _kind(info, "blocked")
+        if blocked:
+            raise CaptchaError(blocked.get("message") or "X حجب الطلب")
+        if _kind(info, "cloudflare"):
+            raise CaptchaError(
+                "Cloudflare يطلب تحققاً أمنياً (Just a moment) — ليس كابتشا Arkose. "
+                "يحتاج بروكسي عاماً في CAPTCHA_PROXY ليُحل عبر YesCaptcha")
         raise CaptchaError(
-            blocked.get("message") if blocked else
             "ظهرت كابتشا ولم تُحل آلياً — تحقق من مفتاح المزوّد في .env "
             "(YESCAPTCHA_KEY / TWOCAPTCHA_KEY / CAPMONSTER_KEY / ANTICAPTCHA_KEY)")
 

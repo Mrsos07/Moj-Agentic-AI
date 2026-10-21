@@ -342,6 +342,22 @@ defences it forced are still in the code and still required if you set
   «which image», not «which cell», and the docs describe switching with the arrows
   — a 3×2 tile tap would be a wrong click that burns attempts. Only `Pick the …`
   6-tile grids use the tap path. Don't «fix» this by guessing an arrow count.
+- **Cloudflare is a different animal** («Just a moment…» / «لحظة…» / «Performing
+  security verification», Ray ID). Measured on 2026-10-21 with @emaad5079's valid
+  cookies: `x.com/home` redirects to `/account/access` and stays challenged for 30s
+  in both headless and visible Chrome, even with `--disable-blink-features=
+  AutomationControlled` and `navigator.webdriver` hidden — i.e. it is IP/egress
+  level, not a widget we can inject into. `detect()` now returns
+  `kind: "cloudflare"`; the guard raises a message naming `CAPTCHA_PROXY` instead of
+  silently passing (it used to return `None` and the caller then «observed» an empty
+  timeline).
+- Cloudflare solving is `CloudFlareTaskS3` (20 points) and **requires a public
+  proxy** (`CAPTCHA_PROXY`); local/private addresses are rejected by the provider.
+  `cf_clearance` is bound to the exit IP **and** the User-Agent, and YesCaptcha
+  passes the check with desktop Chrome on **Linux**. So the returned cookies only
+  help a context launched with the returned `user_agent` (and the same proxy);
+  `captcha_browser.solve()` refuses to inject when the UA differs. Doing this
+  properly means pre-solving before `new_context()` — not a mid-page injection.
 - The image/OCR path (`solve_image`) is for X's own text captcha; the emulator
   cannot crop it from the WebView, so it only handles the Arkose grid.
 - Never log a captcha key. Errors keep the provider code (`ERROR_…`, `HTTP_401`) so

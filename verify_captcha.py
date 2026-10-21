@@ -83,6 +83,11 @@ ASYNC_SOLUTIONS = {
     "FunCaptchaTaskProxylessM1": {"token": "arkose-token"},
     "FunCaptchaTaskProxyless": {"token": "arkose-token"},
     "ImageToTextTask": {"text": "AbC12"},
+    "CloudFlareTaskS3": {"cookies": {"cf_clearance": "CF-CLEAR"},
+                         "user_agent": "UA-Linux-Chrome",
+                         "content": "<html>ok</html>"},
+    "CloudFlareTaskS2": {"cookies": {"cf_clearance": "CF-CLEAR"},
+                         "user_agent": "UA-Linux-Chrome"},
 }
 
 
@@ -184,6 +189,37 @@ def tasks_of(server):
     return [p for path, p in server.requests if path.endswith("/createTask") or path.endswith("/in.php")]
 
 
+class PageServer:
+    """صفحة محلية: أول طلب تحدي Cloudflare، ثم صفحة عادية (لمحاكاة زوال التحدي)."""
+
+    CHALLENGE = ("<html><head><title>Just a moment...</title></head>"
+                 "<body>Performing security verification</body></html>")
+    NORMAL = "<html><head><title>X</title></head><body>home</body></html>"
+
+    def __init__(self):
+        self.challenge = True
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = (outer.CHALLENGE if outer.challenge else outer.NORMAL).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_a):
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}/"
+
+    def stop(self):
+        self.server.shutdown()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 print("1) الإعداد واختيار المزوّد")
 with env(CAPTCHA_ENABLED=1, CAPTCHA_PROVIDER="yescaptcha", YESCAPTCHA_KEY="yc-12345678",
@@ -283,6 +319,20 @@ with env(CAPTCHA_ENABLED=1, CAPTCHA_PROVIDER="yescaptcha", YESCAPTCHA_KEY="yc-te
           _try(lambda: CS.Solver(CS.Config(**{**CS.load_config().__dict__,
                                               "provider": "capmonster"})).classify_funcaptcha(img, "x"))
           .startswith("UNSUPPORTED"))
+
+    # صفحة تحدي Cloudflare: بروكسي إلزامي + cf_clearance مطلوب صراحةً
+    sol = solver.solve_cloudflare("https://x.com/home", proxy="http://u:p@1.2.3.4:8080")
+    cf_task = tasks_of(yc)[-1]["task"]
+    check("Cloudflare: النوع S3 (الأرخص) والبروكسي يمرّان",
+          cf_task["type"] == "CloudFlareTaskS3"
+          and cf_task["proxy"] == "http://u:p@1.2.3.4:8080", str(cf_task))
+    check("Cloudflare: requiredCookies=[cf_clearance] حتى لا يُحتسب بلا الكوكي",
+          cf_task.get("requiredCookies") == ["cf_clearance"])
+    check("Cloudflare: يعيد الكوكيز والـUA",
+          sol.get("cookies", {}).get("cf_clearance") == "CF-CLEAR"
+          and sol.get("user_agent") == "UA-Linux-Chrome")
+    check("Cloudflare بلا بروكسي: رفض صريح قبل أي دفع",
+          _try(lambda: solver.solve_cloudflare("https://x.com/home", proxy="")) == "PROXY_REQUIRED")
 yc.stop()
 
 
@@ -516,6 +566,49 @@ try:
             msg = str(e)
         check("كابتشا بلا مفتاح: guard يرفع ولا يكمل بصمت", "YESCAPTCHA_KEY" in msg, msg)
         browser.close()
+
+        # ── Cloudflare «Just a moment» (ليس كابتشا Arkose) ──
+        cf_srv = PageServer()
+        browser = pw.chromium.launch(channel="chrome", headless=True)
+        page = browser.new_page()
+        page.goto(cf_srv.base)
+        check("كشف صفحة Cloudflare",
+              CB._kind(CB.detect(page) or {"kinds": []}, "cloudflare") is not None,
+              str(CB.detect(page)))
+
+        called = {"n": 0}
+        fake2 = FakeSolver()
+        fake2.solve_cloudflare = lambda url, proxy="": (
+            called.__setitem__("n", called["n"] + 1)
+            or {"cookies": {"cf_clearance": "CF"}, "user_agent": ""})
+        CB._solver.get_solver = lambda: fake2
+        with env(CAPTCHA_PROXY=""):
+            check("Cloudflare بلا بروكسي: لا استدعاء مدفوع",
+                  CB.solve(page, log=lambda _m: None) is False and called["n"] == 0)
+
+        with env(CAPTCHA_PROXY="http://u:p@1.2.3.4:8080"):
+            cf_srv.challenge = False          # بعد الحقن يعود الموقع الطبيعي
+            ok = CB.solve(page, log=lambda _m: None)
+        check("Cloudflare: حل + حقن cf_clearance + زوال التحدّي",
+              ok and called["n"] == 1
+              and any(c["name"] == "cf_clearance" for c in page.context.cookies()))
+        browser.close()
+        cf_srv.stop()
+
+        cf_srv2 = PageServer()
+        browser = pw.chromium.launch(channel="chrome", headless=True)
+        page = browser.new_page()
+        page.goto(cf_srv2.base)
+        with env(CAPTCHA_PROXY=""):
+            try:
+                CB.guard_page(page)
+                msg = ""
+            except CB.CaptchaError as e:
+                msg = str(e)
+        check("guard: رسالة Cloudflare صريحة تطلب بروكسياً",
+              "Cloudflare" in msg and "CAPTCHA_PROXY" in msg, msg)
+        browser.close()
+        cf_srv2.stop()
 except Exception as e:  # noqa: BLE001
     check("Playwright/Chrome متاح لاختبار المتصفح", False, f"{type(e).__name__}: {e}")
 
