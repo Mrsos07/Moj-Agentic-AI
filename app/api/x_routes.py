@@ -282,6 +282,20 @@ async def x_upload_cookies(
         )
 
 
+@router.get("/captcha-status")
+async def x_captcha_status(
+    check_balance: bool = False,
+    current_user: User = Depends(get_current_user)
+):
+    """حالة مزوّد حل الكابتشا (المزوّد/الرصيد/آخر 4 أحرف من المفتاح — لا المفتاح).
+
+    ``check_balance=true`` يستدعي المزوّد فعلياً (مجاني في كل المزوّدين).
+    """
+    from app.core.captcha_solver import status as captcha_status
+
+    return captcha_status(check_balance=check_balance)
+
+
 @router.post("/post", response_model=XPostResponse)
 async def x_post(
     request: XPostRequest,

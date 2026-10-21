@@ -801,6 +801,173 @@ class LDPlayerChromeAutomation:
         """فحص سريع هل العنصر موجود."""
         return self.d(**kwargs).exists(timeout=timeout)
 
+    # ---------------- CAPTCHA (Arkose / صورة) ---------------- #
+
+    _CAPTCHA_HINTS = (
+        "Verify you are human", "verify you are human", "Confirm you are human",
+        "Are you a robot", "I'm not a robot", "Whoa there", "unusual activity",
+        "تحقق من أنك", "لست روبوتاً", "نشاط غير معتاد",
+    )
+
+    @staticmethod
+    def _captcha_module():
+        """تحميل الحلّال المشترك ``app/core/captcha_solver.py`` بالمسار.
+
+        loginx يعمل بـcwd=app/x/loginx فلا يستطيع استيراد حزمة ``app``.
+        """
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        name = "moj_captcha_solver"
+        mod = sys.modules.get(name)
+        if mod is not None:
+            return mod
+        core = None
+        for parent in Path(__file__).resolve().parents:
+            for cand in (parent / "core" / "captcha_solver.py",
+                         parent / "app" / "core" / "captcha_solver.py"):
+                if cand.exists():
+                    core = cand
+                    break
+            if core:
+                break
+        if core is None:
+            return None
+        spec = importlib.util.spec_from_file_location(name, core)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _captcha_present(self):
+        """هل ظهرت شاشة تحقق بشري على المحاكي؟"""
+        if not self.d:
+            return False
+        for hint in self._CAPTCHA_HINTS:
+            try:
+                if self.u2_exists(textContains=hint, timeout=0.25):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _challenge_question(self):
+        """سؤال لغز Arkose من شجرة إمكانية الوصول (Chrome يعرض نص الإطار)."""
+        try:
+            xml = self.d.dump_hierarchy()
+        except Exception:
+            return ""
+        import xml.etree.ElementTree as ET
+
+        try:
+            root = ET.fromstring(xml)
+        except Exception:
+            return ""
+        for node in root.iter():
+            text = (node.get("text") or "").strip()
+            if len(text) >= 12 and ("?" in text or text.split(" ")[0].lower() in
+                                    ("pick", "select", "choose", "find", "use", "click")):
+                return text
+        return ""
+
+    def _bounds_for_text(self, text):
+        try:
+            el = self.d(textContains=text)
+            if el.exists(timeout=0.5):
+                bounds = el.info.get("bounds") or {}
+                if bounds.get("right", 0) > bounds.get("left", 0):
+                    return bounds
+        except Exception:
+            pass
+        return {}
+
+    def solve_captcha(self, max_rounds=4):
+        """حل كابتشا المحاكي بالتصنيف الصوري: المزوّد يحدد البلاطة ونحن ننقرها.
+
+        لا يوجد حقن JS على المحاكي، فمسار التوكن لا يعمل هنا؛ النقر على البلاطة
+        هو ما يفعله الإنسان نفسه.
+        """
+        mod = self._captcha_module()
+        if mod is None:
+            self.log("⚠️ لم أجد app/core/captcha_solver.py — لا حل آلي للكابتشا", "ERROR")
+            return False
+        if not mod.is_enabled():
+            self.log("⚠️ كابتشا ظاهرة ولا مفتاح مزوّد في .env — أضف YESCAPTCHA_KEY "
+                     "(أو TWOCAPTCHA_KEY/CAPMONSTER_KEY/ANTICAPTCHA_KEY)", "ERROR")
+            return False
+        solver = mod.get_solver()
+        if solver is None:
+            return False
+
+        question = self._challenge_question()
+        if not question:
+            self.log("⚠️ كابتشا بلا سؤال مقروء — نوع غير مدعوم على المحاكي", "ERROR")
+            return False
+
+        try:
+            cols = max(1, int(os.getenv("CAPTCHA_ARKOSE_COLS", "3")))
+            rows = max(1, int(os.getenv("CAPTCHA_ARKOSE_ROWS", "2")))
+        except ValueError:
+            cols, rows = 3, 2
+
+        import io
+
+        for attempt in range(1, max_rounds + 1):
+            try:
+                img = self.d.screenshot()
+            except Exception as e:
+                self.log(f"⚠️ تعذّر تصوير الشاشة: {e}", "ERROR")
+                return False
+            width, height = img.size
+
+            # المنطقة أسفل سؤال اللغز: الشاشة كلها لو الحدود غير متاحة
+            bounds = self._bounds_for_text(question)
+            left = int(bounds.get("left") or int(width * 0.05))
+            right = int(bounds.get("right") or int(width * 0.95))
+            top = int(bounds.get("bottom") or int(height * 0.35))
+            bottom = int(height * 0.90)
+            if right - left < 100 or bottom - top < 100:
+                self.log("⚠️ حدود لغز الكابتشا غير معقولة — إلغاء الحل", "ERROR")
+                return False
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            try:
+                picks = solver.classify_funcaptcha(buf.getvalue(), question)
+            except Exception as e:
+                self.log(f"⚠️ تصنيف الكابتشا فشل: {e}", "ERROR")
+                return False
+
+            index = picks[0]
+            if index < 0 or index >= cols * rows:
+                self.log(f"⚠️ بلاطة خارج الشبكة ({index}) — إلغاء", "ERROR")
+                return False
+            col, row = index % cols, index // cols
+            tile_w = (right - left) / cols
+            tile_h = (bottom - top) / rows
+            x = int(left + col * tile_w + tile_w / 2)
+            y = int(top + row * tile_h + tile_h / 2)
+            self.log(f"كابتشا: البلاطة {index + 1}/{cols * rows} "
+                     f"(«{question[:50]}»)", "CLICK")
+            try:
+                self.d.click(x, y)
+            except Exception as e:
+                self.log(f"⚠️ فشل النقر على البلاطة: {e}", "ERROR")
+                return False
+            time.sleep(1.2)
+
+            for label in ("Verify", "Next", "Submit", "Continue",
+                          "تحقق", "التالي", "متابعة"):
+                if self.u2_click(textContains=label, timeout=1.5):
+                    break
+            time.sleep(2.5)
+            if not self._captcha_present():
+                self.log("حُلّت كابتشا المحاكي", "SUCCESS")
+                return True
+            self.log(f"↻ جولة {attempt}/{max_rounds}: اللغز ما زال ظاهراً", "PROGRESS")
+        return False
+
     # ---------------- ROBUST WEB FIELD INPUT ---------------- #
 
     def _type_via_adb(self, text):
@@ -1451,11 +1618,23 @@ class LDPlayerChromeAutomation:
         self.log("تم الضغط على زر تسجيل الدخول، انتظار تحميل الحساب...", "TASK")
 
         # ننتظر حتى تختفي صفحة Login أو يظهر خطأ (أقصى 30 ثانية)
+        captcha_attempted = False
         for _ in range(30):
             if self.u2_exists(textContains="Wrong password", timeout=0.5) or \
                self.u2_exists(textContains="كلمة المرور غير صحيحة", timeout=0.3):
                 self.log("كلمة المرور خاطئة!", "ERROR")
                 return False
+            # كابتشا «Verify you are human»: اختفاء زر Log in هنا ليس نجاحاً
+            if self._captcha_present():
+                if not captcha_attempted:
+                    captcha_attempted = True
+                    self.log("🧩 X طلب تحققاً بشرياً (كابتشا) — محاولة حل آلي…", "TASK")
+                    if self.solve_captcha():
+                        self.log("✅ حُلّت الكابتشا — نكمل تسجيل الدخول", "SUCCESS")
+                    else:
+                        self.log("⛔ لم تُحل الكابتشا آلياً — الدخول لن يكتمل", "ERROR")
+                time.sleep(1)
+                continue
             # إذا اختفى زر Log in يعني الصفحة تغيرت = نجاح
             if not self.u2_exists(text="Log in", timeout=0.5):
                 break

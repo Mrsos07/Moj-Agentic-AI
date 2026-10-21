@@ -220,6 +220,24 @@ copy .env.example .env      # ثم عدّل القيم
 | `OPENROUTER_EMBEDDING_MODEL` | لا تغيّره بعد بدء الاستخدام: يغيّر أبعاد المتجهات |
 | `BIND_HOST` / `VITE_HOST` | `0.0.0.0` لإتاحة النظام لأجهزة أخرى (الافتراضي: هذا الجهاز فقط) |
 
+### حل الكابتشا بلا تدخّل يدوي
+
+تسجيل الحساب والنشر والتفاعل قد يواجه تحقق Arkose («Verify you are human»). يكفي
+مفتاح مزوّد واحد في `.env` (المزوّد يُختار من `CAPTCHA_PROVIDER` أو أول مفتاح موجود):
+
+| المتغير | الوصف |
+|---|---|
+| `YESCAPTCHA_KEY` | مفتاح YesCaptcha (يدعم التصنيف الصوري أيضاً) |
+| `TWOCAPTCHA_KEY` / `CAPMONSTER_KEY` / `ANTICAPTCHA_KEY` | بدائل بنفس الواجهة |
+| `CAPTCHA_KEY` | مفتاح عام يتجاوز مفتاح المزوّد (للتبديل السريع) |
+| `CAPTCHA_PROVIDER` | `yescaptcha` \| `2captcha` \| `capmonster` \| `anticaptcha` |
+| `CAPTCHA_PROXY` | اختياري لمهام التوكن الحسّاسة للـIP |
+| `CAPTCHA_TIMEOUT` | ثانية (افتراضي 150) |
+| `CAPTCHA_ARKOSE_GRID` | `1` لحل لغز Arkose بالنقر إن لم يُرجع المزوّد توكناً |
+
+الفحص: `GET /api/x/captcha-status` (يعرض المزوّد والرصيد وآخر 4 أحرف من المفتاح)،
+و`.\venv\Scripts\python.exe verify_captcha.py` (`--live` يتحقق من المفتاح فعلياً).
+
 ### التشغيل
 
 </div>
@@ -329,6 +347,7 @@ cd frontend; npm run build
 | `verify_memory.py` | الذاكرة قصيرة وطويلة المدى والعزل بين الوكلاء |
 | `verify_coordinator.py` | أدوات المنسّق ووضع الموظف المخاطَب |
 | `verify_openrouter.py` | إعداد المزوّد الذكي (`--config-only` بلا شبكة) |
+| `verify_captcha.py` | حل الكابتشا: شكل طلبات المزوّدين، تسليم توكن Arkose في دخول X، بوابة المتصفح، ونقر لغز المحاكي (خوادم وهمية — `--live` للمفتاح الحقيقي) |
 
 ---
 

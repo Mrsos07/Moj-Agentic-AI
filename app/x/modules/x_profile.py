@@ -4,6 +4,8 @@ from typing import List, Optional, Tuple
 
 from playwright.sync_api import sync_playwright
 
+from .x_captcha import guard as _captcha_guard
+
 
 def _file_inputs_in_edit_dialog(page):
     loc = page.locator("#layers input[type='file']")
@@ -82,6 +84,7 @@ def _fill_first_match(page, candidates: List[Tuple[str, str]], value: str):
 
 def _ensure_logged_in_or_raise(page):
     page.wait_for_timeout(1000)
+    _captcha_guard(page, log=print)
     for txt in ["Log in", "تسجيل الدخول", "Login"]:
         try:
             if page.get_by_role("link", name=re.compile(txt, re.I)).count() > 0:
@@ -185,6 +188,7 @@ def update_profile_on_x(
         if name or bio:
             page.goto("https://x.com/settings/profile", wait_until="domcontentloaded")
             page.wait_for_timeout(2500)
+            _captcha_guard(page, log=print)
             problems = []
             if name:
                 current = None

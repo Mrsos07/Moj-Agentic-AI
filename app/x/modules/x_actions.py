@@ -5,6 +5,8 @@ from typing import Optional
 
 from playwright.sync_api import Page, sync_playwright
 
+from .x_captcha import guard as _captcha_guard
+
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -32,6 +34,8 @@ def _goto_tweet(page: Page, tweet_url: str):
     if not tweet_url:
         raise ValueError("tweet_url required")
     page.goto(tweet_url, wait_until="domcontentloaded")
+    # تحقق «Verify you are human» يظهر أحياناً قبل التغريدة — بدونه كل تفاعل يفشل
+    _captcha_guard(page, log=print)
     # Ensure tweet page is ready
     page.wait_for_timeout(6200)
     # Sometimes content loads after initial DOMContentLoaded
@@ -760,6 +764,7 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool = True
 
         try:
             page.goto(profile_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             page.wait_for_timeout(6200)
 
             # Prefer testid like "*-follow"
@@ -834,6 +839,7 @@ def unfollow_user(storage_state_path: str, profile_url: str, headless: bool = Tr
 
         try:
             page.goto(profile_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             page.wait_for_timeout(6200)
 
             btn = page.locator('[data-testid$="-unfollow"]')

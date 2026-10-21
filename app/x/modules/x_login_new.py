@@ -19,6 +19,8 @@ APP_X_COOKIES = Path(__file__).resolve().parent.parent / "cookies"
 API_SERVER_SCRIPT = LOGINX2026_DIR / "api_server.py"
 LOGINX2026_PORT = 5050
 LOGINX2026_BASE = f"http://127.0.0.1:{LOGINX2026_PORT}"
+# حل كابتشا Arkose يضيف حتى CAPTCHA_TIMEOUT قبل إكمال الدخول
+LOGIN_TIMEOUT = max(120, int(os.getenv("CAPTCHA_TIMEOUT", "150") or 150) + 120)
 
 # متغير عام لحفظ عملية السيرفر
 _server_process = None
@@ -99,13 +101,13 @@ class TwitterLoginAdvanced:
             resp = requests.post(
                 f"{LOGINX2026_BASE}/api/login",
                 json=payload,
-                timeout=120
+                timeout=LOGIN_TIMEOUT
             )
             result = resp.json()
         except requests.ConnectionError:
             raise RuntimeError(f"تعذر الاتصال بسيرفر loginx2026 على {LOGINX2026_BASE}")
         except requests.Timeout:
-            raise RuntimeError("انتهت مهلة الانتظار (120s)")
+            raise RuntimeError(f"انتهت مهلة الانتظار ({LOGIN_TIMEOUT}s)")
         except Exception as e:
             raise RuntimeError(f"خطأ في الاتصال: {e}")
 

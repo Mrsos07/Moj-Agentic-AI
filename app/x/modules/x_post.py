@@ -4,6 +4,8 @@ from typing import List, Optional
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
+from .x_captcha import guard as _captcha_guard
+
 
 # =================
 # Tunables
@@ -624,6 +626,8 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
         try:
             page.goto("https://x.com/home", wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
+            # كابتشا «Verify you are human» تظهر قبل المحرّر أحياناً — حلها وإلا فشل النشر
+            _captcha_guard(page, log=print)
             page.get_by_test_id("SideNav_NewTweet_Button").click(timeout=DEFAULT_TIMEOUT)
             page.wait_for_timeout(900)
 
@@ -660,6 +664,8 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
 
             _click_publish(page)
             page.wait_for_timeout(2000)
+            # قد يطلب X تحققاً بعد الإرسال؛ بدون حله يُغلق المحرّر بلا نشر (نجاح كاذب)
+            _captcha_guard(page, log=print)
             sent = _confirm_submitted(page, timeout_ms=12_000,
                                       saw_dialog_before=composer_open_before)
             if not sent:
@@ -747,6 +753,7 @@ def post_to_x(storage_state_path: str, text: str, media_path: Optional[str], hea
         try:
             page.goto("https://x.com/home", wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
+            _captcha_guard(page, log=print)
 
             page.get_by_test_id("SideNav_NewTweet_Button").click(timeout=DEFAULT_TIMEOUT)
             page.wait_for_timeout(900)
@@ -791,6 +798,7 @@ def post_to_x(storage_state_path: str, text: str, media_path: Optional[str], hea
             # اختصار X الرسمي Ctrl+Enter لإرسال التغريدة، ثم نعيد التأكيد.
             _click_publish(page)
             page.wait_for_timeout(1500)
+            _captcha_guard(page, log=print)
 
             sent = _confirm_submitted(page, timeout_ms=8_000,
                                       saw_dialog_before=composer_open_before)

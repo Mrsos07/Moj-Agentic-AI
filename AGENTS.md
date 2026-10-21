@@ -295,6 +295,53 @@ defences it forced are still in the code and still required if you set
   Test: `verify_x_control.py` (80 checks, offline). Live checks so far were
   read-only («already» paths + delete refusal on another account's tweet).
 
+## Captcha is solved by a provider — never by a human, never silently
+- One solver: `app/core/captcha_solver.py` (stdlib only) for four providers
+  (YesCaptcha / 2Captcha / CapMonster / Anti-Captcha). Keys live in `.env`
+  (`YESCAPTCHA_KEY` … or a generic `CAPTCHA_KEY`); `CAPTCHA_PROVIDER` picks one,
+  otherwise the first key found. `GET /api/x/captcha-status` reports
+  provider/balance and only the last 4 characters of the key.
+- It is loaded **by path** from every process that needs it: xsuite runs with
+  `cwd=app/x`, `x_auth` runs as `python -m x_auth.login_sync`, loginx runs with
+  `cwd=app/x/loginx` — none can import `app`. Hence the module has no app imports,
+  and `captcha_bridge.py` sits next to every copy of `x_auth` (4 copies; 3 are
+  byte-identical).
+- Playwright paths call `guard_page()` (through `app/x/modules/x_captcha.py`)
+  right after `goto` and again after submit: `x_post` (post/thread), `x_actions`
+  (like/repost/bookmark/reply/quote/follow/unfollow), `x_delete`, `x_profile`,
+  and every read in `system/mcps/playwright_x/server.py`. The guard **raises**
+  when it cannot solve — a swallowed captcha is a phantom success (see
+  «Never report success…»), and on `x_post` it used to consume `posts_today`
+  while nothing was published. Reads are the same trap in reverse: a captcha page
+  has no tweet cards, so the employee used to «observe» an empty timeline.
+- Captcha solving adds up to `CAPTCHA_TIMEOUT` (150s) to a login, so the login
+  timeouts are `max(120, CAPTCHA_TIMEOUT + 120)`: `x_login._LOGIN_TIMEOUT`,
+  `loginx2026/api_server.LOGIN_TIMEOUT`, `x_login_new.LOGIN_TIMEOUT`. A fixed 120s
+  kills the process mid-solve and reports a timeout that looks like a wrong password.
+- `x_bridge._POST_TIMEOUT` (`CAPTCHA_TIMEOUT + 120`) applies to `/api/post*` only:
+  the guard also runs **after** submit, and a solved captcha must not outlive the
+  client timeout — a late success reported as failure is the mirror image of the
+  phantom success above.
+- API login returns `subtask_id: "ArkoseLogin"`. The token is submitted as
+  `web_modal.completion_deeplink = "twitter://onboarding/web_modal/next_link?access_token=<token>"`
+  (shape taken from the twscrape/tweety implementations, not guessed). X's login
+  Arkose public key is `0152B4EB-D2DC-460A-89A1-629838B529C9` (signup:
+  `2CB16598-CB82-4CF7-B332-5990DB66F3AB`); the `blob` is optional — take it from
+  the subtask if X sends it. `captcha_solver.solve_x_login_captcha()` is the one
+  entry point.
+- YesCaptcha's changelog (2026-10-16) says the FunCaptcha **token** routes are not
+  stable (`FunCaptchaTaskProxyless` fails and is refunded; `…M1` is the current
+  one). So the order is: token first (2Captcha/CapMonster/Anti-Captcha often
+  succeed), then `FunCaptchaClassification` (3 points, synchronous) + clicking the
+  tile in the page. The emulator has no JS injection, so it only uses the
+  classification + tap path (`j4.solve_captcha`).
+- The image/OCR path (`solve_image`) is for X's own text captcha; the emulator
+  cannot crop it from the WebView, so it only handles the Arkose grid.
+- Never log a captcha key. Errors keep the provider code (`ERROR_…`, `HTTP_401`) so
+  «wrong key» stays distinguishable from «wrong wiring».
+- Verify: `.\venv\Scripts\python.exe verify_captcha.py` (offline, fake provider
+  servers; `--live` checks balance + one OCR with a real key).
+
 ## Backend "hangs" are usually a zombie reloader, not a blocked event loop
 - Symptom: port 8000 accepts TCP but answers nothing (even `/api/aeos/health`),
   the UI shows no employees and no conversations, and vite floods with
