@@ -174,16 +174,11 @@ def create_employee(body: EmployeeIn, current_user: User = Depends(get_current_u
     )
     saved = platform.repository.save(cfg)
 
-    # هوية الحساب من البرسونا عند الإنشاء (اسم + نبذة + صورة) — في الخلفية
+    # هوية الحساب من البرسونا عند الإنشاء (اسم + نبذة، بلا صورة) — في الخلفية
     try:
-        from ..mcp.registry import MCPRegistry
         from ..services.identity import apply_persona_identity_async
 
-        apply_persona_identity_async(
-            saved, llm=platform.llm,
-            mcp=platform.container.resolve(MCPRegistry),
-            repo=platform.repository,
-        )
+        apply_persona_identity_async(saved, llm=platform.llm, repo=platform.repository)
     except Exception:  # noqa: BLE001
         logger.exception("identity apply scheduling failed for %s", saved.id)
 
@@ -409,12 +404,17 @@ def identity_field(employee_id: str, body: IdentityFieldIn,
 def identity_apply(employee_id: str, body: IdentityApplyIn,
                    current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """يطبّق الهوية على حساب X في الخلفية (متصفح + كوكيز الحساب) ويعيد
-    إقراراً فورياً؛ النتيجة النهائية تُدفع لشات المستخدم عند الاكتمال."""
-    from ..services import identity_service
+    إقراراً فورياً؛ النتيجة النهائية تُدفع لشات المستخدم عند الاكتمال.
+    صور المعاينة تُثبَّت لحظة الاعتماد — إن لم تعد متاحة يُرفض الطلب برسالة
+    واضحة بدل تطبيق صورة غير التي يراها المالك."""
+    from ..services import identity_service, identity_store
 
     cfg = _employee_or_404(employee_id, current_user)
     # النتيجة تُدفع لشات المستخدم الموثَّق — لا لرقم يرسله المتصفح
-    ack = identity_service.request_apply_identity(cfg, current_user.id, identity=body.identity)
+    try:
+        ack = identity_service.request_apply_identity(cfg, current_user.id, identity=body.identity)
+    except identity_store.IdentityError as exc:
+        raise HTTPException(400, str(exc))
     return {"ok": True, "message": ack}
 
 

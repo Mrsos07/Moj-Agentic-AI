@@ -295,6 +295,42 @@ defences it forced are still in the code and still required if you set
   Test: `verify_x_control.py` (80 checks, offline). Live checks so far were
   read-only («already» paths + delete refusal on another account's tweet).
 
+## Profile identity (avatar/header): what the owner approves is exactly what lands on X
+- Reported: the card «هوية X من الشخصية» previewed a portrait + header, the owner pressed
+  «تطبيق على X», and the account showed a different picture. Measured on @nxjrjrjdj
+  (2026-10-22, app/x `operations` + chat log): (a) creating the employee ran
+  `apply_persona_identity_async`, which generated its OWN avatar (image MCP) and uploaded it
+  unseen (ops 1110→1111, 14:10, «وصورة شخصية جديدة مولّدة»); (b) the approved apply (op 1113,
+  14:18:48) was a bare daemon thread — the `git pull` into the running copy at 14:19:21 reloaded
+  uvicorn and killed it: no result, no message, the card had already closed. Same class: chat
+  «ولّد هوية» → «طبّق الهوية» generated a NEW identity at apply time.
+- On create only persona name+bio are synced — **never an image** — and nothing at all if the
+  owner already has an approved identity (`identity_store.has_owner_identity`).
+- Approval pins bytes (`identity_store.create_pending`): the previewed files are copied from the
+  identity server's `static/generated/` (URL must be `/static/generated/<32hex>.<ext>` — no network
+  fetch, foreign/internal URLs rejected) into `data/employees/<id>/identity/` with sha256, plus
+  `pending.json`. The apply uploads those bytes as multipart (`x_bridge.update_profile(avatar_path=…)`
+  → `avatar_file`), never a URL. The identity server deletes previews after 1h → approval fails with
+  «أعد توليد المعاينة» (HTTP 400; the card keeps the preview) instead of applying something else.
+- `identity_service.resume_pending()` (main.py startup) resumes an interrupted approval with the same
+  pinned files (≤3 attempts, ≤24h, deleted employee ⇒ dropped); a newer approval supersedes an older
+  one (`is_current`). Publishing into the copy the app runs from ALWAYS kills in-flight background
+  work (op 1112, an X thread post, died the same way at the 14:14:30 pull) — anything the owner
+  approved must be persisted.
+- Chat: persona-based «ولّد هوية للموظف» uses `generate_preview` (persona-first name/bio, same as the
+  card) and remembers it; «طبّق الهوية» (`apply_from_chat`) applies that preview (same owner, ≤1h) and
+  consumes it; it generates only when nothing was shown.
+- `x_profile.update_profile_on_x`: `_handle_crop_if_any` polls for the crop dialog and never clicks
+  `Profile_Save_Button` (a late dialog made the name list reach «حفظ» = save before the image was
+  applied); after Save it waits for X's `account/update_profile_image|banner` responses (or the modal
+  closing + 20s) instead of navigating after a fixed 2.5s (which aborts slow uploads through the
+  proxy while name/bio still verify); returns `media: {avatar|banner: confirmed|unconfirmed}` and
+  raises on an HTTP error from those endpoints. The chat says «أكّد X» only for `confirmed`. Endpoint
+  names come from the web client (rettiwt-api calls `…/i/api/1.1/account/update_profile_banner.json`)
+  and are not yet observed live here — if they differ, the result degrades to «unconfirmed», never
+  to a false failure.
+- Test: `.\venv\Scripts\python.exe verify_identity.py` (offline, temp dirs, fake page/clock).
+
 ## Captcha is solved by a provider — never by a human, never silently
 - One solver: `app/core/captcha_solver.py` (stdlib only) for four providers
   (YesCaptcha / 2Captcha / CapMonster / Anti-Captcha). Keys live in `.env`

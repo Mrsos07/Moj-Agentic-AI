@@ -423,7 +423,7 @@ async def x_profile_update(
                     )
             
             # تحديث الملف الشخصي
-            update_profile_on_x(
+            media = update_profile_on_x(
                 storage_state_path=storage_state_path,
                 name=request.name,
                 bio=request.bio,
@@ -432,11 +432,12 @@ async def x_profile_update(
                 avatar_path=avatar_path,
                 banner_path=banner_path,
                 headless=request.headless
-            )
+            ) or {}
         
         return {
             "success": True,
             "message": "تم تحديث الملف الشخصي بنجاح",
+            "media": media,
             "timestamp": datetime.now().isoformat()
         }
     

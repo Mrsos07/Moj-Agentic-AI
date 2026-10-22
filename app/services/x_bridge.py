@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import atexit
+import mimetypes
 import signal
 import subprocess
 import threading
@@ -39,6 +40,8 @@ API_TIMEOUT = 180  # مهلة معقولة لعمليات playwright؛ تضمن 
 # النشر/الثريد يحلّان كابتشا **بعد** الإرسال أيضاً، فوق زمن رفع الميديا (90s) —
 # بمهلة 180s كان العميل يستسلم بينما الخادم يكمل، فيظهر فشل كاذب لنشر ناجح.
 _POST_TIMEOUT = max(API_TIMEOUT, int(os.getenv("CAPTCHA_TIMEOUT", "150") or 150) + 120)
+# تعديل البروفايل: كابتشا عند الفتح وعند التحقق + انتظار رفع الصور بعد «حفظ» (حتى 90s)
+_PROFILE_TIMEOUT = _POST_TIMEOUT + 90
 
 # ─── قفل المتصفح العام ───────────────────────────────────────
 # playwright (sync API) غير آمن للاستخدام المتزامن عبر عدة خيوط، وسيرفر app/x
@@ -543,8 +546,13 @@ def list_scheduled_posts(status: Optional[str] = None, limit: int = 100) -> Dict
 def update_profile(cookie_label: str, name: str = "", bio: str = "",
                    location: str = "", website: str = "",
                    avatar_url: str = "", banner_url: str = "",
-                   headless: bool = True) -> Dict[str, Any]:
-    """تحديث الملف الشخصي عبر API (multipart form)"""
+                   headless: bool = True,
+                   avatar_path: str = "", banner_path: str = "") -> Dict[str, Any]:
+    """تحديث الملف الشخصي عبر API (multipart form).
+
+    ``avatar_path``/``banner_path``: ملفات محلية تُرفع بايتاتها كما هي (الصورة المعتمدة
+    نفسها، لا رابط قد يُحذف أو يتغيّر قبل التنفيذ). الرد يحمل ``media``: تأكيد X
+    لحفظ كل صورة (confirmed/unconfirmed)."""
     data = {"cookie_label": cookie_label, "headless": "1" if headless else "0"}
     if name:     data["name"] = name
     if bio:      data["bio"] = bio
@@ -552,10 +560,18 @@ def update_profile(cookie_label: str, name: str = "", bio: str = "",
     if website:  data["website"] = website
     if avatar_url: data["avatar_url"] = avatar_url
     if banner_url: data["banner_url"] = banner_url
+    # بايتات لا مقابض ملفات: _request_with_revive قد يعيد إرسال الطلب
+    files = {}
+    for field, kind, path in (("avatar_file", "avatar", avatar_path),
+                              ("banner_file", "banner", banner_path)):
+        if path:
+            p = Path(path)
+            files[field] = (f"{kind}{p.suffix.lower() or '.png'}", p.read_bytes(),
+                            mimetypes.guess_type(p.name)[0] or "image/png")
 
     return _api_call("POST", "/api/profile/update",
                      headers={"Authorization": f"Bearer {XSUITE_TOKEN}"},
-                     data=data)
+                     data=data, files=files or None, timeout=_PROFILE_TIMEOUT)
 
 
 # ── لايك ──
