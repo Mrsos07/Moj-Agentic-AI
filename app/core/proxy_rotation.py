@@ -38,36 +38,9 @@ from typing import Any, Dict, Optional, Tuple
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-#: قوالب اسم المستخدم لكل مزوّد. `{base}` هو PROXY_USERNAME كما هو.
-_TEMPLATES = {
-    # brd-customer-hl_xxx-zone-residential_proxy1-country-sa-city-riyadh-session-<sid>
-    "brightdata": "{base}-country-{country}{city}{session}",
-    # customer-xxx-country-SA-city-riyadh-sessid-<sid>
-    "oxylabs": "{base}-country-{COUNTRY}{city}{session}",
-    # user-country-sa-city-riyadh-session-<sid>
-    "decodo": "{base}-country-{country}{city}{session}",
-    # user_country-sa_city-riyadh_session-<sid>_lifetime-<min>
-    "iproyal": "{base}_country-{country}{city}_session-{sid}_lifetime-{lifetime}",
-    # package-xxx-country-sa-region-riyadh-sessionid-<sid>
-    "soax": "{base}-country-{country}{city}{session}",
-}
+_PROVIDERS = {"brightdata", "oxylabs", "decodo", "iproyal", "soax"}
 
-_SESSION_SUFFIX = {
-    "brightdata": "-session-{sid}",
-    "oxylabs": "-sessid-{sid}",
-    "decodo": "-session-{sid}",
-    "iproyal": "",
-    "soax": "-sessionid-{sid}",
-}
-
-_CITY_SUFFIX = {
-    "brightdata": "-city-{city}",
-    "oxylabs": "-city-{city}",
-    "decodo": "-city-{city}",
-    "iproyal": "_city-{city}",
-    "soax": "-region-{city}",
-}
-
+#: مضيف/منفذ افتراضي لكل مزوّد (يمكن تجاوزه بـPROXY_HOST/PROXY_PORT)
 _DEFAULT_HOSTS = {
     "brightdata": ("brd.superproxy.io", 33335),
     "oxylabs": ("pr.oxylabs.io", 7777),
@@ -144,7 +117,7 @@ class ProxyConfig:
 
 def load_config() -> ProxyConfig:
     provider = _env("PROXY_PROVIDER", "oxylabs").lower()
-    if provider not in _TEMPLATES and provider != "generic":
+    if provider not in _PROVIDERS and provider != "generic":
         provider = "oxylabs"
     default_host, default_port = _DEFAULT_HOSTS.get(provider, ("", 0))
     enabled = _env("PROXY_ENABLED", "1").lower() not in ("0", "false", "no", "off")
@@ -199,20 +172,41 @@ def session_id(scope: str, cfg: Optional[ProxyConfig] = None, *, bucket: Optiona
 
 
 def _username(cfg: ProxyConfig, sid: str) -> str:
-    city = _CITY_SUFFIX.get(cfg.provider, "").format(city=cfg.city) if cfg.city else ""
-    suffix = _SESSION_SUFFIX.get(cfg.provider, "-session-{sid}").format(sid=sid)
+    """اسم مستخدم المزوّد بالصيغة التي يقرأها فعلاً.
+
+    Oxylabs: ``customer-USER-cc-SA-city-riyadh-sessid-abc`` (+ ``-sesstime-N`` إن
+    تجاوزت الجلسة 10 دقائق، وهي مدّتهم الافتراضية). Bright Data/Decodo: ``country-``
+    و``session-``. IPRoyal: فواصل شرطة سفلية و``lifetime-``. SOAX: ``region-``.
+    """
+    base, country, city = cfg.username, cfg.country, cfg.city
+    minutes = min(1440, max(1, cfg.session_ttl // 60))
     if cfg.provider == "generic" and cfg.template:
-        return cfg.template.format(base=cfg.username, username=cfg.username,
-                                   country=cfg.country, COUNTRY=cfg.country.upper(),
-                                   city=city, sid=sid, session=suffix,
-                                   lifetime=max(1, cfg.session_ttl // 60))
+        return cfg.template.format(base=base, username=base, country=country,
+                                   COUNTRY=country.upper(), city=city, sid=sid,
+                                   lifetime=minutes)
+    if cfg.provider == "oxylabs":
+        user = f"{base}-cc-{country.upper()}"
+        if city:
+            user += f"-city-{city}"
+        user += f"-sessid-{sid}"
+        if cfg.session_ttl > 600:          # الافتراضي عندهم 10 دقائق
+            user += f"-sesstime-{minutes}"
+        return user
     if cfg.provider == "iproyal":
-        return _TEMPLATES["iproyal"].format(base=cfg.username, country=cfg.country,
-                                            city=city, sid=sid,
-                                            lifetime=max(1, cfg.session_ttl // 60))
-    return _TEMPLATES[cfg.provider].format(base=cfg.username, country=cfg.country,
-                                           COUNTRY=cfg.country.upper(),
-                                           city=city, session=suffix)
+        user = f"{base}_country-{country}"
+        if city:
+            user += f"_city-{city}"
+        return f"{user}_session-{sid}_lifetime-{minutes}"
+    if cfg.provider == "soax":
+        user = f"{base}-country-{country}"
+        if city:
+            user += f"-region-{city}"
+        return f"{user}-sessionid-{sid}"
+    # brightdata / decodo
+    user = f"{base}-country-{country}"
+    if city:
+        user += f"-city-{city}"
+    return f"{user}-session-{sid}"
 
 
 def build_url(cfg: ProxyConfig, sid: str) -> str:
