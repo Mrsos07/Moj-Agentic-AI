@@ -388,6 +388,11 @@ defences it forced are still in the code and still required if you set
   `generic` via `PROXY_USERNAME_TEMPLATE`. The geo/session suffixes are **ours**,
   not the customer's: `PROXY_USERNAME` is the base only. Exact shapes are asserted
   in `verify_proxy_rotation.py` — change a template there first, then in code.
+  Oxylabs uses **`cc-SA`** (not `country-sa`) and `sessid-…`, with a 10-minute
+  default session, so a longer `PROXY_SESSION_TTL` must append `-sesstime-<min>`
+  (max 1440) — otherwise the exit IP changes mid-session and `cf_clearance` dies.
+  Bright Data/Decodo use `country-`/`session-`; IPRoyal uses underscores and
+  `lifetime-`; SOAX uses `region-`/`sessionid-`.
 - `PROXY_ROTATE=session` (default) derives the session id from
   `sha1(scope:bucket)` where `bucket = epoch // PROXY_SESSION_TTL`; `request` adds a
   `time_ns` **and a counter** (measured: `time_ns` alone repeated on Windows and two

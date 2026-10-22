@@ -104,7 +104,7 @@ class FakeGeoProxy:
 print("1) قوالب اسم المستخدم لكل مزوّد (الشكل الذي يقرأه المزوّد فعلاً)")
 cases = [
     ("brightdata", "brd.superproxy.io", 33335, "-country-sa-city-riyadh-session-{sid}"),
-    ("oxylabs", "pr.oxylabs.io", 7777, "-country-SA-city-riyadh-sessid-{sid}"),
+    ("oxylabs", "pr.oxylabs.io", 7777, "-cc-SA-city-riyadh-sessid-{sid}"),
     ("decodo", "gate.decodo.com", 7000, "-country-sa-city-riyadh-session-{sid}"),
     ("iproyal", "geo.iproyal.com", 12321, "_country-sa_city-riyadh_session-{sid}_lifetime-10"),
     ("soax", "proxy.soax.com", 5000, "-country-sa-region-riyadh-sessionid-{sid}"),
@@ -119,6 +119,13 @@ for provider, host, port, suffix in cases:
         expected = "base-user" + suffix.format(sid=sid)
         check(f"{provider}: {expected[:44]}…", user == expected, f"got {user}")
         check(f"{provider}: المنفذ والبروتوكول", f":{port}" in url and url.startswith("http://"))
+
+with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs", "PROXY_SESSION_TTL": 1800}):
+    cfg = PR.load_config()
+    sid = PR.session_id("e", cfg, bucket=1)
+    user = PR.build_url(cfg, sid).split("://", 1)[1].split(":", 1)[0]
+    check("oxylabs: sesstime يمدّ الجلسة لـ30 دقيقة (الافتراضي عندهم 10)",
+          user.endswith(f"-sessid-{sid}-sesstime-30"), user)
 
 with env(**{**BASE_ENV, "PROXY_PROVIDER": "generic",
             "PROXY_USERNAME_TEMPLATE": "{base}-c-{country}-s-{sid}"}):
@@ -160,8 +167,8 @@ with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs"}):
     check("playwright: server بلا بيانات دخول",
           pw["server"].startswith("http://") and "@" not in pw["server"], str(pw))
     check("playwright: username يحمل geo/الجلسة وكلمة المرور منفصلة",
-          pw["username"].startswith("base-user-country-SA")
-          and pw["password"] == "secret-pw", str(pw))
+          pw["username"].startswith("base-user-cc-SA") and pw["password"] == "secret-pw",
+          str(pw))
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n4) الضمان السعودي: IP غير سعودي ⇒ رفض وإعادة محاولة")
@@ -173,7 +180,7 @@ with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs", "PROXY_PORT": sa.port}):
     got = PR.acquire("emaad5079")
     check("IP سعودي ⇒ يُقبل", bool(got) and "base-user" in got)
     check("الفحص يمرّ من البروكسي نفسه (اسم المستخدم وصل)",
-          bool(sa.usernames) and sa.usernames[0].startswith("base-user-country-SA"),
+          bool(sa.usernames) and sa.usernames[0].startswith("base-user-cc-SA"),
           str(sa.usernames[:1]))
     hits = sa.hits
     PR.acquire("emaad5079")
