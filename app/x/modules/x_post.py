@@ -7,6 +7,7 @@ from playwright.sync_api import sync_playwright
 from .x_captcha import guard as _captcha_guard
 from .x_captcha import new_context as _captcha_context
 from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
+from .sync_bridge import sync_safe
 
 
 # =================
@@ -550,6 +551,7 @@ def _click_add_another_post(page) -> None:
     raise RuntimeError("لم أجد زر إضافة تغريدة إلى الثريد (addButton).")
 
 
+@sync_safe
 def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[str],
                      headless: bool) -> Optional[str]:
     """انشر ثريد (سلسلة تغريدات) في جلسة متصفح واحدة — نشرٌ ذرّي كما يفعل X.
@@ -722,6 +724,7 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
             browser.close()
 
 
+@sync_safe
 def post_to_x(storage_state_path: str, text: str, media_path: Optional[str], headless: bool) -> Optional[str]:
     with sync_playwright() as p:
         # إعدادات أفضل للـ headless

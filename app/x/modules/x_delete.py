@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 from .x_captcha import guard as _captcha_guard
 from .x_captcha import new_context as _captcha_context
 from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
+from .sync_bridge import sync_safe
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -27,6 +28,7 @@ def _tweet_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+@sync_safe
 def delete_tweet_by_id(storage_state_path: str, tweet_id: str, headless: bool = True,
                        wait_after_ms: int = 3000, expected_handle: str = "") -> bool:
     """حذف تغريدة من X باستخدام ID التغريدة فقط (انظر ``delete_tweet``)."""
@@ -50,6 +52,7 @@ def _delete_confirmed(resp_box: list) -> Optional[bool]:
     return None
 
 
+@sync_safe
 def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
                  wait_after_ms: int = 3000, expected_handle: str = "") -> bool:
     """حذف تغريدة يملكها الحساب، مع تأكيد فعلي.

@@ -8,6 +8,7 @@ from playwright.sync_api import Page, sync_playwright
 from .x_captcha import guard as _captcha_guard
 from .x_captcha import new_context as _captcha_context
 from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
+from .sync_bridge import sync_safe
 
 
 DEFAULT_TIMEOUT = 30_000
@@ -267,6 +268,7 @@ def _reply_submitted(page, filled_text: str = "", timeout_ms: int = 20_000) -> b
     return False
 
 
+@sync_safe
 def like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
     """Like a tweet by URL."""
     with sync_playwright() as p:
@@ -303,6 +305,7 @@ def like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_aft
             browser.close()
 
 
+@sync_safe
 def repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
     """Repost (retweet) a tweet by URL."""
     with sync_playwright() as p:
@@ -405,6 +408,7 @@ def _state_in(scope, testid: str, timeout_ms: int = 8_000) -> bool:
     return False
 
 
+@sync_safe
 def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000) -> str:
     """Undo repost (unretweet). Returns ``"done"`` (verified) or ``"already"`` (was not reposted).
 
@@ -436,6 +440,7 @@ def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, w
             browser.close()
 
 
+@sync_safe
 def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000) -> str:
     """Undo like. Returns ``"done"`` (verified) or ``"already"`` (was not liked).
 
@@ -463,6 +468,7 @@ def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wai
             browser.close()
 
 
+@sync_safe
 def reply_to_tweet(
     storage_state_path: str,
     tweet_url: str,
@@ -593,6 +599,7 @@ def bookmark_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait
             browser.close()
 
 
+@sync_safe
 def quote_tweet(
     storage_state_path: str,
     tweet_url: str,
@@ -712,6 +719,7 @@ def quote_tweet(
             browser.close()
 
 
+@sync_safe
 def share_copy_link(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
     """Open share menu and click 'Copy link' (share via OS sheet is not reliable in automation)."""
     with sync_playwright() as p:
@@ -750,6 +758,7 @@ def share_copy_link(storage_state_path: str, tweet_url: str, headless: bool, wai
             browser.close()
 
 
+@sync_safe
 def follow_user(storage_state_path: str, profile_url: str, headless: bool = True, wait_after_ms: int = 2000):
     """
     Follow user by visiting their profile and clicking Follow.
@@ -825,6 +834,7 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool = True
             browser.close()
 
 
+@sync_safe
 def unfollow_user(storage_state_path: str, profile_url: str, headless: bool = True, wait_after_ms: int = 2000):
     """
     Unfollow user by visiting their profile and clicking Following -> confirm.

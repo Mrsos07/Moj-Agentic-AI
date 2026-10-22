@@ -5,6 +5,7 @@ from .x_unfollow import unfollow_user  # noqa: F401 - المسار القديم 
 from .x_captcha import guard as _captcha_guard
 from .x_captcha import new_context as _captcha_context
 from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
+from .sync_bridge import sync_safe
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -22,6 +23,7 @@ def _visible(page, selector: str, timeout_ms: int) -> bool:
         return False
 
 
+@sync_safe
 def follow_user(storage_state_path: str, profile_url: str, headless: bool, wait_after_ms: int = 3000) -> str:
     """Follow a profile. Returns ``"done"`` (verified: header button became ``-unfollow``)
     or ``"already"`` (was already followed)."""

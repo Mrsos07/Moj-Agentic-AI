@@ -7,6 +7,7 @@ from playwright.sync_api import sync_playwright
 from .x_captcha import guard as _captcha_guard
 from .x_captcha import new_context as _captcha_context
 from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
+from .sync_bridge import sync_safe
 
 
 def _file_inputs_in_edit_dialog(page):
@@ -95,6 +96,7 @@ def _ensure_logged_in_or_raise(page):
             continue
 
 
+@sync_safe
 def update_profile_on_x(
     storage_state_path: str,
     name: str = "",

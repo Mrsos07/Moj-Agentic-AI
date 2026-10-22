@@ -316,6 +316,42 @@ check("لا ردّ بعد ⇒ غير محسوم (يُتحقق بإعادة ال�
 check("معرّف التغريدة من الرابط", XD._tweet_id("https://x.com/i/status/123456") == "123456" and XD._tweet_id("x") == "")
 check("رابط غير صالح ⇒ خطأ قبل فتح المتصفح", raises(lambda: XD.delete_tweet("s.json", "https://x.com/home"), RuntimeError))
 
+print("\n10) asyncio: Playwright Sync من داخل event loop (خطأ إنشاء الموظف)")
+import asyncio  # noqa: E402
+from app.x.modules.sync_bridge import run_sync  # noqa: E402
+
+
+async def _direct():
+    from playwright.sync_api import sync_playwright
+    try:
+        sync_playwright().start()
+        return False
+    except Exception as e:
+        return "asyncio loop" in str(e)
+
+
+def _browser_roundtrip():
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        b = pw.chromium.launch(channel="chrome", headless=True)
+        pg = b.new_page()
+        pg.set_content("<h1>ok</h1>")
+        text = pg.inner_text("h1")
+        b.close()
+        return text
+
+
+async def _via_bridge():
+    return run_sync(_browser_roundtrip)
+
+
+check("الخطأ الأصلي قابل للتكرار مباشرةً داخل loop", asyncio.run(_direct()) is True)
+check("run_sync يشغّل متصفحاً كاملاً داخل loop", asyncio.run(_via_bridge()) == "ok")
+check("run_sync خارج loop = استدعاء مباشر", run_sync(_browser_roundtrip) == "ok")
+check("الدوال العامة مزيّنة بـsync_safe (نشر/ملف/حذف)",
+      all(getattr(f, "__wrapped__", None) is not None for f in (
+          XD.delete_tweet, XD.delete_tweet_by_id)))
+
 print()
 if FAILED:
     print(f"❌ {len(FAILED)} فحص فشل: {FAILED}")
