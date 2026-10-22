@@ -76,6 +76,9 @@ app/x/loginx2026/cookies/
 static/uploads/
 *cookies*.json
 ChromeCookies
+# كلمات مرور الحسابات (نصّية) وأزواج ct0,auth_token — أُزيلت من التتبّع 2026-10-22
+acc.csv
+coo.txt
 
 # Debug artifacts
 debug_*.png
