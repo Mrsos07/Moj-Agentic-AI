@@ -17,18 +17,21 @@ except ImportError:
 
 
 def _find_ldconsole() -> str:
-    """يحدّد مسار ldconsole.exe بلا ترميز صلب لحرف القرص.
+    """يحدّد مسار ldconsole.exe بلا ترميز صلب لحرف القرص أو رقم الإصدار.
 
     كان المسار مكتوباً صراحةً في الكود، فيختلف بين أجهزة المساهمين (D: عند
     أحدهم و C: عند آخر) ويُنتج تعارض دمج في كل مزامنة، ويكسر تسجيل الدخول عند
     من لا يطابق مساره. الأولوية: متغيّر البيئة ثم أول مسار موجود فعلاً.
+    الإصدارات: LDPlayer 14/9/5/3 (14 هو ما يُثبّته الموقع الآن).
     """
     env = (os.getenv("LDPLAYER_CONSOLE") or "").strip('" ')
     if env and os.path.exists(env):
         return env
     candidates = [
-        rf"{d}:\LDPlayer\LDPlayer9\ldconsole.exe" for d in ("C", "D", "E")
+        rf"{d}:\LDPlayer\LDPlayer{v}\ldconsole.exe"
+        for d in ("C", "D", "E") for v in ("14", "9", "5", "3")
     ] + [
+        r"C:\Program Files\LDPlayer\LDPlayer14\ldconsole.exe",
         r"C:\Program Files\LDPlayer\LDPlayer9\ldconsole.exe",
         r"C:\ChangZhi\LDPlayer9\ldconsole.exe",
     ]
@@ -800,6 +803,40 @@ class LDPlayerChromeAutomation:
     def u2_exists(self, timeout=3, **kwargs):
         """فحص سريع هل العنصر موجود."""
         return self.d(**kwargs).exists(timeout=timeout)
+
+    # ---------------- PROXY (تدوير IP على المحاكي) ---------------- #
+
+    def _adb_shell(self, *cmd):
+        if not self.adb_path:
+            return ""
+        target = ["-s", self.device_serial] if self.device_serial else []
+        try:
+            r = subprocess.run([self.adb_path, *target, "shell", *cmd],
+                               capture_output=True, text=True, timeout=15)
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    def set_android_proxy(self, host: str, port: int, clear: bool = False) -> bool:
+        """بروكسي أندرويد العام عبر ADB — **بلا مصادقة فقط**.
+
+        إعداد أندرويد لا يحمل حقول username/password، لذلك مسار المحاكي يحتاج
+        مزوّداً يقبل تفويض IP (whitelist) أو مرحّل محلي بلا مصادقة. بروكسي
+        المستخدم/كلمة المرور يُترك لبصمة المتصفح على الحاسوب.
+        """
+        if clear:
+            self._adb_shell("settings", "put", "global", "http_proxy", ":0")
+            self.log("أُزيل بروكسي أندرويد", "INFO")
+            return True
+        if not host or not port:
+            self.log("host/port مطلوبان لضبط بروكسي المحاكي", "ERROR")
+            return False
+        out = self._adb_shell("settings", "put", "global", "http_proxy", f"{host}:{port}")
+        current = self._adb_shell("settings", "get", "global", "http_proxy")
+        ok = f"{host}:{port}" in (current or "")
+        self.log(f"بروكسي أندرويد: {host}:{port} ({'مفعّل' if ok else 'فشل'})",
+                 "SUCCESS" if ok else "ERROR")
+        return ok
 
     # ---------------- CAPTCHA (Arkose / صورة) ---------------- #
 

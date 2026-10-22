@@ -380,6 +380,48 @@ defences it forced are still in the code and still required if you set
 - Verify: `.\venv\Scripts\python.exe verify_captcha.py` (offline, fake provider
   servers; `--live` checks balance + one OCR with a real key).
 
+## IP rotation: one **verified Saudi** exit per employee session
+- `app/core/proxy_rotation.py` — stdlib only, loaded **by path** from every process
+  that needs it (same reason as `captcha_solver`: xsuite runs with `cwd=app/x`,
+  `x_auth` as `python -m x_auth.login_sync`, loginx with `cwd=app/x/loginx`).
+- Providers: `oxylabs` (default), `brightdata`, `decodo`, `iproyal`, `soax`, and
+  `generic` via `PROXY_USERNAME_TEMPLATE`. The geo/session suffixes are **ours**,
+  not the customer's: `PROXY_USERNAME` is the base only. Exact shapes are asserted
+  in `verify_proxy_rotation.py` — change a template there first, then in code.
+- `PROXY_ROTATE=session` (default) derives the session id from
+  `sha1(scope:bucket)` where `bucket = epoch // PROXY_SESSION_TTL`; `request` adds a
+  `time_ns` **and a counter** (measured: `time_ns` alone repeated on Windows and two
+  «different» sessions came out identical). Ids are 13 chars because Bright Data /
+  Oxylabs cap session ids at 16.
+- **The Saudi guarantee is runtime, not marketing**: `acquire()` sends a geo query
+  *through the proxy itself* and rejects anything whose `countryCode != SA`, rotating
+  to a new session up to `PROXY_MAX_TRIES`, then raising `NOT_SAUDI`. Never «trust»
+  `PROXY_COUNTRY` alone; provider pools occasionally answer from a neighbour country.
+  Results are cached for `PROXY_VERIFY_TTL` (15 min) so a cycle does not pay a geo
+  call per action.
+- Playwright needs a **global** proxy before a context may override it, so
+  `launch_proxy_kwargs()` returns the placeholder `{"server": "http://per-context"}`
+  when rotation is on, and `new_context(scope=...)` sets the session proxy. `scope`
+  defaults to the cookie file stem = the account/employee. If the proxy cannot be
+  acquired, `new_context` **raises** — running without it would leak the real IP and
+  defeat the whole feature.
+- The emulator path is different: Android's global proxy
+  (`j4.set_android_proxy`) has no username/password fields, so it only works with a
+  provider that whitelists our public IP; auth-based proxies are browser-only.
+- Operational: rotating an account's IP on every request is *worse* for X trust than
+  a stable IP per employee. Start at `PROXY_SESSION_TTL=900` and raise it if
+  challenges appear. Per-account scope is the account label, so two accounts of the
+  same employee get different IPs — that is intended.
+- Provider research (prices/coverage read from their own pages, 2026-10-22):
+  Oxylabs 1,024,158 SA residential + Riyadh city + SA mobile ($8/$9 per GB);
+  Bright Data 416,641 SA IPs, city/ZIP targeting, ISP static 10 IPs $18/mo, $8/GB
+  (−50% promo); Decodo $2–3.75/GB with city/ZIP targeting (verify SA in dashboard);
+  IPRoyal/ProxyEmpire list SA cities and mobile on stc/Mobily/Zain. IP counts are
+  provider claims — the runtime geo check is what actually enforces «Saudi».
+- Test: `.\venv\Scripts\python.exe verify_proxy_rotation.py` (35 checks, a local fake
+  proxy answers geo and records the usernames, so the provider templates are verified
+  without an account).
+
 ## Backend "hangs" are usually a zombie reloader, not a blocked event loop
 - Symptom: port 8000 accepts TCP but answers nothing (even `/api/aeos/health`),
   the UI shows no employees and no conversations, and vite floods with

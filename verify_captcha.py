@@ -645,7 +645,10 @@ try:
         check("بروكسي الإطلاق يُحوَّل لصيغة Playwright",
               kw.get("proxy") == {"server": "http://1.2.3.4:8080",
                                   "username": "u", "password": "p"}, str(kw))
-        browser = pw.chromium.launch(channel="chrome", headless=True)
+        # Playwright يطلب بروكسي عاماً عند استخدام بروكسي لكل سياق (نفس ما يفعله
+        # launch_proxy_kwargs في التشغيل الحقيقي: عنصر نائب).
+        browser = pw.chromium.launch(channel="chrome", headless=True,
+                                     proxy={"server": "http://per-context"})
         with env(CAPTCHA_PROXY="http://u:p@1.2.3.4:8080"):
             ctx = CB.new_context(browser, None, page_url="https://x.com/home",
                                  viewport={"width": 800, "height": 600})

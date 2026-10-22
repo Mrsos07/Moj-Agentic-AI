@@ -32,6 +32,7 @@ solve = _browser.solve
 cloudflare_clearance = _browser.cloudflare_clearance
 new_context = _browser.new_context
 launch_proxy_kwargs = _browser.launch_proxy_kwargs
+proxy_status = _browser.proxy_status
 
 
 def guard(page, log: Optional[Callable[[str], None]] = None) -> None:
