@@ -39,6 +39,19 @@ _solver = _solver_module()
 CaptchaError = _solver.CaptchaError
 
 
+def _proxy_module():
+    """وحدة تدوير IP المشتركة (تُحمّل بالمسار مثل الحلّال)."""
+    name = "moj_proxy_rotation"
+    mod = sys.modules.get(name)
+    if mod is not None:
+        return mod
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("proxy_rotation.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # ── الكشف ───────────────────────────────────────────────────────────────────
 _DETECT_JS = r"""
 () => {
@@ -553,12 +566,23 @@ def _proxy_dict(proxy: str) -> Dict[str, str]:
     return out
 
 
-def launch_proxy_kwargs() -> Dict[str, Any]:
-    """``proxy=`` لـ``chromium.launch`` عند ضبط ``CAPTCHA_PROXY``.
+def proxy_status(check: bool = False) -> Dict[str, Any]:
+    """حالة تدوير IP (بلا كلمة مرور). ``check`` يفحص IP سعودياً فعلياً."""
+    return _proxy_module().status(check=check)
 
-    البروكسي **عام للمتصفح** لا لكل سياق: Playwright يرفض بروكسي سياق بلا بروكسي
-    عام، والأهم أن cf_clearance مربوط بمخرج الـIP — فكل طلب يجب أن يخرج منه.
+
+def launch_proxy_kwargs() -> Dict[str, Any]:
+    """``proxy=`` لـ``chromium.launch``.
+
+    مع تدوير IP: نمرّر بروكسي **عنصر نائب** لأن Playwright يرفض بروكسي سياق بلا
+    بروكسي عام، ثم يضع ``new_context`` بروكسي الجلسة السعودي لكل حساب.
+    بلا تدوير: بروكسي ``CAPTCHA_PROXY`` العام (السلوك القديم).
     """
+    try:
+        if _proxy_module().is_enabled():
+            return {"proxy": {"server": "http://per-context"}}
+    except Exception:  # noqa: BLE001 - لا نُفشل الإطلاق بسبب إعداد بروكسي تالف
+        pass
     proxy = os.getenv("CAPTCHA_PROXY", "").strip()
     return {"proxy": _proxy_dict(proxy)} if proxy else {}
 
@@ -581,16 +605,30 @@ def cloudflare_clearance(page_url: str, proxy: str = "", *, log: Optional[_LOG] 
 
 
 def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/home",
-                proxy: Optional[str] = None, presolve: Optional[bool] = None,
-                log: Optional[_LOG] = None, **kwargs):
-    """بديل ``browser.new_context``: يجهّز Cloudflare قبل الإنشاء إن وُجد بروكسي.
+                scope: Optional[str] = None, proxy: Optional[str] = None,
+                presolve: Optional[bool] = None, log: Optional[_LOG] = None, **kwargs):
+    """بديل ``browser.new_context``: بروكسي الجلسة + تجهيز Cloudflare قبل الإنشاء.
 
-    بلا بروكسي ⇒ سلوك Playwright الافتراضي حرفياً. مع بروكسي ⇒ نحل أولاً ثم ننشئ
-    السياق بالـUA الناتج ونحقن الكوكيز؛ الحقن بعد الإنشاء يُرفض لأن cf_clearance
-    مربوط بالـUA (قياس حقيقي: 3 محاولات بكروم مرئي/مخفي لم تمرّ بلا بروكسي).
+    ``scope`` = اسم الحساب/الموظف (افتراضياً اسم ملف الكوكيز) — منه يُشتق معرّف
+    جلسة البروكسي، فيحصل كل موظف على IP سعودي مختلف كل ``PROXY_SESSION_TTL``.
     """
     log = log or (lambda _m: None)
-    proxy = (proxy if proxy is not None else os.getenv("CAPTCHA_PROXY", "")).strip()
+
+    if proxy is None:
+        proxy = ""
+        try:
+            rotation = _proxy_module()
+            if rotation.is_enabled():
+                if scope is None and storage_state:
+                    scope = Path(str(storage_state)).stem
+                proxy = rotation.acquire(scope or "x") or ""
+                if not proxy:
+                    raise RuntimeError("لم أستطع الحصول على بروكسي سعودي")
+        except Exception as e:  # noqa: BLE001
+            # لا نكمل بلا بروكسي: الطلب سيخرج بIP الحقيقي وينقض الغرض كله
+            raise RuntimeError(f"تدوير IP مفعّل لكن فشل تجهيز البروكسي: {e}") from e
+
+    proxy = (proxy or os.getenv("CAPTCHA_PROXY", "")).strip()
     if presolve is None:
         presolve = os.getenv("CAPTCHA_CLOUDFLARE_PRESOLVE", "1").lower() not in (
             "0", "false", "no", "off")
@@ -600,6 +638,8 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
             ua = (sol.get("user_agent") or "").strip()
             if ua:
                 kwargs["user_agent"] = ua
+            if proxy.startswith("http"):
+                kwargs["proxy"] = _proxy_dict(proxy)
             ctx = browser.new_context(storage_state=storage_state, **kwargs)
             cookies = sol.get("cookies") or {}
             if cookies:
@@ -608,4 +648,6 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
             return ctx
         except Exception as e:  # noqa: BLE001 - سياق عادي بدل إفشال العملية كلها
             log(f"⚠️ تعذّر تجهيز Cloudflare مسبقاً: {e} — سياق عادي")
+    if proxy.startswith("http"):
+        kwargs["proxy"] = _proxy_dict(proxy)
     return browser.new_context(storage_state=storage_state, **kwargs)

@@ -282,6 +282,20 @@ async def x_upload_cookies(
         )
 
 
+@router.get("/proxy-status")
+async def x_proxy_status(
+    check: bool = False,
+    current_user: User = Depends(get_current_user)
+):
+    """حالة تدوير IP السعودي: المزوّد/الدولة/سياسة التدوير (بلا كلمة مرور).
+
+    ``check=true`` يطلب IP فعلياً ويفحص جنسيته عبر نفس البروكسي (طلب صغير).
+    """
+    from app.core.proxy_rotation import status as proxy_status
+
+    return proxy_status(check=check)
+
+
 @router.get("/captcha-status")
 async def x_captcha_status(
     check_balance: bool = False,
