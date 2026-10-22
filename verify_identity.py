@@ -95,10 +95,23 @@ def sync_start(cfg, record):
     SVC._run(cfg, record)
 
 
+X_AFTER = {"snap": None}       # ما «تعرضه» صفحة الحساب بعد التطبيق (None = تعذّرت القراءة)
+REFRESHED = []
+REAL_REFRESH = None
+
+
+def fake_refresh(cfg, lock_timeout=0.0):
+    REFRESHED.append((cfg.id, lock_timeout))
+    if X_AFTER["snap"] is None:
+        raise RuntimeError("offline")
+    return IS.save_x_profile(cfg.id, cfg.account_username, X_AFTER["snap"], "live")
+
+
 XB.update_profile = fake_update_profile
 ED._push = lambda user_id, content, cfg=None: PUSHED.append((user_id, content))
 SVC._sync_persona = lambda cfg, name, bio: SYNCED.append((cfg.id, name, bio))
 SVC._start = sync_start
+REAL_REFRESH, SVC.refresh_x_profile = SVC.refresh_x_profile, fake_refresh
 
 
 def emp(i, user=1):
@@ -452,6 +465,144 @@ i_wait = src.index("_wait_saved(page, seen, wanted)")
 i_verify = src.index("if name or bio:")
 check("الترتيب: حفظ ← انتظار اكتمال الحفظ ← التحقق بالتنقّل، ويُعاد التأكيد",
       i_click < i_wait < i_verify and 'page.on("response"' in src and "return media" in src)
+
+print("8) بطاقة الموظف تعكس هويته كما على X (الاسم/النبذة/الصورة/الهيدر)")
+import app.aeos.mcp.servers.playwright_x_mcp as PW  # noqa: E402
+from app.aeos.mcp.base import MCPResponse  # noqa: E402
+
+h = PW.account_header({"name": " رأي وتحليل ", "bio": "نبذة",
+                       "avatar_url": "https://pbs.twimg.com/profile_images/111/abc_normal.jpg",
+                       "banner_url": "https://pbs.twimg.com/profile_banners/123/1700000000/600x200"})
+check("روابط X بأعلى دقة يعرضها (400x400 للصورة و1500x500 للهيدر)",
+      h["avatar_url"].endswith("abc_400x400.jpg") and h["banner_url"].endswith("/1700000000/1500x500")
+      and h["name"] == "رأي وتحليل", h)
+h2 = PW.account_header({"name": "س", "avatar_url": "https://evil.example/a.png",
+                        "banner_url": "javascript:alert(1)"})
+check("روابط غير صور X تُسقط (لا تُعرض في متصفح المالك)", h2["avatar_url"] == "" and h2["banner_url"] == "")
+check("الصورة الافتراضية لحساب بلا صورة تبقى كما هي",
+      PW.account_header({"avatar_url": "https://abs.twimg.com/sticky/default_profile_images/default_profile_normal.png"})
+      ["avatar_url"].endswith("default_profile_400x400.png"))
+
+FAKE_X = """<main>
+  <a href="/ACC8/header_photo"><div><img src="https://pbs.twimg.com/profile_banners/123/1700000000/600x200"></div></a>
+  <a href="/acc8/photo"><div data-testid="UserAvatar-Container-acc8">
+    <img src="https://pbs.twimg.com/profile_images/111/abc_200x200.jpg"></div></a>
+  <div data-testid="UserName"><div><span><span>صقر الجزيرة </span><img alt="🇸🇦" src="https://abs-0.twimg.com/emoji/v2/svg/1f1f8-1f1e6.svg"></span></div><div><span>@acc8</span></div></div>
+  <div data-testid="UserDescription"><span>حساب يقدّم متابعة</span><br><span>وتحليلًا للأحداث </span><img alt="📊"></div>
+  <article data-testid="tweet">
+    <a href="/someone/photo"><img src="https://pbs.twimg.com/profile_images/999/other_normal.jpg"></a>
+    <a href="/acc8/status/1/photo/1"><img src="https://pbs.twimg.com/media/xyz.jpg"></a>
+  </article></main>"""
+FAKE_X2 = """<div data-testid="UserName"><div><span>اسم بلا غلاف</span></div></div>
+  <div data-testid="UserAvatar-Container-acc9"><img src="https://pbs.twimg.com/profile_images/7/z_x96.png"></div>"""
+try:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw_:
+        try:
+            browser = pw_.chromium.launch(channel="chrome", headless=True)
+        except Exception:  # noqa: BLE001
+            browser = pw_.chromium.launch(headless=True)
+        ctx = browser.new_context()
+        ctx.route("**/*", lambda route: route.abort())     # بلا أي طلب شبكي
+        page = ctx.new_page()
+        page.set_content(FAKE_X)
+        got = PW._profile_header(page, "acc8", wait_ms=5_000)
+        page.set_content(FAKE_X2)
+        got2 = PW._profile_header(page, "acc9", wait_ms=5_000)
+        browser.close()
+    check("رأس الصفحة في متصفح حقيقي: الاسم والنبذة (بإيموجي X المرسومة صوراً) وصورة الحساب نفسه",
+          got == {"name": "صقر الجزيرة 🇸🇦", "bio": "حساب يقدّم متابعة\nوتحليلًا للأحداث 📊",
+                  "avatar_url": "https://pbs.twimg.com/profile_images/111/abc_400x400.jpg",
+                  "banner_url": "https://pbs.twimg.com/profile_banners/123/1700000000/1500x500"}, got)
+    check("بلا رابط /photo ولا غلاف ← الصورة من حاوية الحساب والهيدر فارغ",
+          got2["avatar_url"].endswith("z_400x400.png") and got2["banner_url"] == "" and got2["name"] == "اسم بلا غلاف",
+          got2)
+except Exception as exc:  # noqa: BLE001
+    check("تشغيل JS رأس الصفحة في متصفح (يلزم Chrome/Chromium)", False, repr(exc))
+
+px = PW.PlaywrightXMCP()
+cookie = TMP / "acc8.json"
+cookie.write_text("{}", encoding="utf-8")
+px._cookie_file = lambda label: cookie
+HEADER = {"name": "رأي وتحليل", "bio": "ن", "avatar_url": "https://pbs.twimg.com/profile_images/1/a_400x400.jpg",
+          "banner_url": ""}
+px._read_my_posts = lambda path, handle, limit, headless, header_out=None: (header_out.update(HEADER), [])[1]
+r1 = px.call(PW.MCPRequest(employee_id="e", tool="read_my_posts", params={"handle": "acc8"},
+                           context={"cookie_label": "acc8"}))
+px._read_account_profile = lambda path, handle, headless, lock_timeout=0.0: dict(HEADER, lock=lock_timeout)
+r2 = px.call(PW.MCPRequest(employee_id="e", tool="read_account_profile", params={"lock_timeout": 25},
+                           context={"cookie_label": "acc8"}))
+check("قراءة الأداء تُرجع رأس الصفحة نفسها بلا تنقّل إضافي", r1.success and r1.data.get("profile") == HEADER)
+check("أداة read_account_profile مسجّلة وتمرّر مهلة القفل التفاعلية",
+      "read_account_profile" in px.tools and r2.success and r2.data["profile"].get("lock") == 25.0, r2.error)
+
+cfg8 = emp(8)
+check("قراءة بلا اسم ولا صورة لا تمحو لقطة صالحة",
+      IS.save_x_profile(cfg8.id, "acc8", HEADER, "live") and IS.save_x_profile(cfg8.id, "acc8", {"bio": "x"}, "live") is None
+      and IS.load_x_profile(cfg8.id)["name"] == "رأي وتحليل")
+view = B.AEOSPlatform._agent_view(None, cfg8)
+check("قائمة الموظفين (agents) تحمل هوية X لكل بطاقة", (view.get("x_profile") or {}).get("avatar_url") == HEADER["avatar_url"])
+
+from app.aeos.capabilities.handlers import ReadOwnMetricsCapability  # noqa: E402
+from app.aeos.capabilities.base import CapabilityRequest  # noqa: E402
+
+cfg10 = emp(10)
+ctx10 = NS(config=cfg10, scratch={}, mcp=NS(call=lambda req: MCPResponse.ok(
+    posts=[], profile=dict(HEADER, name="من دورة الأداء"))))
+res10 = ReadOwnMetricsCapability().execute(CapabilityRequest(name="read_own_metrics", params={}), ctx10)
+snap10 = IS.load_x_profile(cfg10.id) or {}
+check("دورة قراءة الأداء تحدّث البطاقة تلقائياً", res10.success and snap10.get("name") == "من دورة الأداء"
+      and snap10.get("source") == "metrics", res10.error)
+
+import app.aeos.services.tools_service as TS  # noqa: E402
+
+REG = {"res": MCPResponse.ok(profile=HEADER)}
+CALLS_REG = []
+TS.registry = lambda: NS(call=lambda req: CALLS_REG.append(req) or REG["res"])
+snap = REAL_REFRESH(cfg8, lock_timeout=25.0)
+req = CALLS_REG[-1]
+check("تحديث البطاقة من X: الأداة الصحيحة بكوكيز الموظف ومهلة القفل",
+      req.tool == "read_account_profile" and req.params["lock_timeout"] == 25.0
+      and req.context == {"server": "playwright_x", "cookie_label": "acc8"} and snap["source"] == "live")
+REG["res"] = MCPResponse.fail("read_account_profile failed: المتصفح مشغول الآن بدورة موظف ذكي")
+e4 = raises(lambda: REAL_REFRESH(cfg8), RuntimeError)
+check("فشل القراءة ← رسالة عربية نظيفة", e4 and str(e4).startswith("المتصفح مشغول"), e4)
+REG["res"] = MCPResponse.ok(profile={"bio": "بلا اسم"})
+check("صفحة بلا اسم ولا صورة ← خطأ صريح لا لقطة فارغة", bool(raises(lambda: REAL_REFRESH(cfg8), RuntimeError)))
+
+R._employee_or_404 = lambda eid, user: cfg8
+got = R.x_profile("emp8", current_user=NS(id=1))
+check("GET x-profile يعيد آخر لقطة بلا متصفح", got["x_profile"]["name"] == "رأي وتحليل")
+SVC.refresh_x_profile = lambda cfg, lock_timeout=0.0: (_ for _ in ()).throw(RuntimeError("المتصفح مشغول الآن"))
+err5 = None
+try:
+    R.x_profile_refresh("emp8", current_user=NS(id=1))
+except HTTPException as exc:
+    err5 = exc
+check("POST x-profile/refresh: فشل القراءة ← 502 برسالة عربية", err5 is not None and err5.status_code == 502
+      and "مشغول" in err5.detail)
+SVC.refresh_x_profile = fake_refresh
+
+cfg11 = emp(11)
+IS.save_x_profile(cfg11.id, "acc11", {"name": "قبل", "avatar_url": "https://pbs.twimg.com/profile_images/1/old_400x400.jpg",
+                                      "banner_url": "https://pbs.twimg.com/profile_banners/1/100/1500x500"}, "live")
+NEXT["res"] = {"success": True, "media": {"avatar": "unconfirmed", "banner": "unconfirmed"}}
+X_AFTER["snap"] = {"name": "بعد", "avatar_url": "https://pbs.twimg.com/profile_images/2/new_400x400.jpg",
+                   "banner_url": "https://pbs.twimg.com/profile_banners/1/100/1500x500"}
+a11, _ = fake_png("avatar-11")
+b11, _ = fake_png("banner-11")
+SVC.request_apply_identity(cfg11, 1, identity={"avatar_url": a11, "banner_url": b11})
+msg = PUSHED[-1][1]
+avatar_line = next((ln for ln in msg.splitlines() if "الصورة الشخصية" in ln), "")
+banner_line = next((ln for ln in msg.splitlines() if "الهيدر" in ln and "**" in ln), "")
+check("بعد التطبيق تُقرأ الهوية من X فتتحدّث البطاقة", REFRESHED[-1] == (cfg11.id, 0.0)
+      and IS.load_x_profile(cfg11.id)["name"] == "بعد" and "بطاقة الموظف تعرض الآن" in msg)
+check("صورة تغيّر رابطها في صفحة الحساب ← ✓ «ظهرت في صفحة حسابك»", "ظهرت في صفحة حسابك" in avatar_line, avatar_line)
+check("هيدر ما زال بالرابط القديم ← تحذير صريح لا ✓", "ما زالت تعرض السابقة" in banner_line
+      and "✓" not in banner_line, banner_line)
+X_AFTER["snap"] = None
+NEXT["res"] = {"success": True, "media": {"avatar": "confirmed", "banner": "confirmed"}}
 
 shutil.rmtree(TMP, ignore_errors=True)
 print()
