@@ -71,6 +71,12 @@ def _dotenv() -> Dict[str, str]:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
+                    v = v.strip()
+                    # تعليق في نهاية السطر (مسافة ثم #). كلمة مرور فيها # بلا مسافة
+                    # تبقى كما هي — وإلا صار «PROXY_USERNAME=user  # شرح» اسماً مكسوراً.
+                    cut = re.search(r"\s+#", v)
+                    if cut:
+                        v = v[:cut.start()]
                     out[k.strip()] = v.strip().strip('"').strip("'")
         except OSError:
             pass
@@ -185,6 +191,10 @@ def _username(cfg: ProxyConfig, sid: str) -> str:
                                    COUNTRY=country.upper(), city=city, sid=sid,
                                    lifetime=minutes)
     if cfg.provider == "oxylabs":
+        # Oxylabs يرفض 407 بلا بادئة customer- (قيس فعلياً: resi_xxx ⇒ 407،
+        # customer-resi_xxx ⇒ SA/Riyadh/STC). نضيفها إن غابت فقط.
+        if not base.startswith("customer-"):
+            base = f"customer-{base}"
         user = f"{base}-cc-{country.upper()}"
         if city:
             user += f"-city-{city}"

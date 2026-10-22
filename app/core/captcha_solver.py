@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -81,6 +82,10 @@ def _dotenv() -> Dict[str, str]:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
+                v = v.strip()
+                cut = re.search(r"\s+#", v)   # تعليق نهاية السطر (وليس # داخل المفتاح)
+                if cut:
+                    v = v[:cut.start()]
                 out[k.strip()] = v.strip().strip('"').strip("'")
         except OSError:
             pass

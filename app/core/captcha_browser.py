@@ -21,6 +21,11 @@ from typing import Any, Callable, Dict, Optional
 
 _LOG = Callable[[str], None]
 
+#: UA كروم حقيقي — Playwright في وضع headless يرسل «HeadlessChrome» فيرد X بـ403
+#: (قيس فعلياً: default-UA ⇒ 403، هذا الـUA ⇒ 307 إلى صفحة الدخول).
+DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+
 
 def _solver_module():
     """تحميل الحلّال بالمسار — هذا الملف يُستورد من app/x أيضاً (لا حزمة app)."""
@@ -552,17 +557,21 @@ _CLEARANCE_CACHE: Dict[Any, Any] = {}
 
 
 def _proxy_dict(proxy: str) -> Dict[str, str]:
-    """`http://user:pass@host:port` → صيغة proxy في Playwright."""
-    from urllib.parse import urlparse
+    """`http://user:pass@host:port` → صيغة proxy في Playwright.
+
+    يجب فك ترميز النسبة: كلمة مرور فيها `+` تُبنى كـ`%2B` في الرابط، وتمريرها
+    كما هي إلى Playwright يُنتج 407 (قيس فعلياً مع Oxylabs: `8qavK+uuP~9T`).
+    """
+    from urllib.parse import unquote, urlparse
 
     p = urlparse(proxy)
     if not p.hostname or not p.port:
         raise CaptchaError(f"صيغة CAPTCHA_PROXY غير صالحة (host:port مطلوب): {proxy}")
     out = {"server": f"{p.scheme or 'http'}://{p.hostname}:{p.port}"}
     if p.username:
-        out["username"] = p.username
+        out["username"] = unquote(p.username)
     if p.password:
-        out["password"] = p.password
+        out["password"] = unquote(p.password)
     return out
 
 
@@ -629,6 +638,7 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
             raise RuntimeError(f"تدوير IP مفعّل لكن فشل تجهيز البروكسي: {e}") from e
 
     proxy = (proxy or os.getenv("CAPTCHA_PROXY", "")).strip()
+    kwargs.setdefault("user_agent", DEFAULT_UA)
     if presolve is None:
         presolve = os.getenv("CAPTCHA_CLOUDFLARE_PRESOLVE", "1").lower() not in (
             "0", "false", "no", "off")

@@ -104,8 +104,7 @@ class FakeGeoProxy:
 print("1) قوالب اسم المستخدم لكل مزوّد (الشكل الذي يقرأه المزوّد فعلاً)")
 cases = [
     ("brightdata", "brd.superproxy.io", 33335, "-country-sa-city-riyadh-session-{sid}"),
-    ("oxylabs", "pr.oxylabs.io", 7777, "-cc-SA-city-riyadh-sessid-{sid}"),
-    ("decodo", "gate.decodo.com", 7000, "-country-sa-city-riyadh-session-{sid}"),
+    ("oxylabs", "pr.oxylabs.io", 7777, "-cc-SA-city-riyadh-sessid-{sid}"),    ("decodo", "gate.decodo.com", 7000, "-country-sa-city-riyadh-session-{sid}"),
     ("iproyal", "geo.iproyal.com", 12321, "_country-sa_city-riyadh_session-{sid}_lifetime-10"),
     ("soax", "proxy.soax.com", 5000, "-country-sa-region-riyadh-sessionid-{sid}"),
 ]
@@ -116,7 +115,8 @@ for provider, host, port, suffix in cases:
         sid = PR.session_id("emaad5079", cfg, bucket=123)
         url = PR.build_url(cfg, sid)
         user = url.split("://", 1)[1].split(":", 1)[0]
-        expected = "base-user" + suffix.format(sid=sid)
+        expected_base = "customer-base-user" if provider == "oxylabs" else "base-user"
+        expected = expected_base + suffix.format(sid=sid)
         check(f"{provider}: {expected[:44]}…", user == expected, f"got {user}")
         check(f"{provider}: المنفذ والبروتوكول", f":{port}" in url and url.startswith("http://"))
 
@@ -166,8 +166,15 @@ with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs"}):
     pw = PR.playwright_proxy(url)
     check("playwright: server بلا بيانات دخول",
           pw["server"].startswith("http://") and "@" not in pw["server"], str(pw))
+    # كلمة مرور فيها +: تُبنى %2B في الرابط — تمريرها مشفّرة إلى Playwright = 407
+    with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs", "PROXY_PASSWORD": "p+a~s"}):
+        u2 = PR.build_url(PR.load_config(), "mojsid")
+        check("playwright: يفك ترميز كلمة المرور (%2B → +)",
+              PR.playwright_proxy(u2)["password"] == "p+a~s", PR.playwright_proxy(u2)["password"])
+        check("captcha_browser._proxy_dict يفك الترميز أيضاً (كان 407 حقيقياً)",
+              CB._proxy_dict(u2)["password"] == "p+a~s", CB._proxy_dict(u2)["password"])
     check("playwright: username يحمل geo/الجلسة وكلمة المرور منفصلة",
-          pw["username"].startswith("base-user-cc-SA") and pw["password"] == "secret-pw",
+          pw["username"].startswith("customer-base-user-cc-SA") and pw["password"] == "secret-pw",
           str(pw))
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -180,7 +187,7 @@ with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs", "PROXY_PORT": sa.port}):
     got = PR.acquire("emaad5079")
     check("IP سعودي ⇒ يُقبل", bool(got) and "base-user" in got)
     check("الفحص يمرّ من البروكسي نفسه (اسم المستخدم وصل)",
-          bool(sa.usernames) and sa.usernames[0].startswith("base-user-cc-SA"),
+          bool(sa.usernames) and sa.usernames[0].startswith("customer-base-user-cc-SA"),
           str(sa.usernames[:1]))
     hits = sa.hits
     PR.acquire("emaad5079")
