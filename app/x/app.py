@@ -988,7 +988,7 @@ def api_profile_update():
             elif banner_url and is_url(banner_url):
                 banner_path = download_to_temp(banner_url, tmp)
 
-            update_profile_on_x(
+            media = update_profile_on_x(
                 storage_state_path=storage_state_path,
                 name=name,
                 bio=bio,
@@ -997,9 +997,11 @@ def api_profile_update():
                 avatar_path=avatar_path,
                 banner_path=banner_path,
                 headless=headless,
-            )
-            log_operation('profile', cookie_label, 'success', 'تم تعديل البروفايل والتحقق من حفظه ✅')
-            return jsonify({'success': True, 'task_id': op_id, 'message': 'تم تعديل البروفايل والتحقق من حفظه ✅'}), 200
+            ) or {}
+            log_operation('profile', cookie_label, 'success', 'تم تعديل البروفايل والتحقق من حفظه ✅',
+                          meta_json=json.dumps({'media': media}, ensure_ascii=False))
+            return jsonify({'success': True, 'task_id': op_id, 'message': 'تم تعديل البروفايل والتحقق من حفظه ✅',
+                            'media': media}), 200
         except Exception as e:
             log_operation('profile', cookie_label, 'error', f'فشل تعديل البروفايل: {e}')
             return jsonify({'success': False, 'task_id': op_id, 'error': str(e)}), 500

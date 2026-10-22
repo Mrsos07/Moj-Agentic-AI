@@ -494,13 +494,33 @@ class MainAgent:
         return None
 
     @staticmethod
-    def _persona_identity_params(persona) -> Dict[str, Any]:
-        """يحوّل برسونا الموظف إلى معايير توليد هوية (المنطق المشترك في
-        app/aeos/services/identity_service — نفس المصدر لتوليد المعاينة
-        هنا ولآلية التطبيق على X)."""
-        from app.aeos.services.identity_service import persona_identity_params
+    def _employee_identity_preview(cfg, entities: Dict[str, Any],
+                                   user_id: Optional[int], with_images: bool) -> str:
+        """معاينة هوية من برسونا الموظف بنفس مولّد بطاقة الموظف (الاسم/البايو من
+        البرسونا أولاً) — وتُحفظ ليطبّق «طبّق الهوية» هذه الهوية نفسها لا هوية
+        جديدة تُولَّد لحظة التطبيق بصور غير التي رآها المالك."""
+        from app.aeos.services import identity_service, identity_store
 
-        return persona_identity_params(persona)
+        try:
+            ident = identity_service.generate_preview(cfg, entities, with_images=with_images)
+        except Exception as e:
+            return f"⚠️ فشل توليد الهوية: {e}"
+        identity_store.remember_preview(cfg.id, user_id, ident)
+
+        lines = [f"✅ **معاينة هوية مبنية على برسونا الموظف الذكي @{cfg.account_username}** "
+                 "(لم يتغيّر شيء في X بعد):", ""]
+        if ident.get("name"):
+            lines.append(f"👤 **الاسم:** {ident['name']}")
+        if ident.get("bio"):
+            lines.append(f"📝 **البايو:** {ident['bio']}")
+        if ident.get("avatar_url"):
+            lines.append(f"🖼️ **الصورة الشخصية:** {ident['avatar_url']}")
+        if ident.get("banner_url"):
+            lines.append(f"🎨 **الهيدر:** {ident['banner_url']}")
+        lines.append("")
+        lines.append("💡 لتطبيق **هذه الهوية نفسها** على حساب X اكتب: «طبّق الهوية على الموظف» "
+                     "(خلال ساعة — بعدها تُحذف صور المعاينة). لهوية أخرى: «ولّد هوية للموظف» من جديد.")
+        return "\n".join(lines)
 
     def _handle_generate_identity(self, message: str, entities: Dict[str, Any],
                                   pinned_account: Optional[str] = None,
@@ -529,24 +549,11 @@ class MainAgent:
 
         # الأساس: برسونا الموظف الذكي إن وُجدت — لا عشوائية
         persona_cfg = self._employee_persona(entities, pinned_account, user_id)
-        persona_based = persona_cfg is not None
+        if persona_cfg is not None:
+            return self._employee_identity_preview(persona_cfg, entities, user_id, with_images)
 
         try:
-            if persona_based:
-                params = self._persona_identity_params(persona_cfg.persona)
-                # معايير المستخدم الصريحة تتقدّم على المستنتَج من البرسونا
-                if entities.get("nationality"):
-                    params["nationality"] = entities["nationality"]
-                if entities.get("orientation"):
-                    params["orientation"] = entities["orientation"]
-                if entities.get("gender"):
-                    params["gender"] = entities["gender"]
-                if entities.get("bio_length"):
-                    params["bioLength"] = entities["bio_length"]
-                if entities.get("skin_tone"):
-                    params["skinTone"] = entities["skin_tone"]
-                result = identity_bridge.generate_profile(params, with_images=with_images)
-            elif not has_specifics:
+            if not has_specifics:
                 # لا موظف ولا معايير → طلب عشوائي
                 if with_images:
                     result = identity_bridge.generate_random_profile_with_images()
@@ -579,12 +586,7 @@ class MainAgent:
         data = result.get("data", {})
 
         # بناء الرد
-        if persona_based:
-            header = (f"✅ **تم توليد هوية مبنية على برسونا الموظف الذكي "
-                      f"@{persona_cfg.account_username}:**")
-        else:
-            header = "✅ **تم توليد هوية وهمية جديدة:**"
-        lines = [header, ""]
+        lines = ["✅ **تم توليد هوية وهمية جديدة:**", ""]
         if data.get("name"):
             lines.append(f"👤 **الاسم:** {data['name']}")
         if data.get("username"):

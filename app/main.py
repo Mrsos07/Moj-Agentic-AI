@@ -127,6 +127,15 @@ async def startup_event():
     except Exception as e:
         print(f"Warning: AEOS platform failed to start: {str(e)}")
 
+    # هوية اعتمدها المالك وقطعت إعادة التشغيل تطبيقها ← تُستأنف بالصور المثبّتة نفسها
+    try:
+        from app.aeos.services import identity_service
+        resumed = identity_service.resume_pending()
+        if resumed:
+            print(f"Identity: resumed {resumed} interrupted approved identity apply(s)")
+    except Exception as e:
+        print(f"Warning: identity resume failed: {str(e)}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():

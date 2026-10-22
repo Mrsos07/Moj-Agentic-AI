@@ -7,7 +7,9 @@
 - الاسم المعروض  ← ``persona.display_name``.
 - النبذة (bio)   ← نبذة البرسونا إن كُتبت، وإلا يصوغها الـLLM من الدور
   والاهتمامات والنبرة واللهجة (فولباك حتمي بلا LLM).
-- الصورة الشخصية ← تُولَّد عبر خادم الصور (gpt-image-1) بأسلوب يعكس التخصص.
+- الصورة والهيدر ← لا يُرفعان هنا أبداً: صورة لم يعاينها المالك ويعتمدها
+  (identity_service) كانت تنزل على الحساب فيراها «غير التي اعتمدها». ولا يُكتب
+  فوق هوية اعتمدها المالك (identity_store.has_owner_identity).
 
 التطبيق غير حاجب: يعمل في خيط خلفي (تحديث الملف يفتح متصفحاً ~دقيقة)، يُعلَّم
 في ``runtime_state.flags['identity_applied']`` فلا يتكرر، ويُعطَّل بقاعدة
@@ -73,45 +75,21 @@ def build_identity(cfg, llm=None) -> Dict[str, str]:
     return {"name": name, "bio": bio[:_BIO_MAX]}
 
 
-def _generate_avatar(cfg, mcp) -> str:
-    """صورة شخصية مولّدة تعكس التخصص؛ "" عند التعذر (لا نكسر التطبيق)."""
-    if mcp is None or "image" not in (cfg.mcp_servers or []):
-        return ""
-    try:
-        from ..mcp.base import MCPRequest
-
-        persona = cfg.persona
-        prompt = (
-            "Minimal, professional social-media avatar (profile picture): "
-            f"abstract symbolic illustration representing {persona.role or 'a content creator'} "
-            f"focused on {', '.join(persona.interests or ['general topics'])}. "
-            "Centered composition, clean modern flat style, pleasant colors, "
-            "no text, no letters, no watermark, works at small sizes."
-        )
-        res = mcp.call(MCPRequest(
-            employee_id=cfg.id, tool="generate_image",
-            params={"prompt": prompt, "size": "1024x1024"},
-            context={"server": "image"},
-        ))
-        if res.success:
-            return (res.data or {}).get("url", "") or ""
-        logger.info("identity avatar generation failed: %s", res.error)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("identity avatar generation error: %s", exc)
-    return ""
-
-
-def apply_persona_identity(cfg, llm=None, mcp=None, repo=None) -> Dict[str, Any]:
-    """طبّق هوية البرسونا على ملف حساب X (اسم/نبذة/صورة). يعيد النتيجة."""
+def apply_persona_identity(cfg, llm=None, repo=None) -> Dict[str, Any]:
+    """طبّق اسم البرسونا ونبذتها على ملف حساب X (بلا صورة). يعيد النتيجة."""
     from app.services import x_bridge
 
+    from . import identity_store
+
     identity = build_identity(cfg, llm=llm)
-    avatar_url = _generate_avatar(cfg, mcp)
+    if identity_store.has_owner_identity(cfg.id):
+        logger.info("persona identity for @%s skipped: owner-approved identity exists",
+                    cfg.account_username)
+        return {"ok": False, "skipped": True, "identity": identity, "error": None}
 
     result = x_bridge.update_profile(
         cookie_label=cfg.cookie_label,
         name=identity["name"], bio=identity["bio"],
-        avatar_url=avatar_url,
     )
     ok = bool(result.get("success"))
     if ok and repo is not None:
@@ -122,13 +100,12 @@ def apply_persona_identity(cfg, llm=None, mcp=None, repo=None) -> Dict[str, Any]
                 repo.save(fresh)
         except Exception:  # noqa: BLE001
             logger.exception("failed to persist identity_applied flag")
-    logger.info("persona identity for @%s: ok=%s (avatar=%s)",
-                cfg.account_username, ok, bool(avatar_url))
-    return {"ok": ok, "identity": identity, "avatar": bool(avatar_url),
+    logger.info("persona identity for @%s: ok=%s", cfg.account_username, ok)
+    return {"ok": ok, "identity": identity,
             "error": None if ok else (result.get("error") or result.get("message"))}
 
 
-def apply_persona_identity_async(cfg, llm=None, mcp=None, repo=None) -> None:
+def apply_persona_identity_async(cfg, llm=None, repo=None) -> None:
     """التطبيق في الخلفية + إبلاغ المستخدم بالنتيجة في شات الموظف."""
     rules = cfg.business_rules or {}
     if not bool(rules.get("apply_identity_on_create", True)):
@@ -138,16 +115,18 @@ def apply_persona_identity_async(cfg, llm=None, mcp=None, repo=None) -> None:
 
     def _run() -> None:
         try:
-            res = apply_persona_identity(cfg, llm=llm, mcp=mcp, repo=repo)
+            res = apply_persona_identity(cfg, llm=llm, repo=repo)
             from .employee_data import _push
 
+            if res.get("skipped"):
+                return
             if res["ok"]:
                 ident = res["identity"]
                 _push(cfg.user_id,
-                      f"🪪 **جهّزت هوية حسابي بما يعكس شخصيتي:**\n"
+                      f"🪪 **جهّزت اسم حسابي ونبذته بما يعكس شخصيتي:**\n"
                       f"- الاسم: {ident['name']}\n- النبذة: {ident['bio']}\n"
-                      + ("- وصورة شخصية جديدة مولّدة بأسلوب تخصصي ✨"
-                         if res["avatar"] else ""),
+                      "🖼️ الصورة والهيدر لا أغيّرهما دون موافقتك: من بطاقتي اضغط "
+                      "«هوية X من الشخصية» لتعاينهما، ثم «تطبيق على X» لاعتمادهما.",
                       cfg)
             else:
                 _push(cfg.user_id,

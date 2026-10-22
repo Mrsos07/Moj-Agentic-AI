@@ -9,6 +9,10 @@ Playwright with the account cookies).
 Generation (~30-60s for two images) plus the browser profile update (~60s+)
 take minutes, so the apply runs in a **background thread** and the result is
 pushed to the user's chat when done — same pattern as employee_data.
+
+What the owner approved is exactly what lands on X: the approved images are
+pinned (byte copies, see identity_store) at approval time, uploaded as files,
+and an approval interrupted by a server restart is resumed on startup.
 """
 from __future__ import annotations
 
@@ -106,7 +110,8 @@ def _absolutize(url: str) -> str:
 
 
 # ─────────────────────────── public API ───────────────────────────
-def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None,
+                     with_images: bool = True) -> Dict[str, Any]:
     """يولّد هوية كاملة من البرسونا (بلا تطبيق) — للمعاينة في الواجهة.
 
     Returns ``{name, username, bio, avatar_url, banner_url}`` (روابط مطلقة).
@@ -124,7 +129,7 @@ def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None) -> Dict[str
         if entities.get(src):
             params[dst] = entities[src]
 
-    result = identity_bridge.generate_profile(params, with_images=True)
+    result = identity_bridge.generate_profile(params, with_images=with_images)
     if not result.get("success"):
         raise RuntimeError(f"فشل توليد الهوية: {result.get('error', 'خطأ غير معروف')}")
     data = result.get("data", {})
@@ -227,69 +232,143 @@ def request_apply_identity(cfg, user_id: Optional[int],
                            identity: Optional[Dict[str, Any]] = None) -> str:
     """Spawn the (generate+)apply in the background and return an immediate ack.
 
-    إن مُرّرت ``identity`` جاهزة (من معاينة سابقة) تُطبّق مباشرة بلا إعادة توليد."""
-    threading.Thread(
-        target=_run, args=(cfg, user_id, entities or {}, identity), daemon=True,
-    ).start()
+    إن مُرّرت ``identity`` (معاينة اعتمدها المالك) تُثبَّت صورها **الآن** — بايتات الصور
+    نفسها في مجلد الموظف — ثم تُطبَّق كما هي بلا إعادة توليد. ترفع ``IdentityError``
+    إن لم تعد صور المعاينة متاحة: لا تُطبَّق أبداً صورة غير التي اعتمدها المالك."""
+    from . import identity_store
+
     if identity:
-        return (f"🪩 جارِ تطبيق الهوية المولّدة على حساب **@{cfg.account_username}** "
-                "في X (اسم + بايو + صورة + هيدر)… قد يستغرق ذلك دقيقة، "
-                "وستصلك النتيجة في الشات. ⏳")
+        record = identity_store.create_pending(cfg, user_id, identity)
+        _start(cfg, record)
+        what = " + ".join(lbl for lbl, on in (
+            ("اسم", record["name"]), ("بايو", record["bio"]),
+            ("صورة", "avatar" in record["media"]), ("هيدر", "banner" in record["media"])) if on)
+        return (f"🪩 جارِ تطبيق الهوية التي اعتمدتها على حساب **@{cfg.account_username}** "
+                f"في X ({what}) — بالصورة والهيدر نفسيهما كما في المعاينة. قد يستغرق ذلك "
+                "دقيقة، وستصلك النتيجة المؤكَّدة في محادثة الموظف. ⏳")
+    threading.Thread(target=_run_new, args=(cfg, user_id, entities or {}), daemon=True).start()
     return (f"🎨 جارِ توليد هوية جديدة من برسونا الموظف **@{cfg.account_username}** "
             "وتطبيقها على حسابه في X (اسم + بايو + صورة + هيدر)…\n"
             "قد يستغرق ذلك ٢-٣ دقائق، وسأوافيك بالنتيجة هنا. ⏳")
 
 
-# ─────────────────────────── worker ───────────────────────────
-def _run(cfg, user_id: Optional[int], entities: Dict[str, Any],
-         identity: Optional[Dict[str, Any]] = None) -> None:
-    try:
-        text = _apply(cfg, entities, identity)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("apply identity failed for %s", cfg.account_username)
-        text = f"⚠️ تعذّر تطبيق الهوية على @{cfg.account_username}: {exc}"
+def apply_from_chat(cfg, user_id: Optional[int], entities: Optional[Dict[str, Any]] = None) -> str:
+    """«طبّق الهوية» في الشات: تُطبَّق آخر هوية عُرضت على المالك (خلال صلاحية صورها).
+
+    كان الأمر يولّد هوية جديدة لحظة التطبيق، فتنزل على الحساب صورة غير التي رآها."""
+    from . import identity_store
+
+    shown = identity_store.recent_preview(cfg.id, user_id)
+    if not shown:
+        return request_apply_identity(cfg, user_id, entities)
+    ack = request_apply_identity(cfg, user_id, identity=shown["identity"])
+    identity_store.forget_preview(cfg.id)
+    return ack
+
+
+def resume_pending() -> int:
+    """يستأنف اعتمادات قطعتها إعادة تشغيل الخادم (نشر/‏reload) — يُستدعى عند الإقلاع.
+
+    كان التطبيق خيطاً خلفياً يموت مع العملية بلا أثر ولا رسالة، فيبقى على الحساب ما
+    كان قبله ويرى المالك «صورة غير التي اعتمدها»."""
+    from app.aeos.bootstrap import get_platform
+
+    from . import identity_store
     from .employee_data import _push
 
-    _push(user_id, text, cfg)
+    resumed = 0
+    for record in identity_store.all_pending():
+        cfg = get_platform().repository.get(record["employee_id"])
+        if cfg is None:
+            identity_store.finish(record, ok=False)
+            continue
+        if (int(record.get("attempts") or 0) >= identity_store.MAX_ATTEMPTS
+                or identity_store.expired(record)):
+            identity_store.finish(record, ok=False)
+            _push(record.get("user_id"),
+                  f"⚠️ لم يكتمل تطبيق الهوية التي اعتمدتها على @{cfg.account_username} "
+                  "(قطعته إعادة تشغيل الخادم) — أعد توليد المعاينة واعتمادها من بطاقة الموظف.", cfg)
+            continue
+        _push(record.get("user_id"),
+              f"▶️ أُعيد تشغيل الخادم أثناء تطبيق الهوية التي اعتمدتها على @{cfg.account_username} "
+              "— أستأنف التطبيق الآن بالصورة والهيدر نفسيهما.", cfg)
+        _start(cfg, record)
+        resumed += 1
+    return resumed
 
 
-def _apply(cfg, entities: Dict[str, Any],
-           identity: Optional[Dict[str, Any]] = None) -> str:
+# ─────────────────────────── worker ───────────────────────────
+def _start(cfg, record: Dict[str, Any]) -> None:
+    threading.Thread(target=_run, args=(cfg, record), daemon=True,
+                     name=f"identity-apply-{cfg.account_username}").start()
+
+
+def _run_new(cfg, user_id: Optional[int], entities: Dict[str, Any]) -> None:
+    from . import identity_store
+    from .employee_data import _push
+
+    try:
+        record = identity_store.create_pending(cfg, user_id, generate_preview(cfg, entities))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("identity generation failed for %s", cfg.account_username)
+        _push(user_id, f"⚠️ تعذّر توليد هوية لـ@{cfg.account_username}: {exc}", cfg)
+        return
+    _run(cfg, record)
+
+
+def _run(cfg, record: Dict[str, Any]) -> None:
+    from . import identity_store
+    from .employee_data import _push
+
+    try:
+        text = _apply(cfg, record)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("apply identity failed for %s", cfg.account_username)
+        identity_store.finish(record, ok=False)
+        text = f"⚠️ تعذّر تطبيق الهوية على @{cfg.account_username}: {exc}"
+    if text:
+        _push(record.get("user_id"), text, cfg)
+
+
+def _apply(cfg, record: Dict[str, Any]) -> Optional[str]:
     from app.services import x_bridge
 
-    # 1) هوية جاهزة من معاينة سابقة، أو توليد جديد من البرسونا
-    if not identity:
-        identity = generate_preview(cfg, entities)
-    name = (identity.get("name") or "").strip()
-    bio = (identity.get("bio") or "").strip()
-    avatar_url = _absolutize((identity.get("avatar_url") or "").strip())
-    banner_url = _absolutize((identity.get("banner_url") or "").strip())
-    if not any([name, bio, avatar_url, banner_url]):
-        return "⚠️ لا توجد حقول قابلة للتطبيق في الهوية."
+    from . import identity_store
 
-    # 2) تطبيقها على حساب X عبر app/x (Playwright بكوكيز الحساب)
+    # اعتماد أحدث حلّ محله ⇒ لا نطبّق هوية تجاوزها المالك
+    if not identity_store.is_current(record):
+        return None
+    identity_store.start_attempt(record)
+    name, bio, media = record["name"], record["bio"], record["media"]
+
+    # البايتات المثبّتة نفسها تُرفع كملفات (Playwright بكوكيز الحساب عبر app/x)
     label = cfg.cookie_label or cfg.account_username
     res = x_bridge.update_profile(
-        label, name=name, bio=bio,
-        avatar_url=avatar_url, banner_url=banner_url, headless=True,
+        label, name=name, bio=bio, headless=True,
+        avatar_path=identity_store.media_path(record, "avatar"),
+        banner_path=identity_store.media_path(record, "banner"),
     )
     if not res.get("success"):
+        identity_store.finish(record, ok=False)
         err = res.get("error") or res.get("message") or "خطأ غير معروف"
-        return (f"⚠️ ولّدت الهوية لكن تطبيقها على X فشل: {err}\n\n"
-                f"👤 الاسم المولّد: {name}\n📝 البايو المولّد: {bio}")
+        return (f"⚠️ لم يكتمل تطبيق الهوية التي اعتمدتها على @{cfg.account_username}: {err}\n"
+                "أعد المحاولة من بطاقة الموظف («هوية X من الشخصية»).")
+    confirmed = res.get("media") or {}
+    identity_store.finish(record, ok=True, confirmed=confirmed)
 
-    # 3) مزامنة البرسونا: الاسم والبايو المعروضان في X هما الآن هوية الموظف
+    # مزامنة البرسونا: الاسم والبايو المعروضان في X هما الآن هوية الموظف
     _sync_persona(cfg, name, bio)
 
-    lines = [f"✅ **حدّثت هوية الموظف @{cfg.account_username} في X من برسوناه:**", ""]
+    lines = [f"✅ **طبّقت الهوية التي اعتمدتها على @{cfg.account_username} في X:**", ""]
     if name:
         lines.append(f"👤 **الاسم:** {name}")
     if bio:
         lines.append(f"📝 **البايو:** {bio}")
-    if avatar_url:
-        lines.append("🖼️ **الصورة الشخصية:** جُدّدت ✓")
-    if banner_url:
-        lines.append("🎨 **الهيدر:** جُدّد ✓")
+    for kind, icon, label_ar in (("avatar", "🖼️", "الصورة الشخصية"), ("banner", "🎨", "الهيدر")):
+        if kind in media:
+            lines.append(f"{icon} **{label_ar}:** " + (
+                "نفس الصورة التي اعتمدتها ✓ (أكّد X حفظها)" if confirmed.get(kind) == "confirmed"
+                else "رُفعت نفس الصورة التي اعتمدتها — لم يصلني تأكيد صريح من X، ألقِ نظرة على الحساب"))
     lines.append("")
     lines.append("🎭 وحدّثت برسونا الموظف (الاسم/البايو) لتطابق هويته الجديدة.")
     return "\n".join(lines)
