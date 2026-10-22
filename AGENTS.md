@@ -417,6 +417,19 @@ defences it forced are still in the code and still required if you set
   a stable IP per employee. Start at `PROXY_SESSION_TTL=900` and raise it if
   challenges appear. Per-account scope is the account label, so two accounts of the
   same employee get different IPs — that is intended.
+- Measured live with the owner's Oxylabs sub-user (2026-10-22):
+  `resi_xxx-cc-SA-city-riyadh-sessid-…` returns **407**; the same string with a
+  **`customer-` prefix** returns SA/Riyadh (Saudinet/STC, then Zain). The code adds
+  the prefix when missing. Two more real defects found the same way:
+  (a) a password containing `+` is built as `%2B` in the URL and **must be
+  unquoted** before handing it to Playwright, or every request is 407 — this bit
+  both `proxy_rotation.playwright_proxy` and `captcha_browser._proxy_dict`;
+  (b) Playwright's default headless UA contains `HeadlessChrome`, and **x.com
+  answers 403** to it (same context with a real Chrome UA: 307 → login page).
+  `new_context` now sets `DEFAULT_UA` unless a caller passes one.
+  With the Saudi proxy, public pages (`x.com/explore`, `/i/flow/login`) load with
+  **no Cloudflare challenge at all**; only `/account/access` (the locked-account
+  page) still shows it — so the CF problem was the egress IP, as suspected.
 - Provider research (prices/coverage read from their own pages, 2026-10-22):
   Oxylabs 1,024,158 SA residential + Riyadh city + SA mobile ($8/$9 per GB);
   Bright Data 416,641 SA IPs, city/ZIP targeting, ISP static 10 IPs $18/mo, $8/GB

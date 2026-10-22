@@ -35,6 +35,7 @@ from app.core import captcha_solver as CS  # noqa: E402
 
 # الفحوص المحلية معزولة عن .env (قد يحمل مفتاحاً حقيقياً)؛ قسم --live يعيد قراءته
 os.environ["CAPTCHA_DOTENV"] = "0"
+os.environ["PROXY_DOTENV"] = "0"   # .env صار فيه مزوّد بروكسي حقيقي
 
 FAILED = []
 
@@ -667,6 +668,9 @@ try:
             p3 = ctx3.new_page()
             check("new_context بلا بروكسي: سلوك افتراضي (لا UA مُستعار)",
                   p3.evaluate("() => navigator.userAgent") != "UA-Linux-Test")
+            ua3 = p3.evaluate("() => navigator.userAgent")
+            check("new_context: UA كروم حقيقي لا HeadlessChrome (X يرد 403 على الأول)",
+                  "HeadlessChrome" not in ua3 and "Chrome/" in ua3, ua3)
             ctx3.close()
         browser.close()
 except Exception as e:  # noqa: BLE001
