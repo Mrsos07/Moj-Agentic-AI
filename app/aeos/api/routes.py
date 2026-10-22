@@ -418,6 +418,31 @@ def identity_apply(employee_id: str, body: IdentityApplyIn,
     return {"ok": True, "message": ack}
 
 
+@router.get("/employees/{employee_id}/x-profile")
+def x_profile(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """هوية الحساب كما قُرئت من X آخر مرة (اسم/نبذة/صورة/هيدر) — لبطاقة الموظف، بلا متصفح."""
+    from ..services import identity_store
+
+    cfg = _employee_or_404(employee_id, current_user)
+    return {"ok": True, "x_profile": identity_store.load_x_profile(cfg.id)}
+
+
+@router.post("/employees/{employee_id}/x-profile/refresh")
+def x_profile_refresh(employee_id: str,
+                      current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """يقرأ هوية الحساب من X الآن ويحدّث البطاقة (~15-30ث). طلب تفاعلي: يفشل سريعاً
+    برسالة واضحة إن كان المتصفح محجوزاً بدورة موظف."""
+    from ..services import identity_service
+
+    cfg = _employee_or_404(employee_id, current_user)
+    try:
+        snap = identity_service.refresh_x_profile(cfg, lock_timeout=25.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("x profile refresh failed for %s: %s", employee_id, exc)
+        raise HTTPException(502, str(exc))
+    return {"ok": True, "x_profile": snap}
+
+
 @router.get("/stats")
 def stats(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     return get_platform().stats()

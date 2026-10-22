@@ -327,9 +327,27 @@ defences it forced are still in the code and still required if you set
   proxy while name/bio still verify); returns `media: {avatar|banner: confirmed|unconfirmed}` and
   raises on an HTTP error from those endpoints. The chat says «أكّد X» only for `confirmed`. Endpoint
   names come from the web client (rettiwt-api calls `…/i/api/1.1/account/update_profile_banner.json`)
-  and are not yet observed live here — if they differ, the result degrades to «unconfirmed», never
-  to a false failure.
-- Test: `.\venv\Scripts\python.exe verify_identity.py` (offline, temp dirs, fake page/clock).
+  and were **observed live** on 2026-10-22 (op 1137 on @nxjrjrjdj: `media: {avatar: confirmed,
+  banner: confirmed}`); the images on the profile page then matched the pinned approved files at
+  perceptual-hash distance 1/256 (unrelated images ≈115). If X renames them, the result degrades to
+  «unconfirmed», never to a false failure.
+- The employee card mirrors the account as X shows it (`x_profile.json` in the same folder, exposed as
+  `agent.x_profile` by `_agent_view`): banner, avatar overlapping it, name, @handle, bio, last sync.
+  Sources: (1) every metrics read — `read_my_posts` already opens `x.com/<handle>`, so it fills
+  `header_out` at no extra navigation and `ReadOwnMetricsCapability` saves it; (2) the card's
+  «تحديث من X» → `POST /employees/{id}/x-profile/refresh` (`read_account_profile`, `_browser_slot(25)`
+  fail-fast); (3) right after an approved apply (the frontend polls `GET …/x-profile` until
+  `fetched_at` changes). After the apply, a changed avatar/banner URL on the profile page is a second,
+  independent confirmation; an unchanged URL is reported as a warning, never as ✓.
+- Header extraction (`_HEADER_JS`): name/bio by the proven `UserName`/`UserDescription` testids, avatar
+  via the `/<handle>/photo` link (fallback `UserAvatar-Container-<handle>`; tweets link
+  `/status/<id>/photo/1`, so other users' avatars never match), banner via `/<handle>/header_photo`
+  (only the account's banner uses `profile_banners` on its own page). Text is built from child nodes
+  with `img[alt]`: X draws emoji as images, and `innerText` dropped the 🇸🇦 from «صقر الجزيرة 🇸🇦»
+  (measured live). `account_header` keeps only `pbs.twimg.com`/`abs.twimg.com` URLs and upsizes them
+  (`_400x400`, `/1500x500`). A read with neither name nor avatar never overwrites a good snapshot.
+- Test: `.\venv\Scripts\python.exe verify_identity.py` (offline, temp dirs, fake page/clock, plus
+  `_HEADER_JS` executed in a real headless Chrome on an X-shaped page with all network aborted).
 
 ## Captcha is solved by a provider — never by a human, never silently
 - One solver: `app/core/captcha_solver.py` (stdlib only) for four providers

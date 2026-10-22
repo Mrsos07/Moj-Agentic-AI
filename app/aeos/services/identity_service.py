@@ -340,6 +340,7 @@ def _apply(cfg, record: Dict[str, Any]) -> Optional[str]:
         return None
     identity_store.start_attempt(record)
     name, bio, media = record["name"], record["bio"], record["media"]
+    before = identity_store.load_x_profile(cfg.id)
 
     # البايتات المثبّتة نفسها تُرفع كملفات (Playwright بكوكيز الحساب عبر app/x)
     label = cfg.cookie_label or cfg.account_username
@@ -359,19 +360,63 @@ def _apply(cfg, record: Dict[str, Any]) -> Optional[str]:
     # مزامنة البرسونا: الاسم والبايو المعروضان في X هما الآن هوية الموظف
     _sync_persona(cfg, name, bio)
 
+    # بطاقة الموظف تعكس الحساب كما يظهر الآن على X — وتغيّر رابط الصورة في صفحة
+    # الحساب تأكيد مستقل أن الصورة الجديدة هي المعروضة فعلاً
+    after = None
+    try:
+        after = refresh_x_profile(cfg)
+    except Exception:  # noqa: BLE001
+        logger.info("x profile refresh after identity apply failed for %s",
+                    cfg.account_username, exc_info=True)
+
     lines = [f"✅ **طبّقت الهوية التي اعتمدتها على @{cfg.account_username} في X:**", ""]
     if name:
         lines.append(f"👤 **الاسم:** {name}")
     if bio:
         lines.append(f"📝 **البايو:** {bio}")
     for kind, icon, label_ar in (("avatar", "🖼️", "الصورة الشخصية"), ("banner", "🎨", "الهيدر")):
-        if kind in media:
-            lines.append(f"{icon} **{label_ar}:** " + (
-                "نفس الصورة التي اعتمدتها ✓ (أكّد X حفظها)" if confirmed.get(kind) == "confirmed"
-                else "رُفعت نفس الصورة التي اعتمدتها — لم يصلني تأكيد صريح من X، ألقِ نظرة على الحساب"))
+        if kind not in media:
+            continue
+        old, new = (before or {}).get(f"{kind}_url"), (after or {}).get(f"{kind}_url")
+        if confirmed.get(kind) == "confirmed":
+            state = "نفس الصورة التي اعتمدتها ✓ (أكّد X حفظها)"
+        elif old and new and new != old:
+            state = "نفس الصورة التي اعتمدتها ✓ (ظهرت في صفحة حسابك على X)"
+        elif old and new == old:
+            state = ("⚠️ رُفعت لكن صفحة الحساب ما زالت تعرض السابقة — حدّث البطاقة بعد دقيقة، "
+                     "وإن بقيت فأعد التطبيق")
+        else:
+            state = "رُفعت نفس الصورة التي اعتمدتها — لم يصلني تأكيد صريح من X، ألقِ نظرة على الحساب"
+        lines.append(f"{icon} **{label_ar}:** {state}")
     lines.append("")
     lines.append("🎭 وحدّثت برسونا الموظف (الاسم/البايو) لتطابق هويته الجديدة.")
+    if after:
+        lines.append("🪪 وبطاقة الموظف تعرض الآن هويته كما تظهر على X (الصورة والهيدر).")
     return "\n".join(lines)
+
+
+def refresh_x_profile(cfg, lock_timeout: float = 0.0) -> Dict[str, Any]:
+    """يقرأ هوية الحساب الحالية من X (اسم/نبذة/صورة/هيدر) ويحفظها لبطاقة الموظف.
+
+    ``lock_timeout`` > 0 لطلب المالك التفاعلي (يفشل سريعاً إن كان المتصفح مشغولاً)."""
+    from app.aeos.mcp.base import MCPRequest
+
+    from . import identity_store
+    from . import tools_service as TS
+
+    res = TS.registry().call(MCPRequest(
+        employee_id=cfg.id, tool="read_account_profile",
+        params={"cookie_label": cfg.cookie_label, "handle": cfg.account_username,
+                "lock_timeout": lock_timeout},
+        context={"server": "playwright_x", "cookie_label": cfg.cookie_label}))
+    if not res.success:
+        raise RuntimeError(str(res.error or "تعذّرت قراءة هوية الحساب من X")
+                           .replace("read_account_profile failed: ", ""))
+    snap = identity_store.save_x_profile(cfg.id, cfg.account_username,
+                                         (res.data or {}).get("profile") or {}, "live")
+    if not snap:
+        raise RuntimeError("لم أجد اسم الحساب ولا صورته في صفحته على X.")
+    return snap
 
 
 def _sync_persona(cfg, name: str, bio: str) -> None:

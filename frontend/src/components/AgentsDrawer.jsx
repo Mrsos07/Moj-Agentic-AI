@@ -112,6 +112,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
   const [identBusy, setIdentBusy] = useState({})     // label -> 'preview' | 'apply' | 'field:<field>'
   const [identPreview, setIdentPreview] = useState({}) // label -> {name, bio, avatar_url, banner_url}
   const [identEdit, setIdentEdit] = useState({})       // label -> {field, prompt} (تعديل عنصر منفرد)
+  const [xpBusy, setXpBusy] = useState({})             // label -> bool (قراءة هوية الحساب من X)
   const [skillPrompt, setSkillPrompt] = useState({})   // label -> نص برومبت المهارة
   const [skillDraft, setSkillDraft] = useState({})     // label -> {skill, summary} (معاينة قبل التفعيل)
   const [skillBusy, setSkillBusy] = useState({})       // label -> 'gen' | 'save' | 'id:<skill>'
@@ -668,11 +669,47 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 15000 })
       onNotify?.(res.data?.message || `🪩 جارِ تطبيق الهوية على @${label}… ستصلك النتيجة في الشات.`)
       setIdentPreview(prev => ({ ...prev, [label]: null }))
+      watchXProfile(label, empId, row?.agent?.x_profile?.fetched_at || null)
     } catch (e) {
       onNotify?.(`❌ تعذّر تطبيق الهوية على @${label}: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
     } finally {
       setIdentBusy(prev => ({ ...prev, [label]: null }))
     }
+  }
+
+  // ── هوية الحساب كما تظهر على X (اسم/نبذة/صورة/هيدر) معروضة في البطاقة ──
+  const refreshXProfile = async (label) => {
+    const empId = rowsRef.current.find(r => r.label === label)?.agent?.employee_id
+    if (!empId) return
+    setXpBusy(prev => ({ ...prev, [label]: true }))
+    try {
+      const token = localStorage.getItem('token')
+      // قراءة حيّة بالمتصفح (~15-30ث)، والخادم يفشل سريعاً إن كان المتصفح محجوزاً بدورة
+      const res = await axios.post(`/api/aeos/employees/${empId}/x-profile/refresh`, {},
+        { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 120000 })
+      if (res.data?.x_profile) updateField(label, 'x_profile', res.data.x_profile)
+    } catch (e) {
+      onNotify?.(`❌ تعذّر جلب هوية @${label} من X: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
+    } finally {
+      setXpBusy(prev => ({ ...prev, [label]: false }))
+    }
+  }
+
+  // بعد اعتماد هوية: الخادم يقرأ الحساب من X عند اكتمال التطبيق — نلتقط اللقطة الجديدة
+  const watchXProfile = (label, empId, since) => {
+    let tries = 0
+    const tick = async () => {
+      if (++tries > 16 || rowsRef.current.find(r => r.label === label)?.agent?.employee_id !== empId) return
+      try {
+        const token = localStorage.getItem('token')
+        const res = await axios.get(`/api/aeos/employees/${empId}/x-profile`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 8000 })
+        const xp = res.data?.x_profile
+        if (xp && xp.fetched_at !== since) { updateField(label, 'x_profile', xp); return }
+      } catch { /* نعيد المحاولة في الدورة التالية */ }
+      setTimeout(tick, 15000)
+    }
+    setTimeout(tick, 15000)
   }
 
   // ── تعديل عنصر واحد من الهوية (صورة/هيدر/اسم/بايو) ببرومبت اختياري ──
@@ -1034,15 +1071,36 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
               const draft = skillDraft[skillKey]?.employee_id === employeeId ? skillDraft[skillKey] : null
               const skillsDisabled = !employeeId || !!skillBusy[skillKey] || !!savingP[label] || !!delBusy[label] || !!busy[label]
               const skillInputId = `employee-skill-${encodeURIComponent(label)}-${encodeURIComponent(employeeId || 'none')}`
+              const xp = agent?.x_profile || null  // هوية الحساب كما قُرئت من X
               return (
                 <div key={label} className="rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark p-4">
+                  {/* هوية الحساب كما تظهر على X: الهيدر والصورة الحقيقيان */}
+                  {xp && (
+                    <div className="-mx-4 -mt-4 mb-8 relative">
+                      <div className="h-20 rounded-t-xl overflow-hidden bg-gradient-to-l from-primary/40 to-primary/10">
+                        {xp.banner_url && <img src={xp.banner_url} alt="header" className="w-full h-full object-cover" />}
+                      </div>
+                      <div className="absolute -bottom-7 right-4 size-14 rounded-full border-4 border-card-light dark:border-card-dark bg-primary/10 overflow-hidden flex items-center justify-center">
+                        {xp.avatar_url
+                          ? <img src={xp.avatar_url} alt="avatar" className="w-full h-full object-cover" />
+                          : <MdPerson className="text-primary" size={24} />}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3 min-w-0">
-                      <div className="size-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                        <MdPerson className="text-primary" size={20} />
-                      </div>
+                      {!xp && (
+                        <div className="size-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                          <MdPerson className="text-primary" size={20} />
+                        </div>
+                      )}
                       <div className="min-w-0">
-                        <p className="text-sm font-bold text-text-primary-light dark:text-text-primary-dark truncate">@{label}</p>
+                        {xp?.name && (
+                          <p className="text-sm font-bold text-text-primary-light dark:text-text-primary-dark truncate">{xp.name}</p>
+                        )}
+                        <p className={xp?.name
+                          ? 'text-[11px] text-text-secondary-light dark:text-text-secondary-dark truncate'
+                          : 'text-sm font-bold text-text-primary-light dark:text-text-primary-dark truncate'}>@{label}</p>
                         <p className={`text-xs ${enabled ? (within ? 'text-green-600 dark:text-green-400' : 'text-amber-500') : 'text-text-secondary-light dark:text-text-secondary-dark'}`}>
                           {enabled ? (within ? 'نشط ويعمل' : 'نشط (خارج ساعات العمل)') : 'متوقف'}
                         </p>
@@ -1059,6 +1117,30 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                       <div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 rounded-full peer peer-checked:bg-primary after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5 rtl:peer-checked:after:-translate-x-5" />
                     </label>
                   </div>
+
+                  {xp?.bio && (
+                    <p className="mt-2 text-xs text-text-primary-light dark:text-text-primary-dark leading-relaxed line-clamp-3 whitespace-pre-line">
+                      {xp.bio}
+                    </p>
+                  )}
+                  {employeeId && (
+                    <div className="flex items-center justify-between gap-2 mt-1.5 text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
+                      <span className="truncate">
+                        {xp ? `الهوية كما على X · آخر مزامنة ${fmtTime(xp.fetched_at)}` : 'لم تُقرأ هوية الحساب من X بعد'}
+                      </span>
+                      <button
+                        onClick={() => refreshXProfile(label)}
+                        disabled={!!xpBusy[label]}
+                        title="اقرأ الاسم والنبذة والصورة والهيدر من حساب X الآن واعرضها في البطاقة"
+                        className="flex items-center gap-1 shrink-0 hover:text-primary disabled:opacity-50"
+                      >
+                        {xpBusy[label]
+                          ? <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                          : <MdRefresh size={13} />}
+                        {xp ? 'تحديث من X' : 'اعرض هويته من X'}
+                      </button>
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-3 gap-2 mt-3">
                     <div>

@@ -24,10 +24,13 @@ Tools:
     - read_user_profile(handle, limit=30): a target user's bio + original
       tweets + replies — the raw sample used by the persona-cloning system to
       imitate that account's style, topics and discussion manner.
+    - read_account_profile(handle): the account's own identity as X shows it
+      now (name, bio, avatar, header) — mirrored on the employee card.
 """
 from __future__ import annotations
 
 import logging
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -77,6 +80,80 @@ def _new_context(browser, storage_state_path: str, *, viewport=None,
 
     kwargs = {"viewport": viewport} if viewport else {}
     return new_context(browser, storage_state_path, page_url=page_url, **kwargs)
+
+
+# رأس صفحة الحساب: الاسم والنبذة بمحدّدات read_user_profile المتحقَّق منها حيّاً، والصورة
+# عبر رابط /<handle>/photo، والغلاف عبر /<handle>/header_photo (ولا يظهر profile_banners
+# في صفحة الحساب إلا لغلافه هو). X يرسم الإيموجي <img alt> فيُسقطها innerText — قيس حيّاً:
+# «صقر الجزيرة 🇸🇦» قُرئ بلا العلم — لذا يُبنى النص من العُقد مع alt الصور.
+_HEADER_JS = r"""
+(handle) => {
+  const h = (handle || '').toLowerCase();
+  const textOf = el => {
+    let out = '';
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3) out += n.textContent;
+      else if (n.nodeName === 'IMG') out += n.getAttribute('alt') || '';
+      else if (n.nodeName === 'BR') out += '\n';
+      else if (n.nodeType === 1) out += textOf(n);
+    }
+    return out;
+  };
+  const block = document.querySelector('div[data-testid="UserName"]');
+  const first = block ? block.querySelector('span') : null;
+  let name = first ? textOf(first).trim() : '';
+  if (!name && block) {
+    name = (block.innerText || '').split('\n').map(s => s.trim()).find(s => s && !s.startsWith('@')) || '';
+  }
+  const bioEl = document.querySelector('div[data-testid="UserDescription"]');
+  const linkImg = (suffix, pat) => {
+    for (const a of document.querySelectorAll('a[href]')) {
+      if ((a.getAttribute('href') || '').toLowerCase() === `/${h}/${suffix}`) {
+        const img = a.querySelector(`img[src*="${pat}"]`);
+        if (img && img.src) return img.src;
+      }
+    }
+    return '';
+  };
+  let avatar = linkImg('photo', 'profile_images');
+  if (!avatar) {
+    const c = document.querySelector(`div[data-testid="UserAvatar-Container-${handle}"] img[src*="profile_images"]`);
+    avatar = c ? c.src : '';
+  }
+  let banner = linkImg('header_photo', 'profile_banners');
+  if (!banner) {
+    const b = document.querySelector('img[src*="profile_banners"]');
+    banner = b ? b.src : '';
+  }
+  return { name, bio: bioEl ? textOf(bioEl).trim() : '', avatar_url: avatar, banner_url: banner };
+}
+"""
+_X_CDN = ("https://pbs.twimg.com/", "https://abs.twimg.com/")
+
+
+def account_header(raw: Dict[str, Any]) -> Dict[str, str]:
+    """رأس الحساب منظّفاً: روابط صور X فقط، بأعلى دقة يعرضها (400x400 للصورة و1500x500 للغلاف)."""
+    def cdn(url: Any) -> str:
+        url = str(url or "").strip()
+        return url if url.startswith(_X_CDN) else ""
+
+    return {
+        "name": str(raw.get("name") or "").strip()[:60],
+        "bio": str(raw.get("bio") or "").strip()[:300],
+        "avatar_url": re.sub(r"_(normal|bigger|mini|x96|\d+x\d+)(\.\w+)$", r"_400x400\2",
+                             cdn(raw.get("avatar_url"))),
+        "banner_url": re.sub(r"/\d+x\d+$", "/1500x500", cdn(raw.get("banner_url"))),
+    }
+
+
+def _profile_header(page, handle: str, wait_ms: int = 15_000) -> Dict[str, str]:
+    """اقرأ رأس صفحة الحساب المفتوحة: ينتظر الاسم ثم يمهل الصورة لحظة ليُعرف رابطها."""
+    page.locator('div[data-testid="UserName"]').first.wait_for(state="visible", timeout=wait_ms)
+    try:
+        page.locator('img[src*="profile_images"]').first.wait_for(state="attached", timeout=5_000)
+    except Exception:  # noqa: BLE001
+        pass
+    return account_header(page.evaluate(_HEADER_JS, handle) or {})
 
 
 # دالة JS لاستخراج بطاقة تغريدة واحدة — مشتركة بين قارئ التايم لاين وقارئ الخلايا
@@ -353,7 +430,8 @@ class PlaywrightXMCP(IMCPServer):
     name = "playwright_x"
 
     _TOOLS = ["read_timeline", "read_trends", "search_tweets", "read_top_posts",
-              "read_notifications", "read_user_profile", "read_my_posts"]
+              "read_notifications", "read_user_profile", "read_my_posts",
+              "read_account_profile"]
 
     #: Mentions tab — the replies/mentions directed at THIS account
     _MENTIONS_URL = "https://x.com/notifications/mentions"
@@ -420,11 +498,22 @@ class PlaywrightXMCP(IMCPServer):
                 handle = (p.get("handle") or label or "").strip().lstrip("@")
                 if not handle:
                     return MCPResponse.fail("handle is required for read_my_posts")
+                header: Dict[str, str] = {}
                 posts = self._read_my_posts(
-                    str(cookie_file), handle, limit=limit, headless=headless,
+                    str(cookie_file), handle, limit=limit, headless=headless, header_out=header,
                 )
                 return MCPResponse.ok(posts=posts, count=len(posts), account=label,
-                                      handle=f"@{handle}")
+                                      handle=f"@{handle}", profile=header)
+
+            if tool == "read_account_profile":
+                handle = (p.get("handle") or label or "").strip().lstrip("@")
+                if not handle:
+                    return MCPResponse.fail("handle is required for read_account_profile")
+                profile = self._read_account_profile(
+                    str(cookie_file), handle, headless=headless,
+                    lock_timeout=float(p.get("lock_timeout") or 0),
+                )
+                return MCPResponse.ok(account=label, handle=f"@{handle}", profile=profile)
 
             if tool == "read_user_profile":
                 handle = (p.get("handle") or "").strip().lstrip("@")
@@ -566,13 +655,17 @@ class PlaywrightXMCP(IMCPServer):
         return list(seen.values())[:limit]
 
     def _read_my_posts(self, storage_state_path: str, handle: str,
-                       limit: int, headless: bool) -> List[Dict[str, Any]]:
+                       limit: int, headless: bool,
+                       header_out: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """اقرأ منشورات الحساب نفسه مع مؤشرات أدائها الفعلية.
 
         هذه هي حلقة التغذية الراجعة التي كانت مفقودة تماماً: بدونها لا يعرف
         الموظف أيّ منشور نجح فعلاً. نقرأ صفحته الشخصية ونستخرج لكل منشور
         (ردود/إعادات نشر/إعجابات/مشاهدات) + وقت النشر، ثم يحسب المستوى الأعلى
         معدّل التفاعل ويتعلّم منه.
+
+        ``header_out``: يُملأ برأس الصفحة نفسها (اسم/نبذة/صورة/هيدر) بلا تنقّل إضافي —
+        فتبقى بطاقة الموظف مطابقة لهويته على X مع كل قراءة أداء. فشله لا يمس القراءة.
         """
         from playwright.sync_api import sync_playwright
 
@@ -592,6 +685,11 @@ class PlaywrightXMCP(IMCPServer):
             try:
                 page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
                 _guard_captcha(page)
+                if header_out is not None:
+                    try:
+                        header_out.update(_profile_header(page, handle))
+                    except Exception:  # noqa: BLE001
+                        logger.info("profile header not read for @%s", handle)
                 try:
                     page.locator('article[data-testid="tweet"]').first.wait_for(
                         state="visible", timeout=25_000
@@ -632,6 +730,32 @@ class PlaywrightXMCP(IMCPServer):
                 browser.close()
 
         return list(seen.values())[:limit]
+
+    def _read_account_profile(self, storage_state_path: str, handle: str, headless: bool,
+                              lock_timeout: float = 0.0) -> Dict[str, str]:
+        """هوية الحساب كما تظهر على X الآن (اسم/نبذة/صورة/هيدر) — لبطاقة الموظف.
+
+        ``lock_timeout`` > 0 لطلب تفاعلي من المالك: يفشل سريعاً برسالة واضحة إن كان
+        المتصفح محجوزاً بدورة، بدل انتظار مفتوح حتى تنتهي مهلة الطلب."""
+        from playwright.sync_api import sync_playwright
+
+        from app.services.x_bridge import browser_lock
+        from app.x.modules.x_actions import _launch_browser
+
+        slot = _browser_slot(lock_timeout) if lock_timeout > 0 else browser_lock
+        with slot, sync_playwright() as pw:
+            browser = _launch_browser(pw, headless=headless)
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+            page.set_default_timeout(30_000)
+            try:
+                page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                _guard_captcha(page)
+                return _profile_header(page, handle, wait_ms=20_000)
+            finally:
+                context.close()
+                browser.close()
 
     def _read_user_profile(self, storage_state_path: str, handle: str,
                            limit: int, headless: bool,

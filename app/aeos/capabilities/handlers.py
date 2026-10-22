@@ -1899,6 +1899,14 @@ class ReadOwnMetricsCapability(ICapability):
             return CapabilityResult.fail(res.error, self.name)
 
         posts = res.data.get("posts", []) or []
+        # رأس الصفحة نفسها (اسم/نبذة/صورة/هيدر) ← بطاقة الموظف تبقى مطابقة لهويته على X
+        if res.data.get("profile"):
+            try:
+                from ..services import identity_store
+
+                identity_store.save_x_profile(context.config.id, handle, res.data["profile"], "metrics")
+            except Exception:  # noqa: BLE001
+                logger.debug("x profile snapshot from metrics skipped", exc_info=True)
         stats = strategy.update_metrics(context.config, posts)
         report = strategy.performance_report(context.config)
         context.scratch["own_posts"] = posts

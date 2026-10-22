@@ -424,6 +424,7 @@ class AEOSPlatform:
 
     def _agent_view(self, cfg) -> Dict[str, Any]:
         from .scheduler.timewindow import is_within_active_hours
+        from .services import identity_store
 
         return {
             "employee_id": cfg.id,
@@ -445,6 +446,8 @@ class AEOSPlatform:
             "installed_skills": list(cfg.installed_skills or []),
             "mcp_servers": list(cfg.mcp_servers or []),
             "business_rules": dict(cfg.business_rules or {}),
+            # هوية الحساب كما قُرئت من X (اسم/نبذة/صورة/هيدر) — تعرضها بطاقة الموظف
+            "x_profile": identity_store.load_x_profile(cfg.id),
         }
 
     def get_agent_by_account(self, platform: str, account_username: str) -> Optional[Dict[str, Any]]:

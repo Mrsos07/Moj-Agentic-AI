@@ -13,6 +13,8 @@
   الإنشاء التلقائي من الكتابة فوق ما اعتمده المالك.
 - ``preview.json``: آخر هوية عُرضت في الشات، فيطبّق «طبّق الهوية» ما رآه المالك لا
   هوية جديدة تُولَّد لحظة التطبيق.
+- ``x_profile.json``: هوية الحساب كما قُرئت من X فعلاً (اسم/نبذة/صورة/هيدر) — تعرضها
+  بطاقة الموظف. تتحدّث مع كل قراءة أداء، وبعد كل تطبيق معتمد، وبزر التحديث في البطاقة.
 """
 from __future__ import annotations
 
@@ -222,6 +224,26 @@ def recent_preview(employee_id: str, user_id: Optional[int],
 def forget_preview(employee_id: str) -> None:
     with _LOCK:
         _remove(employee_id, "preview.json")
+
+
+# ─────────────────────────── هوية الحساب كما على X ───────────────────────────
+def save_x_profile(employee_id: str, handle: str, header: Dict[str, Any],
+                   source: str) -> Optional[Dict[str, Any]]:
+    """يحفظ رأس الحساب كما قُرئ من X. قراءة بلا اسم ولا صورة لا تمحو لقطة سابقة صالحة."""
+    if not (header and (header.get("name") or header.get("avatar_url"))):
+        return None
+    snap = {k: str(header.get(k) or "") for k in ("name", "bio", "avatar_url", "banner_url")}
+    snap.update(handle=str(handle or "").lstrip("@"), fetched_at=_now().isoformat(), source=source)
+    with _LOCK:
+        _write(employee_id, "x_profile.json", snap)
+    return snap
+
+
+def load_x_profile(employee_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        return _read(employee_id, "x_profile.json")
+    except IdentityError:
+        return None
 
 
 def purge(employee_id: str) -> None:
