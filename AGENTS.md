@@ -385,6 +385,32 @@ defences it forced are still in the code and still required if you set
   UI helper `frontend/src/hooks/clonePersona.js`) — a deep clone takes 3-5 min.
   Test: `verify_voice.py` (82 checks).
 
+## Voice fingerprint comes from the NAWAH clone server (since 2026-10-25)
+- Persona cloning still scrapes X with the employee's cookies (`persona_clone.scrape_profile`) and still
+  measures the Arabic reply side itself (reply kinds, reply policy, exemplars, era phrases). What changed is
+  the **LLM style analysis**: `voice_profile.analyze(profile, llm, nawah=…)` asks the NAWAH clone server
+  first (`create_clone` → fingerprint: dialect, register, one_line, style_guide, signature_phrases,
+  never_uses, notes) and `services/nawah_clone.to_analysis()` maps it into the `analysis` shape that
+  `voice_block`/`persona_from_voice` already consume. NAWAH does not produce pillars/values/red_lines —
+  those stay EMPTY on purpose (never invent identity); interests come from the measured topic distribution.
+- The old `_ANALYSIS_SCHEMA` LLM pass is now only an *announced* fallback: on any NAWAH failure the
+  reason lands in `voice_profile.nawah_error` (shown in the card and the chat message), never silently.
+- The server is a fork of `nawah-mcp-servers` under `system/mcps/nawah_clone/` (stdio, `node
+  dist/clone-server.mjs`, registered as `ext_nawah_clone` with `scope` coordinator/employees = false:
+  internal only). Its Gemini SDK layer was replaced by `src/core/llm.ts` — plain OpenAI-compatible
+  chat completions (json_schema → json_object fallback, tool calling, retries) — and Google Search
+  grounding by Tavily. **Edit `src/`, then `npm run build:clone`**: the app runs `dist/`, which is the
+  one `dist/` folder NOT gitignored. Image/video helpers were dropped (unused by the servers).
+- The key/base_url/model are NOT stored for it: `external_mcp.register_env_provider("nawah_clone",
+  nawah_clone.runtime_env)` injects `NAWAH_LLM_*` from `resolve_llm()` (system endpoint, like embeddings)
+  at connect time, blanks `GEMINI_API_KEY`, and the client reconnects if that env changes. Model:
+  `NAWAH_MODEL` (default `google/gemini-3.7-flash`, provider-qualified; an unqualified name is a 404 that
+  the server reports in Arabic). Clone files: `data/nawah/clones/<label>__<handle>.json`, one per
+  (employee account, cloned account) — private, no shared library; `business_rules.voice_profile`
+  remains the source of truth. `fidelity_test` adds `nawah_score` (deterministic `score` tool).
+- The original drop `MCP Servers nawah/` is gitignored (real accounts' posts + 5 MB bundles).
+- Verify: `.\venv\Scripts\python.exe verify_nawah.py` (offline) / `--live` (one real clone, ~10 s).
+
 ## Per-employee custom skills: a SPEC, never generated code
 - `app/aeos/skills/custom.py` + `CustomSkillRunner` (registered in
   `default_skills()`, `always_on = True`). The owner writes a free-text prompt in

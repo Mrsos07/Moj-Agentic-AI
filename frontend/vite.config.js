@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// منفذ الباك إند: BACKEND_PORT=8010 عند تشغيل نسخة على منفذ آخر (8000 افتراضياً)
+const BACKEND_PORT = process.env.BACKEND_PORT || '8000'
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -12,7 +15,7 @@ export default defineConfig({
       '/ws': {
         // 127.0.0.1 صراحةً: الباك إند يستمع على IPv4 فقط، وNode يحوّل localhost إلى ::1
         // (IPv6) أولاً مما يسبّب ECONNREFUSED في بروكسي الـ ws
-        target: 'ws://127.0.0.1:8000',
+        target: `ws://127.0.0.1:${BACKEND_PORT}`,
         ws: true,
         // أثناء إعادة تشغيل الباك إند يرفض المنفذ 8000 الاتصال مؤقتاً —
         // اطبع سطراً هادئاً بدل Stack trace، والمتصفح يعيد الاتصال تلقائياً
@@ -22,7 +25,7 @@ export default defineConfig({
             // أو تحديث الصفحة: كل السوكتات تُصفَّر دفعةً واحدة. طبعُه كـstack
             // trace كان يُغرق الطرفية ويُخفي الأخطاء الحقيقية.
             if (err?.code === 'ECONNREFUSED' || err?.errors) {
-              console.log('[vite] backend (8000) غير متاح مؤقتاً — سيُعاد الاتصال تلقائياً')
+              console.log(`[vite] backend (${BACKEND_PORT}) غير متاح مؤقتاً — سيُعاد الاتصال تلقائياً`)
             } else if (err?.code === 'ECONNRESET' || err?.code === 'EPIPE') {
               console.log('[vite] انقطع السوكت (إعادة تشغيل الباك إند أو تحديث الصفحة) — إعادة وصل تلقائية')
             } else {
@@ -32,7 +35,7 @@ export default defineConfig({
         },
       },
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: `http://127.0.0.1:${BACKEND_PORT}`,
         changeOrigin: true,
       },
     },

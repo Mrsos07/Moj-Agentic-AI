@@ -28,6 +28,7 @@ const VoiceProfileView = ({ profile, pending, fidelity }) => {
           🎙️ بصمة الصوت {profile.source_handle ? `(من ${profile.source_handle})` : ''}
           {pending && <span className="mr-1 text-amber-600"> — غير محفوظة بعد</span>}
           {fidelity?.score != null && <span className="mr-1"> · مطابقة {fidelity.score}%</span>}
+          {fidelity?.nawah_score != null && <span className="mr-1"> · نواه {fidelity.nawah_score}/100</span>}
         </span>
         <span>{open ? '▲' : '▼'}</span>
       </button>
@@ -39,6 +40,22 @@ const VoiceProfileView = ({ profile, pending, fidelity }) => {
       {open && (
         <div className="space-y-2 pt-1">
           {a.voice_summary && <p className="text-[11px] leading-relaxed text-text-primary-light dark:text-text-primary-dark">{a.voice_summary}</p>}
+          {profile.nawah_error && (
+            <div className="text-[10px] text-amber-600">⚠️ نواه لم تعمل فبُنيت البصمة بالمحلّل القديم: {profile.nawah_error}</div>
+          )}
+          {(a.style_guide?.length > 0 || profile.nawah) && (
+            <div className="rounded border border-purple-300/50 dark:border-purple-500/30 p-1.5 space-y-0.5">
+              <div className="text-[11px] font-semibold">
+                🧬 بصمة نواه{a.dialect_family ? ` · ${a.dialect_family}` : ''}{profile.nawah?.model ? ` · ${profile.nawah.model}` : ''}
+                {profile.nawah?.source_count ? ` · ${profile.nawah.source_count} نصاً` : ''}
+              </div>
+              {(a.style_guide || []).map((g, i) => (
+                <div key={i} className="text-[10px] leading-relaxed text-text-primary-light dark:text-text-primary-dark">- {g}</div>
+              ))}
+              {a.never_uses?.length > 0 && <Row k="لا يفعل أبداً">{a.never_uses.join('؛ ')}</Row>}
+              {a.style_notes && Object.values(a.style_notes).length > 0 && <Row k="ملاحظات">{Object.values(a.style_notes).join(' ')}</Row>}
+            </div>
+          )}
           {a.identity_core?.length > 0 && <Row k="ثوابت هويته">{a.identity_core.join('؛ ')}</Row>}
           {st.reply_kinds && Object.keys(st.reply_kinds).length > 0 && (
             <Row k="أنواع ردوده">

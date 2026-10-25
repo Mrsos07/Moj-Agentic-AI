@@ -91,7 +91,10 @@ class AEOSPlatform:
         register_builtins(mcp, {"llm": llm, "memory": memory})
         try:
             from .mcp.servers.external_mcp import register_all
+            from .services import nawah_clone as _nawah
 
+            # خادم نواه يأخذ مفتاح النموذج من resolve_llm() وقت الاتصال (قبل أول تسجيل)
+            _nawah.install()
             register_all(mcp)
         except Exception:  # noqa: BLE001
             logger.exception("external MCP servers failed to load")

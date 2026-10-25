@@ -188,21 +188,38 @@ def fidelity_test(profile: Dict[str, Any], voice: Dict[str, Any],
             temperature=0.8, max_tokens=200) or ""
         if text.strip():
             replies.append(text.strip().strip('"«»'))
-    return {**VP.fidelity(voice, posts, replies),
-            "samples": {"posts": posts, "reply": {"to": parent, "text": replies[0] if replies else ""}}}
+    out = {**VP.fidelity(voice, posts, replies),
+           "samples": {"posts": posts, "reply": {"to": parent, "text": replies[0] if replies else ""}}}
+    # درجة نواه الحتمية للمنشورات المولَّدة مقابل البصمة نفسها (إن بُنيت بنواه)
+    nawah_id = (voice.get("nawah") or {}).get("id")
+    if nawah_id and posts:
+        from . import nawah_clone as NC
+
+        scores = [s for s in (NC.score(nawah_id, p) for p in posts) if s is not None]
+        if scores:
+            out["nawah_score"] = round(sum(scores) / len(scores))
+    return out
 
 
 # ─────────────────────────── entry points ───────────────────────────
 def build_cloned_persona(profile: Dict[str, Any], llm: Any, language: str = "ar",
-                         test: bool = True) -> Dict[str, Any]:
+                         test: bool = True, cookie_label: str = "") -> Dict[str, Any]:
     if not (profile.get("tweets") or profile.get("replies")):
         raise RuntimeError(
             f"لم أجد أي تغريدات لحساب {profile.get('handle', '')} — تحقّق من صحة "
             "اليوزر، أو أن الحساب محمي/فارغ، أو أن كوكيز حسابك انتهت صلاحيتها.")
-    voice = VP.analyze(profile, llm)
+    # البصمة الأسلوبية من خادم نواه (المسار الأساسي)؛ المحلّل القديم احتياط معلَن فقط
+    from . import nawah_clone as NC
+
+    nawah = NC.builder(cookie_label) if cookie_label and NC.enabled() else None
+    voice = VP.analyze(profile, llm, nawah=nawah)
     persona = persona_from_voice(profile, voice, language)
-    result = {"source": "ai" if voice.get("analysis") else "heuristic",
+    result = {"source": voice.get("source") or ("ai" if voice.get("analysis") else "heuristic"),
               "persona": persona, "voice_profile": voice}
+    if voice.get("nawah_error"):
+        result["nawah_error"] = voice["nawah_error"]
+    elif nawah is None and cookie_label:
+        result["nawah_error"] = NC.status()["reason"]
     if test:
         try:
             result["fidelity"] = fidelity_test(profile, voice, persona, llm)
@@ -227,7 +244,8 @@ def clone_persona(cookie_label: str, handle: str, llm: Any, limit: int = DEEP["l
     step(f"سُحب {profile.get('tweet_count', 0)} تغريدة و{profile.get('reply_count', 0)} رداً "
          f"({cov.get('pairs', 0)} بسياقها) من {cov.get('from', '?')} إلى {cov.get('to', '?')} — "
          "جارِ تحليل الهوية وأنواع الردود…")
-    result = build_cloned_persona(profile, llm, language=language, test=test)
+    step("بناء بصمة الصوت عبر نواه ثم اختبار المطابقة…")
+    result = build_cloned_persona(profile, llm, language=language, test=test, cookie_label=cookie_label)
     sample = (result.get("voice_profile") or {}).get("sample", {})
     result["target"] = {
         "handle": profile.get("handle", f"@{handle}"),

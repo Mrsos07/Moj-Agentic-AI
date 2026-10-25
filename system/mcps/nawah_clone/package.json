@@ -1,0 +1,34 @@
+{
+  "name": "nawah-mcp-servers",
+  "version": "1.0.0",
+  "private": true,
+  "description": "نواه — خادما MCP: الاستنساخ من المنشورات، والتوجيه الإعلامي (النموذج عبر OpenRouter، البحث عبر Tavily)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --import tsx --test test/*.test.ts",
+    "check": "tsx scripts/check.ts",
+    "export": "tsx scripts/export-from-nawah.ts",
+    "clone-server": "tsx src/clone/server.ts",
+    "brief-server": "tsx src/brief/server.ts",
+    "zip": "node scripts/zip.mjs",
+    "build:clone": "node scripts/build.mjs clone"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "papaparse": "^5.5.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "^2.115.0",
+    "@types/node": "^22",
+    "@types/papaparse": "^5.3.16",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -701,6 +701,9 @@ class _Tools:
                        f"حُلّل منها {t.get('analyzed_replies', 0)} رداً موزّعة على {cov.get('days', '?')} يوماً."
                        + (f"\nالصوت: {a['voice_summary'][:300]}" if a.get("voice_summary") else "")
                        + (f"\nدرجة المطابقة في الاختبار: **{fid['score']}%**" if fid.get("score") is not None else "")
+                       + (f" · درجة نواه: **{fid['nawah_score']}/100**" if fid.get("nawah_score") is not None else "")
+                       + (f"\n⚠️ نواه لم تعمل فبُنيت البصمة بالمحلّل القديم: {res['nawah_error']}"
+                          if res.get("nawah_error") else "")
                        + "\nراجع «بصمة الصوت» في بطاقة الموظف، ويمكنك تعديلها في أي وقت.")
             except Exception as exc:  # noqa: BLE001
                 logger.exception("clone_identity failed")
