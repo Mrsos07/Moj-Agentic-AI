@@ -332,6 +332,16 @@ defences it forced are still in the code and still required if you set
 - `ECONNRESET` in the vite proxy is the normal signature of a backend restart or a
   page refresh (all sockets reset at once — you will see a burst with identical
   timestamps). It is logged as one quiet line so real errors stay visible.
+- **Never open a DB session with `next(get_db())` outside a FastAPI dependency.** The
+  generator is finalised immediately, so its `finally: db.close()` runs on an EMPTY session;
+  the first query then checks out a fresh connection that only returns to the pool when the
+  cyclic GC collects the Session (it sits in a reference cycle). Measured (2026-10-25): the
+  `/ws/chat` loop did this per message, every chat message pinned one connection, the pool
+  (5+10) filled while all threads were idle (py-spy), and the scheduler died with
+  `QueuePool limit of size 5 overflow 10 reached`. The loop now uses `SessionLocal()` with a
+  per-message `finally: db.close()`. `GET /api/aeos/health` exposes `db_pool`
+  (`checked_out` > 0 on an idle server = a leaked session). Verified live: 5 messages,
+  `checked_out` back to 0 after each.
 
 ## The browser lock is the usual cause of "انتهت المهلة"
 - `browser_lock` (in `app/services/x_bridge.py`) serialises ALL Playwright work.

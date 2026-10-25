@@ -129,7 +129,14 @@ class AgentToggleIn(BaseModel):
 # ─────────────────────────── endpoints ───────────────────────────
 @router.get("/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "platform": "AEOS", **get_platform().stats()}
+    from app.db.database import engine
+
+    # حالة مجمّع اتصالات SQLite: checked_out ثابت فوق الصفر والخادم خامل = جلسة لم تُغلق
+    # (هكذا شُخّص تسرّب جلسات شات الـWebSocket الذي أسقط المجدول بـ QueuePool limit reached)
+    pool = engine.pool
+    db_pool = {"size": pool.size(), "checked_out": pool.checkedout(),
+               "overflow": pool.overflow(), "checked_in": pool.checkedin()}
+    return {"ok": True, "platform": "AEOS", "db_pool": db_pool, **get_platform().stats()}
 
 
 @router.get("/employees")
