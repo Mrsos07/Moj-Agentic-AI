@@ -29,6 +29,7 @@ import logging
 import os
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _log = logging.getLogger("moj.stealth_browser")
@@ -49,17 +50,36 @@ _lock = threading.Lock()
 _warned: List[bool] = []
 
 
+def _driver_present(package: str) -> bool:
+    """ملف تشغيل المتصفح داخل الحزمة موجود؟ (Kaspersky حذفه مرة بعد تثبيت pip)."""
+    try:
+        spec = importlib.util.find_spec(package)
+    except (ImportError, ValueError):
+        return False
+    if spec is None or not spec.origin:
+        return False
+    driver = Path(spec.origin).parent / "driver"
+    return (driver / ("node.exe" if sys.platform == "win32" else "node")).exists()
+
+
 def engine() -> str:
-    """``patchright`` (الافتراضي متى كان مثبّتاً) أو ``playwright`` (``X_BROWSER_ENGINE``)."""
+    """``patchright`` (الافتراضي متى كان مثبّتاً وملف تشغيله موجوداً) أو ``playwright``."""
     if (os.getenv("X_BROWSER_ENGINE") or "").strip().lower() == "playwright":
         return "playwright"
-    if importlib.util.find_spec("patchright") is not None:
+    if _driver_present("patchright"):
         return "patchright"
-    if not _warned:
+    installed = importlib.util.find_spec("patchright") is not None
+    if installed and _driver_present("playwright") and not _warned:
+        _warned.append(True)
+        _log.warning("ملف تشغيل Patchright مفقود (مضاد فيروسات حذفه؟) — متصفح X يعمل بـPlaywright "
+                     "العادي وهو قابل للكشف. أعد التثبيت: pip install --force-reinstall "
+                     "--no-deps patchright، واستثنِ مجلد venv من الفحص.")
+        return "playwright"
+    if not installed and not _warned:
         _warned.append(True)
         _log.warning("patchright غير مثبّت — متصفح X يعمل بـPlaywright العادي وهو قابل للكشف. "
                      "ثبّته: pip install -r requirements.txt")
-    return "playwright"
+    return "patchright"
 
 
 def sync_playwright():
@@ -168,7 +188,12 @@ def launch(p, headless: bool = True, *, proxy: Optional[Dict[str, str]] = None):
             return _launch_consistent(p, channel, base, headless)
         except Exception as e:  # noqa: BLE001 - جرّب المتصفح التالي
             errors.append(f"{channel or 'chromium'}: {str(e).splitlines()[0][:200]}")
-    raise RuntimeError("تعذّر تشغيل المتصفح — " + " | ".join(errors))
+    hint = ""
+    if not _driver_present(engine()):
+        hint = (" — ملف تشغيل المحرّك مفقود: أعد التثبيت "
+                "(pip install --force-reinstall --no-deps patchright playwright) "
+                "واستثنِ مجلد venv من مضاد الفيروسات")
+    raise RuntimeError("تعذّر تشغيل المتصفح — " + " | ".join(errors) + hint)
 
 
 def context_options(browser, options: Dict[str, Any]) -> Dict[str, Any]:

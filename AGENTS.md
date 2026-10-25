@@ -557,6 +557,16 @@ defences it forced are still in the code and still required if you set
   `pip install --force-reinstall --no-deps <pkg>` fixed it. Never upgrade the venv under a running
   app (the live xsuite had 1.46 in memory and the 1.64 driver on disk) — upgrade right before the
   restart.
+- **Kaspersky Endpoint Security (installed on the owner's machine) removed the drivers once**
+  (2026-10-25): right after `pip install`, its log (`Kaspersky Endpoint Security`, event 4662,
+  behavior-detection bases) showed the pip command, and both `driver/node.exe` + `driver/package/
+  cli.js` (+ ~50 package files) vanished from the venv the app runs from — every X read then died
+  with `FileNotFoundError [WinError 2]` at `sync_playwright()`, while the same files in the OneDrive
+  venv survived (so it was not an install bug). Fix without a reinstall: copy `driver/` from a
+  healthy venv of the same version (robocopy /E); the files survived the next live runs. `engine()`
+  now also falls back to plain Playwright (with a warning) when the Patchright driver is missing,
+  and the launch error names the reinstall command. If it recurs, the owner must exclude the venv
+  (or `…\site-packages\patchright\driver`) from Kaspersky — do not try to disable the AV.
 - Test: `.\venv\Scripts\python.exe verify_stealth.py` (offline: static rules, engine, a probe page
   served by `route` + Worker/SharedWorker, captcha main-world injection, goto retry,
   context/presolve rules); `--live` adds deviceandbrowserinfo/sannysoft/CreepJS and x.com through
