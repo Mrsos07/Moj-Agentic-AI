@@ -421,6 +421,38 @@ defences it forced are still in the code and still required if you set
 - The original drop `MCP Servers nawah/` is gitignored (real accounts' posts + 5 MB bundles).
 - Verify: `.\venv\Scripts\python.exe verify_nawah.py` (offline) / `--live` (one real clone, ~10 s).
 
+## «مهمة للفريق» runs on the NAWAH brief server (since 2026-10-25)
+- Second server from the same package: `system/mcps/nawah_brief/` holds only `mcp.json` and a
+  3-line launcher that imports `../nawah_clone/dist/brief-server.mjs` (so it has its own card,
+  scope, settings and test button in the dashboard while sharing code and clone data). Registered
+  as `ext_nawah_brief`, internal scope, tools `brief` + `research`.
+- Flow (`services/nawah_brief.py`): `order_publish` → `NB.prepare(topic, user)` starts ONE
+  background `brief` call per (user, topic) for the whole team (cached 30 min, in-flight calls
+  share one `Event`, so N employees = one call); it returns at once with `status: building`.
+  `dispatch_directed` → `NB.attach` waits for it (≤7 min), injects `for_employee(brief, handle)`
+  into `payload["media_brief"]`, announces the directive to the owner once (`announce_once`) and
+  each employee's angle; on any NAWAH failure it says why and falls back to the old
+  `media_brief` (Tavily + editor LLM). The employee's own writer + quality gate still produce the
+  final post — NAWAH gives research, directive (message, facts, per-employee beliefs/stance/
+  angle/avoid) and a draft in that employee's voice, never the published text.
+- **Every employee gets a seat, cloned or not** (owner decision): `voice_for(cfg)` sends the stored
+  clone id when `voice_profile.nawah.id` exists on disk, otherwise an ad-hoc `persona` (role, bio,
+  interests, tone, dos/donts, voice-profile style guide, + its own published posts from the cycle
+  log and the performance ledger). Server side `src/core/adhoc.ts` turns that into a transient
+  clone: stats measured from ≥3 own posts, else neutral stats and **no score** (never score a text
+  against numbers that were not measured). `brief` also takes `drafts: false` for a directive-only
+  fast path. Pieces/directive are keyed by voice id (`<label>__<handle>` or `persona:<handle>`) and
+  `normalize()` maps them back to the employee handle — the clone's own `handle` is the cloned
+  TARGET, never use it as the employee.
+- Dashboard: both NAWAH cards expose `NAWAH_MODEL`, `NAWAH_FALLBACK_MODEL`, `NEWSDATA_API_KEY` as
+  env settings (`env_keys`); values live in `data/system_mcp_secrets.json`, win over `.env`, and a
+  save triggers rediscovery = restart with the new env. `external_mcp.runtime_env(cfg)` now passes
+  `cfg` to env providers, drops empty stored values (an empty value used to clobber the process
+  env), and `public_view.env_values` shows non-secret settings so the UI can prefill them (a key
+  whose name looks like a secret stays a password field).
+- Verify: `verify_nawah.py` sections 7-8 offline (voices, normalize, cache/in-flight, attach
+  fallback), section 9 `--live` (real brief with one measured persona and one bare persona).
+
 ## Per-employee custom skills: a SPEC, never generated code
 - `app/aeos/skills/custom.py` + `CustomSkillRunner` (registered in
   `default_skills()`, `always_on = True`). The owner writes a free-text prompt in

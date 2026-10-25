@@ -447,6 +447,23 @@ class _Tools:
                                "note": "النشر يجري في الخلفية؛ الرابط أو سبب الفشل يصل للشات."}
         if args.get("deep_research", True) is not False:
             from . import media_brief as MB
+            from . import nawah_brief as NB
+
+            if NB.enabled():
+                # نواه: بحث + توجيه لكل الفريق + مسودة بصوت كل موظف — نداء واحد للموضوع يجري في
+                # الخلفية (دقيقة إلى ثلاث)؛ dispatch_directed ينتظره قبل الدورة ويعلنه للمالك
+                payload["nawah_brief"] = True
+                ready = NB.peek(topic, self.user_id)
+                if ready and ready.get("ok"):
+                    out["media_brief"] = NB.owner_summary(ready)
+                    out["employee_angle"] = ((ready.get("voices") or {}).get(cfg.account_username) or {}).get("angle", "")
+                else:
+                    NB.prepare(topic, self.user_id)
+                    out["media_brief"] = {"engine": "nawah", "status": "building"}
+                    out["note"] += (" نواه تعدّ التوجيه الإعلامي الآن (بحث، ثم توجيه لكل الفريق، ثم مسودة "
+                                    "بصوت كل موظف) — ملخّصه يصل إلى الشات خلال دقيقة أو اثنتين قبل النشر.")
+                self._dispatch(cfg, payload, ["publish_content", "publish_thread"], f"نشر منشور عن «{snippet}»")
+                return out
 
             try:
                 brief = MB.build(topic, user_id=self.user_id, llm=getattr(_platform(), "llm", None))
