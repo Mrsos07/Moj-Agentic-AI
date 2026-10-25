@@ -107,6 +107,14 @@ check("أعلام الإطلاق آمنة", not ({"--disable-web-security", "--d
 with env(X_BROWSER_ENGINE="playwright"):
     check("الاحتياطي (Playwright العادي) يخفي webdriver بالعلَم",
           ST.engine() == "playwright" and "--disable-blink-features=AutomationControlled" in ST.launch_args())
+_orig_driver = ST._driver_present
+try:
+    ST._driver_present = lambda pkg: False if pkg == "patchright" else _orig_driver(pkg)
+    ST._warned.clear()
+    fell_back = ST.engine()
+finally:
+    ST._driver_present = _orig_driver
+check("ملف تشغيل Patchright مفقود ⇒ احتياطي Playwright (لا انهيار)", fell_back == "playwright", fell_back)
 ua155 = ST.user_agent_for("155.0.8059.85")
 check("UA مختزل من النسخة: Chrome/<major>.0.0.0", ua155.endswith("Chrome/155.0.0.0 Safari/537.36")
       and "Headless" not in ua155, ua155)
