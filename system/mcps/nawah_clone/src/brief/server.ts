@@ -7,6 +7,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { adhocClone } from "../core/adhoc";
 import { planDirective, voiceContext, type Directive } from "../core/directive";
 import { loadEnv, quietStdout, requireLLM } from "../core/env";
 import { researchTopic } from "../core/generate";
@@ -100,16 +101,31 @@ server.registerTool("brief", {
   inputSchema: {
     topic: z.string().min(2).describe("الموضوع أو الرسالة المطلوب إيصالها. ما بين علامتي تنصيص \"…\" أمر يُنفَّذ حرفيًا، مثل \"ابحث عن آخر إحصائية رسمية\""),
     voices: z.array(z.object({
-      clone: z.string().describe("الاسم أو المعرّف أو @handle"),
+      clone: z.string().optional().describe("استنساخ محفوظ: الاسم أو المعرّف أو @handle"),
+      persona: z.object({
+        name: z.string().min(1),
+        handle: z.string().optional(),
+        description: z.string().optional().describe("من هو وماذا يكتب وبأي نبرة (الدور، الاهتمامات، التعليمات)"),
+        dialect: z.string().optional(),
+        dialect_family: z.string().optional(),
+        register: z.string().optional(),
+        one_line: z.string().optional(),
+        style_guide: z.array(z.string()).optional().describe("قواعد أسلوبه (افعل)"),
+        never_uses: z.array(z.string()).optional().describe("ما لا يفعله (لا تفعل)"),
+        signature_phrases: z.array(z.string()).optional(),
+        samples: z.array(z.string()).optional().describe("منشوراته الحقيقية إن وُجدت؛ ثلاثة فأكثر تجعل عاداته مقيسة"),
+        category: z.string().optional(),
+      }).optional().describe("صوت مؤقت من شخصية حساب غير مستنسخ: يُقرأ في التوجيه ويُكتب بأسلوبه، ولا يُحفظ"),
       format: FormatSchema.optional().describe("إن تُرك: الصيغة الطبيعية للاستنساخ (منشور لحسابات إكس، مقال لكتّاب المقالات، سيناريو لصنّاع الفيديو)"),
       count: z.number().int().min(1).max(3).optional().describe("عدد المنشورات لهذا الصوت (للمنشورات فقط)"),
-    })).max(MAX_ITEMS).optional().describe("من يكتب. إن تُرك: كل الاستنساخات الموجودة"),
+    }).refine((v) => Boolean(v.clone || v.persona), { message: "clone أو persona مطلوب" })).max(MAX_ITEMS).optional().describe("من يكتب. إن تُرك: كل الاستنساخات الموجودة"),
+    drafts: z.boolean().default(true).describe("false: التوجيه والبحث فقط بلا كتابة القطع (أسرع بكثير)"),
     research: z.enum(["web", "news", "both", "none"]).default("web").describe("البحث قبل الكتابة؛ الافتراضي الويب"),
     length: LengthSchema.default("medium"),
     modes: ModesSchema.default([]),
     report: z.boolean().default(true).describe("إرفاق التقرير بصيغة Markdown"),
   },
-}, async ({ topic: rawTopic, voices, research, length, modes, report }, extra) => {
+}, async ({ topic: rawTopic, voices, drafts, research, length, modes, report }, extra) => {
   const parsed = parseCommands(rawTopic);
   const topic = parsed.topic;
   // A brief takes one to three minutes. Progress notifications let clients that honour them keep the call open.
@@ -122,11 +138,14 @@ server.registerTool("brief", {
   try {
     const missing = requireLLM(); if (missing) throw new Error(missing);
     const all = await listClones();
-    if (!all.length) throw new Error("لا استنساخات بعد. أنشئ واحدًا في خادم الاستنساخ أو صدّرها من نواه.");
+    if (!all.length && !voices?.some((v) => v.persona)) throw new Error("لا استنساخات بعد. أنشئ واحدًا في خادم الاستنساخ، أو مرّر persona لكل صوت.");
     const seen = new Set<string>();
     const items: { clone: StoredClone; format: PostFormat; count: number }[] = [];
-    for (const v of voices?.length ? voices : all.slice(0, MAX_ITEMS).map((c) => ({ clone: c.id, format: undefined, count: undefined }))) {
-      const c = await needClone(v.clone);
+    const wanted: { clone?: string; persona?: Parameters<typeof adhocClone>[0]; format?: PostFormat; count?: number }[] =
+      voices?.length ? voices : all.slice(0, MAX_ITEMS).map((c) => ({ clone: c.id }));
+    for (const v of wanted) {
+      // A stored clone by reference, or a transient voice from a persona (an account never cloned).
+      const c = v.persona && !v.clone ? adhocClone(v.persona) : await needClone(v.clone!);
       if (seen.has(c.id)) continue;
       seen.add(c.id);
       items.push({ clone: c, format: v.format ?? naturalFormat(c), count: v.count ?? 1 });
@@ -140,16 +159,26 @@ server.registerTool("brief", {
     await progress("نقرأ الحسابات ونبني التوجيه");
     // 2) The directive: message, facts, and what each profile believes, stands for and talks about.
     const directive = await planDirective({ topic, research: r, clones: items.map((i) => i.clone), commands: parsed.commands });
-    await progress(`${items.length} أصوات تكتب الآن`);
-    // 3) Every voice writes its piece from the directive, all at once.
-    const results = await Promise.allSettled(items.map((it) => {
-      const v = directive.voices.find((x) => x.clone === it.clone.id)!;
-      return produce(it.clone, { topic: v.angle ? `${topic} — الزاوية: ${v.angle}` : topic, format: it.format, count: it.count, length, modes, research: r, context: [voiceContext(directive, v, it.format), commandsContext(parsed.commands)].filter(Boolean).join("\n\n"), others: all });
-    }));
     const pieces: Piece[] = [];
     const failed: string[] = [];
-    results.forEach((res, i) => { if (res.status === "fulfilled") pieces.push(...res.value); else { failed.push(items[i].clone.handle ?? items[i].clone.name); console.error("brief item failed", items[i].clone.name, res.reason); } });
-    if (!pieces.length) throw (results[0] as PromiseRejectedResult).reason;
+    if (drafts) {
+      await progress(`${items.length} أصوات تكتب الآن`);
+      // 3) Every voice writes its piece from the directive, all at once.
+      const results = await Promise.allSettled(items.map((it) => {
+        const v = directive.voices.find((x) => x.clone === it.clone.id)!;
+        return produce(it.clone, { topic: v.angle ? `${topic} — الزاوية: ${v.angle}` : topic, format: it.format, count: it.count, length, modes, research: r, context: [voiceContext(directive, v, it.format), commandsContext(parsed.commands)].filter(Boolean).join("\n\n"), others: all });
+      }));
+      results.forEach((res, i) => {
+        const it = items[i];
+        if (res.status === "fulfilled") {
+          // A voice whose habits were never measured has nothing to be scored against.
+          pieces.push(...res.value.map((p) => (it.clone.adhoc && !it.clone.measured ? { ...p, score: null, score_breakdown: null } : p)));
+        } else { failed.push(it.clone.handle ?? it.clone.name); console.error("brief item failed", it.clone.name, res.reason); }
+      });
+      if (!pieces.length) throw (results[0] as PromiseRejectedResult).reason;
+    } else {
+      await progress("بلا مسودات (drafts=false)");
+    }
 
     await progress("نرتّب التقرير");
     const at = new Intl.DateTimeFormat("ar-SA-u-nu-arab-ca-gregory", { dateStyle: "long", timeStyle: "short", timeZone: "Asia/Riyadh" }).format(new Date());
@@ -161,12 +190,13 @@ server.registerTool("brief", {
       `════════ التوجيه ════════`,
       renderDirective(directive),
       ``,
-      `════════ القطع ════════`,
-      renderPieces(pieces, { topic }),
+      pieces.length ? `════════ القطع ════════` : "",
+      pieces.length ? renderPieces(pieces, { topic }) : "",
       sourcesNote(r, kinds.length > 0),
       report ? `\n════════ التقرير (Markdown) ════════\n\n${md}` : "",
     ].join("\n");
-    return ok(text, { topic, directive, pieces, failed, research: r ? { brief: r.brief, sources: r.sources } : null, markdown: md });
+    return ok(text, { topic, directive, pieces, failed, research: r ? { brief: r.brief, sources: r.sources } : null, markdown: md,
+      voices: items.map((it) => ({ clone: it.clone.id, name: it.clone.handle ?? it.clone.name, adhoc: Boolean(it.clone.adhoc), measured: it.clone.adhoc ? Boolean(it.clone.measured) : true })) });
   } catch (e) { return fail(e, "تعذّر تنفيذ التوجيه الآن."); }
 });
 

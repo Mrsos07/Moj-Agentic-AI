@@ -27,6 +27,10 @@ export type StoredClone = {
   approved: string[];
   /** Where it came from, when exported from the نواه app. */
   origin?: { app_profile_id: string; exported_at: string };
+  /** A transient voice built from a persona for one brief (core/adhoc.ts): never saved, never listed. */
+  adhoc?: boolean;
+  /** For an ad-hoc voice: whether its habits were measured from enough of its own posts to be scored. */
+  measured?: boolean;
 };
 
 const here = path.dirname(fileURLToPath(import.meta.url));

@@ -31,6 +31,12 @@ logger = logging.getLogger("aeos.services.nawah_clone")
 
 SLUG = "nawah_clone"
 NAME = "ext_" + SLUG
+#: خادم التوجيه الإعلامي من الحزمة نفسها (مجلده مُطلِق صغير يستورد dist/brief-server.mjs)
+BRIEF_SLUG = "nawah_brief"
+BRIEF_NAME = "ext_" + BRIEF_SLUG
+_BUNDLE = {SLUG: "clone-server.mjs", BRIEF_SLUG: "brief-server.mjs"}
+#: إعدادات يضبطها المطوّر من لوحة الخوادم (تُحفظ في data/system_mcp_secrets.json) وتغلب .env
+SETTING_KEYS = ("NAWAH_MODEL", "NAWAH_FALLBACK_MODEL", "NEWSDATA_API_KEY")
 _ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = Path(os.getenv("NAWAH_DATA_DIR") or _ROOT / "data" / "nawah")
 #: مؤهَّل بالمزوّد: الاسم المجرّد 404 على OpenRouter (والخطأ يصل عربياً من الخادم لا صمتاً)
@@ -44,20 +50,27 @@ _URL_RE = re.compile(r"https?://\S+")
 
 
 # ─────────────────────────── env / availability ───────────────────────────
-def runtime_env() -> Dict[str, str]:
-    """بيئة الطفل: نقطة النظام من resolve_llm() + Tavily + مجلد البيانات. تُحسب عند كل اتصال."""
+def runtime_env(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """بيئة الطفل: نقطة النظام من resolve_llm() + Tavily + مجلد البيانات. تُحسب عند كل اتصال.
+
+    ``cfg``: إعداد الخادم من الكتالوج؛ ما ضبطه المطوّر من اللوحة (``cfg["env"]``: NAWAH_MODEL…)
+    يغلب ما في ``.env``، والافتراضي آخراً. المفتاح والعنوان لا يُضبطان من اللوحة أبداً.
+    """
     from app.core.llm_provider import resolve_llm
 
+    stored = {k: str(v).strip() for k, v in ((cfg or {}).get("env") or {}).items() if str(v).strip()}
+    setting = lambda k: stored.get(k) or (os.getenv(k) or "").strip()  # noqa: E731
     ep = resolve_llm()
     openrouter = ep.provider == "openrouter"
-    model = (os.getenv("NAWAH_MODEL") or "").strip() or (DEFAULT_MODEL if openrouter else ep.model)
-    fallback = (os.getenv("NAWAH_FALLBACK_MODEL") or "").strip() or (DEFAULT_FALLBACK if openrouter else ep.model)
+    model = setting("NAWAH_MODEL") or (DEFAULT_MODEL if openrouter else ep.model)
+    fallback = setting("NAWAH_FALLBACK_MODEL") or (DEFAULT_FALLBACK if openrouter else ep.model)
     env = {
         "NAWAH_LLM_API_KEY": ep.api_key or "",
         "NAWAH_LLM_BASE_URL": ep.base_url or "https://api.openai.com/v1",
         "NAWAH_LLM_MODEL": model,
         "NAWAH_LLM_FALLBACK_MODEL": fallback,
         "TAVILY_API_KEY": (os.getenv("TAVILY_API_KEY") or "").strip(),
+        "NEWSDATA_API_KEY": setting("NEWSDATA_API_KEY"),
         "NAWAH_DATA_DIR": str(DATA_DIR),
         # الطفل يرث بيئة العملية: نفرّغ مفتاح Google حتى لا يبقى أي مسار إلى Gemini المباشر
         "GEMINI_API_KEY": "",
@@ -71,38 +84,41 @@ def runtime_env() -> Dict[str, str]:
 
 
 def install() -> None:
-    """يُستدعى عند الإقلاع قبل تسجيل الخوادم الخارجية: يربط بيئة الخادم بـresolve_llm()."""
+    """يُستدعى عند الإقلاع قبل تسجيل الخوادم الخارجية: يربط بيئة الخادمين بـresolve_llm()."""
     from ..mcp.servers import external_mcp as X
 
     X.register_env_provider(SLUG, runtime_env)
+    X.register_env_provider(BRIEF_SLUG, runtime_env)
 
 
-def _server():
+def _server(slug: str = SLUG):
     from . import tools_service as TS
 
     reg = TS.registry()
-    return reg.get(NAME) if reg.has(NAME) else None
+    name = "ext_" + slug
+    return reg.get(name) if reg.has(name) else None
 
 
-def status() -> Dict[str, Any]:
+def status(slug: str = SLUG) -> Dict[str, Any]:
     """لماذا لا تعمل نواه الآن (إن كانت لا تعمل) — بالعربية، للمالك."""
     if not shutil.which("node"):
         return {"ok": False, "reason": "Node.js غير مثبّت على الخادم (خادم نواه يعمل بـnode)"}
-    if not (_ROOT / "system" / "mcps" / SLUG / "dist" / "clone-server.mjs").exists():
-        return {"ok": False, "reason": "ملف نواه المجمّع غير موجود: شغّل npm run build:clone في system/mcps/nawah_clone"}
+    bundle = _BUNDLE.get(slug, "clone-server.mjs")
+    if not (_ROOT / "system" / "mcps" / SLUG / "dist" / bundle).exists():
+        return {"ok": False, "reason": f"ملف نواه المجمّع {bundle} غير موجود: شغّل npm run build في system/mcps/nawah_clone"}
     try:
-        srv = _server()
+        srv = _server(slug)
     except Exception as exc:  # noqa: BLE001 - قبل اكتمال الإقلاع
         return {"ok": False, "reason": f"سجل الخوادم غير جاهز: {exc}"}
     if srv is None:
-        return {"ok": False, "reason": "خادم nawah_clone غير مسجّل أو معطّل في system/mcps"}
-    if not runtime_env().get("NAWAH_LLM_API_KEY"):
+        return {"ok": False, "reason": f"خادم {slug} غير مسجّل أو معطّل في system/mcps"}
+    if not runtime_env(getattr(srv, "cfg", None)).get("NAWAH_LLM_API_KEY"):
         return {"ok": False, "reason": "لا مفتاح نموذج للنظام (OPENROUTER_API_KEY)"}
     return {"ok": True, "reason": ""}
 
 
-def enabled() -> bool:
-    return bool(status()["ok"])
+def enabled(slug: str = SLUG) -> bool:
+    return bool(status(slug)["ok"])
 
 
 # ─────────────────────────── building the fingerprint ───────────────────────────

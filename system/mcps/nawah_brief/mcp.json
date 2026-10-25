@@ -1,0 +1,239 @@
+{
+  "slug": "nawah_brief",
+  "label": "نواه — التوجيه الإعلامي (NAWAH Brief)",
+  "transport": "stdio",
+  "command": "node",
+  "args": [
+    "{package}/brief-server.mjs"
+  ],
+  "cwd": "{package}",
+  "allowed_tools": [
+    "brief",
+    "research"
+  ],
+  "research_tool": "",
+  "research_arg": "",
+  "description": "محرّك «مهمة للفريق»: بحث الويب ثم توجيه إعلامي لكل الفريق (الرسالة العامة، الحقائق الجديدة، ولكل موظف موقفه وزاويته وما يتجنّبه) ومسودة بصوت كل موظف — مستنسخاً كان أو بشخصيته.",
+  "note": "داخلي: يستدعيه المنسّق عند «انشروا عن…» (order_publish/dispatch_directed) — ليس أداة محادثة. الكود في system/mcps/nawah_clone (نفس الحزمة)؛ بعد تعديل المصدر: npm run build. مفتاح النموذج من resolve_llm() وقت الاتصال؛ NAWAH_MODEL وNEWSDATA_API_KEY تُضبط من هنا.",
+  "enabled": true,
+  "scope": {
+    "coordinator": false,
+    "employees": false
+  },
+  "source": "config",
+  "added_by": "system",
+  "added_at": "2026-10-25T00:00:00+00:00",
+  "server_info": {
+    "name": "nawah-brief",
+    "version": "1.1.0"
+  },
+  "tools": [
+    {
+      "name": "research",
+      "title": "ابحث عن الموضوع",
+      "description": "Finds the latest facts on a topic: web search through Tavily (web), and the press through NewsData when its key is set. Returns a dated brief with sources. البحث عن آخر ما يخص الموضوع.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "minLength": 2
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "web",
+                "news"
+              ]
+            },
+            "default": [
+              "web"
+            ],
+            "description": "web: الويب؛ news: المصادر الصحفية (يحتاج NEWSDATA_API_KEY)"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "brief",
+      "title": "توجيه إعلامي",
+      "description": "The media brief, end to end: takes a topic, searches the web for its latest details (and the press if asked), reads the chosen profiles (or all of them) for what each believes and where it stands, plans the directive (the public message, the new facts, what each profile talks about), then writes every profile's piece in its own voice and format with its match score. Returns the directive, the pieces, the sources and a Markdown report. توجيه إعلامي: موضوع واحد، بحث، ثم كل الأصوات كلٌّ بموقفه وزاويته.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "minLength": 2,
+            "description": "الموضوع أو الرسالة المطلوب إيصالها. ما بين علامتي تنصيص \"…\" أمر يُنفَّذ حرفيًا، مثل \"ابحث عن آخر إحصائية رسمية\""
+          },
+          "voices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "clone": {
+                  "type": "string",
+                  "description": "استنساخ محفوظ: الاسم أو المعرّف أو @handle"
+                },
+                "persona": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "handle": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "من هو وماذا يكتب وبأي نبرة (الدور، الاهتمامات، التعليمات)"
+                    },
+                    "dialect": {
+                      "type": "string"
+                    },
+                    "dialect_family": {
+                      "type": "string"
+                    },
+                    "register": {
+                      "type": "string"
+                    },
+                    "one_line": {
+                      "type": "string"
+                    },
+                    "style_guide": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "قواعد أسلوبه (افعل)"
+                    },
+                    "never_uses": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "ما لا يفعله (لا تفعل)"
+                    },
+                    "signature_phrases": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "samples": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "منشوراته الحقيقية إن وُجدت؛ ثلاثة فأكثر تجعل عاداته مقيسة"
+                    },
+                    "category": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": false,
+                  "description": "صوت مؤقت من شخصية حساب غير مستنسخ: يُقرأ في التوجيه ويُكتب بأسلوبه، ولا يُحفظ"
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "post",
+                    "article",
+                    "scenario"
+                  ],
+                  "description": "إن تُرك: الصيغة الطبيعية للاستنساخ (منشور لحسابات إكس، مقال لكتّاب المقالات، سيناريو لصنّاع الفيديو)"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3,
+                  "description": "عدد المنشورات لهذا الصوت (للمنشورات فقط)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 10,
+            "description": "من يكتب. إن تُرك: كل الاستنساخات الموجودة"
+          },
+          "drafts": {
+            "type": "boolean",
+            "default": true,
+            "description": "false: التوجيه والبحث فقط بلا كتابة القطع (أسرع بكثير)"
+          },
+          "research": {
+            "type": "string",
+            "enum": [
+              "web",
+              "news",
+              "both",
+              "none"
+            ],
+            "default": "web",
+            "description": "البحث قبل الكتابة؛ الافتراضي الويب"
+          },
+          "length": {
+            "type": "string",
+            "enum": [
+              "short",
+              "medium",
+              "long"
+            ],
+            "description": "قصير، متوسط (المعتاد عند الكاتب)، طويل",
+            "default": "medium"
+          },
+          "modes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "مختصر",
+                "بالتفاصيل",
+                "بحث وأدلة",
+                "إيجاز",
+                "جدلي",
+                "متسائل",
+                "ساخر"
+              ]
+            },
+            "description": "أنماط اختيارية: مختصر، بالتفاصيل، بحث وأدلة، إيجاز، جدلي، متسائل، ساخر (سخرية لاذعة تدافع عن الموقف بحقائق موثقة؛ تشغّل بحث الويب)",
+            "default": []
+          },
+          "report": {
+            "type": "boolean",
+            "default": true,
+            "description": "إرفاق التقرير بصيغة Markdown"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ],
+  "env_keys": [
+    "NAWAH_FALLBACK_MODEL",
+    "NAWAH_MODEL",
+    "NEWSDATA_API_KEY"
+  ],
+  "header_keys": [],
+  "query_keys": []
+}

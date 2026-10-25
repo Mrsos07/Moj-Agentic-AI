@@ -16,7 +16,8 @@
     "clone-server": "tsx src/clone/server.ts",
     "brief-server": "tsx src/brief/server.ts",
     "zip": "node scripts/zip.mjs",
-    "build:clone": "node scripts/build.mjs clone"
+    "build:clone": "node scripts/build.mjs clone",
+    "build:brief": "node scripts/build.mjs brief"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

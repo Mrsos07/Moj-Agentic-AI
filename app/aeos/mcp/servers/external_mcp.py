@@ -321,12 +321,21 @@ def register_env_provider(slug_: str, provider) -> None:
 
 
 def runtime_env(cfg: Dict[str, Any]) -> Dict[str, str]:
-    """env الطفل = env المحفوظة (الأسرار) + ما تعيده دالة المزوّد الآن (إن وُجدت)."""
-    env = {k: str(v) for k, v in (cfg.get("env") or {}).items()}
+    """env الطفل = env المحفوظة (الأسرار/الإعدادات، بلا القيم الفارغة) + ما تعيده دالة المزوّد الآن.
+
+    القيمة الفارغة في المخزن تعني «غير مضبوط»: تمريرها كـ"" كانت تطمس قيمة موجودة في بيئة
+    العملية. دالة المزوّد تستلم ``cfg`` إن قبلت وسيطاً (لتقرأ إعدادات المالك المحفوظة مثل
+    NAWAH_MODEL)، وإلا تُستدعى بلا وسائط كما قبل.
+    """
+    import inspect
+
+    env = {k: str(v) for k, v in (cfg.get("env") or {}).items() if str(v).strip() != ""}
     provider = _ENV_PROVIDERS.get(cfg.get("slug") or "")
     if provider is not None:
         try:
-            env.update({k: str(v) for k, v in (provider() or {}).items()})
+            takes_cfg = bool(inspect.signature(provider).parameters)
+            extra = provider(cfg) if takes_cfg else provider()
+            env.update({k: str(v) for k, v in (extra or {}).items()})
         except Exception:  # noqa: BLE001 - بيئة ناقصة أفضل من خادم لا يعمل أبداً
             logger.exception("env provider for %s failed", cfg.get("slug"))
     return env
@@ -654,6 +663,9 @@ def public_view(cfg: Dict[str, Any], connected: Optional[bool] = None) -> Dict[s
         "scope": cfg.get("scope") or {"coordinator": True, "employees": True},
         "added_by": cfg.get("added_by", ""), "added_at": cfg.get("added_at", ""),
         "env_keys": sorted((cfg.get("env") or {}).keys()),
+        # إعدادات غير سرية (اسم موديل مثلاً) تُعرض قيمتها الحالية لتُعدَّل؛ ما يبدو مفتاحاً يبقى مخفياً
+        "env_values": {k: str(v) for k, v in (cfg.get("env") or {}).items()
+                       if not _SECRET_PARAM_RE.search(k)},
         "header_keys": sorted((cfg.get("headers") or {}).keys()),
         "query_keys": sorted((cfg.get("query_secrets") or {}).keys()),
         "tools": [{"name": t["name"], "description": (t.get("description") or "")[:200]}
