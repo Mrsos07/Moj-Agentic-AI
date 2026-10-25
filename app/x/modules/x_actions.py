@@ -1,13 +1,14 @@
-import os
 import re
 import time
 from typing import Optional
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page
 
 from .x_captcha import guard as _captcha_guard
+from .x_captcha import goto as _goto
+from .x_captcha import launch_browser as _stealth_launch
 from .x_captcha import new_context as _captcha_context
-from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
+from .x_captcha import sync_playwright
 from .sync_bridge import sync_safe
 
 
@@ -15,14 +16,8 @@ DEFAULT_TIMEOUT = 30_000
 
 
 def _launch_browser(p, headless: bool):
-    """Launch Chromium with optional Chrome channel (defaults to installed Chrome)."""
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-    proxy = _launch_proxy_kwargs()
-    try:
-        return p.chromium.launch(channel=chrome_channel, headless=headless, **proxy)
-    except Exception:
-        # Fallback if channel isn't available
-        return p.chromium.launch(headless=headless, **proxy)
+    """Chrome الخفي (Patchright) مع بروكسي الإطلاق — يُستورد من بقية الوحدات وقارئ playwright_x."""
+    return _stealth_launch(p, headless=headless)
 
 
 def _norm_tweet_url(url: str) -> str:
@@ -37,7 +32,7 @@ def _goto_tweet(page: Page, tweet_url: str):
     tweet_url = _norm_tweet_url(tweet_url)
     if not tweet_url:
         raise ValueError("tweet_url required")
-    page.goto(tweet_url, wait_until="domcontentloaded")
+    _goto(page, tweet_url, wait_until="domcontentloaded")
     # تحقق «Verify you are human» يظهر أحياناً قبل التغريدة — بدونه كل تفاعل يفشل
     _captcha_guard(page, log=print)
     # Ensure tweet page is ready
@@ -764,18 +759,14 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool = True
     Follow user by visiting their profile and clicking Follow.
     Supports Arabic/English because it relies on data-testid patterns when possible.
     """
-    from playwright.sync_api import sync_playwright
-
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel=chrome_channel, headless=headless)
+        browser = _launch_browser(p, headless=headless)
         context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(60_000)
 
         try:
-            page.goto(profile_url, wait_until="domcontentloaded")
+            _goto(page, profile_url, wait_until="domcontentloaded")
             _captcha_guard(page, log=print)
             page.wait_for_timeout(6200)
 
@@ -840,18 +831,14 @@ def unfollow_user(storage_state_path: str, profile_url: str, headless: bool = Tr
     Unfollow user by visiting their profile and clicking Following -> confirm.
     Uses data-testid '*-unfollow' and confirmationSheetConfirm.
     """
-    from playwright.sync_api import sync_playwright
-
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel=chrome_channel, headless=headless)
+        browser = _launch_browser(p, headless=headless)
         context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(60_000)
 
         try:
-            page.goto(profile_url, wait_until="domcontentloaded")
+            _goto(page, profile_url, wait_until="domcontentloaded")
             _captcha_guard(page, log=print)
             page.wait_for_timeout(6200)
 

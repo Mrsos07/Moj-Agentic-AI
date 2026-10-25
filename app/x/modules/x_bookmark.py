@@ -3,10 +3,9 @@
 كانت النسختان تضغطان أول زر تجدانه ثم تعتبران ذلك نجاحاً؛ والتراجع كان يضغط
 ``bookmark`` إن لم يجد ``removeBookmark`` — أي أنه **يحفظ** تغريدة غير محفوظة.
 """
-from playwright.sync_api import sync_playwright
-
 from .x_actions import _goto_tweet, _launch_browser, _state_in, focal_tweet
 from .x_captcha import new_context as _captcha_context
+from .x_captcha import sync_playwright
 from .sync_bridge import sync_safe
 
 DEFAULT_TIMEOUT = 30_000

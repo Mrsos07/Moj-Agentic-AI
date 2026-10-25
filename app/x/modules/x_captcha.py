@@ -33,6 +33,10 @@ cloudflare_clearance = _browser.cloudflare_clearance
 new_context = _browser.new_context
 launch_proxy_kwargs = _browser.launch_proxy_kwargs
 proxy_status = _browser.proxy_status
+#: المتصفح الخفي (Patchright + Chrome): كل وحدات X تطلق متصفحها من هنا فقط
+sync_playwright = _browser.sync_playwright
+launch_browser = _browser.launch_browser
+goto = _browser.goto
 
 
 def guard(page, log: Optional[Callable[[str], None]] = None) -> None:

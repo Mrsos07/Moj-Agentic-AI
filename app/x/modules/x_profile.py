@@ -1,13 +1,12 @@
-import os
 import re
 import time
 from typing import Dict, List, Optional, Tuple
 
-from playwright.sync_api import sync_playwright
-
 from .x_captcha import guard as _captcha_guard
+from .x_captcha import goto as _goto
+from .x_captcha import launch_browser as _launch_browser
 from .x_captcha import new_context as _captcha_context
-from .x_captcha import launch_proxy_kwargs as _launch_proxy_kwargs
+from .x_captcha import sync_playwright
 from .sync_bridge import sync_safe
 
 # نقاط X التي تحفظ الصورة/الغلاف بعد «حفظ» (عميل الويب يرفع الوسائط ثم يستدعيها؛
@@ -164,13 +163,8 @@ def update_profile_on_x(
     """يعيد تأكيد كل صورة طُلبت: ``{"avatar"|"banner": "confirmed"|"unconfirmed"}``."""
     # كبقية الوحدات (x_actions/x_follow/…): كروم المثبَّت افتراضياً — كروميوم
     # Playwright المرفق غير منزَّل هنا، وكان غيابه يُفشل التطبيق بصمت.
-    chrome_channel = os.getenv('XSUITE_CHROME_CHANNEL', '').strip() or "chrome"
     with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(channel=chrome_channel, headless=headless,
-                                            **_launch_proxy_kwargs())
-        except Exception:
-            browser = p.chromium.launch(headless=headless, **_launch_proxy_kwargs())
+        browser = _launch_browser(p, headless=headless)
         context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
 
@@ -184,7 +178,7 @@ def update_profile_on_x(
 
         page.on("response", _on_response)
 
-        page.goto("https://x.com/settings/profile", wait_until="domcontentloaded")
+        _goto(page, "https://x.com/settings/profile", wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
         _ensure_logged_in_or_raise(page)
 
@@ -258,7 +252,7 @@ def update_profile_on_x(
         # يُعبّأ، جلسة منتهية) — أعد فتح النموذج واقرأ القيم المحفوظة فعلاً.
         # إبلاغ نجاح زائف أسوأ من فشل صريح: النظام يزامن البرسونا على أساسه.
         if name or bio:
-            page.goto("https://x.com/settings/profile", wait_until="domcontentloaded")
+            _goto(page, "https://x.com/settings/profile", wait_until="domcontentloaded")
             page.wait_for_timeout(2500)
             _captcha_guard(page, log=print)
             problems = []

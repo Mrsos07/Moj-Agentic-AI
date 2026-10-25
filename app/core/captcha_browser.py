@@ -21,11 +21,6 @@ from typing import Any, Callable, Dict, Optional
 
 _LOG = Callable[[str], None]
 
-#: UA كروم حقيقي — Playwright في وضع headless يرسل «HeadlessChrome» فيرد X بـ403
-#: (قيس فعلياً: default-UA ⇒ 403، هذا الـUA ⇒ 307 إلى صفحة الدخول).
-DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
-
 
 def _solver_module():
     """تحميل الحلّال بالمسار — هذا الملف يُستورد من app/x أيضاً (لا حزمة app)."""
@@ -55,6 +50,25 @@ def _proxy_module():
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _stealth_module():
+    """المتصفح الخفي المشترك (Patchright + Chrome) — نسخة واحدة لكل العملية مهما كان مسار الاستيراد."""
+    name = "moj_stealth_browser"
+    mod = sys.modules.get(name)
+    if mod is not None:
+        return mod
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("stealth_browser.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_stealth = _stealth_module()
+#: نقطة الدخول الوحيدة لمتصفح X: ``with sync_playwright() as p: browser = launch_browser(p, headless)``
+sync_playwright = _stealth.sync_playwright
+goto = _stealth.goto
 
 
 # ── الكشف ───────────────────────────────────────────────────────────────────
@@ -442,7 +456,7 @@ def solve(page, *, log: Optional[_LOG] = None, rounds: int = 3,
         log("🧩 reCAPTCHA v2 — طلب توكن…")
         try:
             token = solver.solve_recaptcha_v2(page_url, recaptcha["sitekey"])
-            called = page.evaluate(_INJECT_RECAPTCHA, token)
+            called = _stealth.main_world_evaluate(page, _INJECT_RECAPTCHA, token)
             log(f"✅ حُقن توكن reCAPTCHA (callback: {called})")
             return _wait_gone(page, "recaptcha_v2", wait_s)
         except Exception as e:  # noqa: BLE001
@@ -454,7 +468,7 @@ def solve(page, *, log: Optional[_LOG] = None, rounds: int = 3,
         log("🧩 hCaptcha — طلب توكن…")
         try:
             token = solver.solve_hcaptcha(page_url, hcap["sitekey"], user_agent=user_agent)
-            page.evaluate(_INJECT_HCAPTCHA, [token, hcap.get("callback") or ""])
+            _stealth.main_world_evaluate(page, _INJECT_HCAPTCHA, [token, hcap.get("callback") or ""])
             log("✅ حُقن توكن hCaptcha")
             return _wait_gone(page, "hcaptcha", wait_s)
         except Exception as e:  # noqa: BLE001
@@ -466,7 +480,7 @@ def solve(page, *, log: Optional[_LOG] = None, rounds: int = 3,
         log("🧩 Turnstile — طلب توكن…")
         try:
             token = solver.solve_turnstile(page_url, turnstile["sitekey"], user_agent=user_agent)
-            page.evaluate(_INJECT_TURNSTILE, [token, turnstile.get("callback") or ""])
+            _stealth.main_world_evaluate(page, _INJECT_TURNSTILE, [token, turnstile.get("callback") or ""])
             log("✅ حُقن توكن Turnstile")
             return _wait_gone(page, "turnstile", wait_s)
         except Exception as e:  # noqa: BLE001
@@ -485,7 +499,7 @@ def solve(page, *, log: Optional[_LOG] = None, rounds: int = 3,
             try:
                 for frame in page.frames:
                     if "arkoselabs" in (frame.url or "").lower():
-                        frame.evaluate(_INJECT_ARKOSE, token)
+                        _stealth.main_world_evaluate(frame, _INJECT_ARKOSE, token)
                         break
                 if _wait_gone(page, "funcaptcha", 20):
                     log("✅ حُقن توكن Arkose")
@@ -596,6 +610,11 @@ def launch_proxy_kwargs() -> Dict[str, Any]:
     return {"proxy": _proxy_dict(proxy)} if proxy else {}
 
 
+def launch_browser(p, headless: bool = True):
+    """Chrome الخفي (``stealth_browser.launch``) مع بروكسي الإطلاق — لكل مسارات X."""
+    return _stealth.launch(p, headless, proxy=launch_proxy_kwargs().get("proxy"))
+
+
 def cloudflare_clearance(page_url: str, proxy: str = "", *, log: Optional[_LOG] = None,
                          max_age: int = 2700) -> Dict[str, Any]:
     """cf_clearance + UA عبر المزوّد، مع كاش 45 دقيقة (الكوكي يبقى صالحاً ~ساعة)."""
@@ -623,6 +642,7 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
     """
     log = log or (lambda _m: None)
 
+    rotated = False
     if proxy is None:
         proxy = ""
         try:
@@ -633,16 +653,19 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
                 proxy = rotation.acquire(scope or "x") or ""
                 if not proxy:
                     raise RuntimeError("لم أستطع الحصول على بروكسي سعودي")
+                rotated = True
         except Exception as e:  # noqa: BLE001
             # لا نكمل بلا بروكسي: الطلب سيخرج بIP الحقيقي وينقض الغرض كله
             raise RuntimeError(f"تدوير IP مفعّل لكن فشل تجهيز البروكسي: {e}") from e
 
     proxy = (proxy or os.getenv("CAPTCHA_PROXY", "")).strip()
-    kwargs.setdefault("user_agent", DEFAULT_UA)
+    kwargs = _stealth.context_options(browser, kwargs)
     if presolve is None:
         presolve = os.getenv("CAPTCHA_CLOUDFLARE_PRESOLVE", "1").lower() not in (
             "0", "false", "no", "off")
-    if proxy and presolve:
+    # جلسة التدوير السعودية لا تُجهَّز مسبقاً: لا تحدّي عليها (قيس 2026-10-22)، والحل يعيد UA
+    # لينكس يناقض Chrome ويندوز في كل صفحة (علامة كشف)، و20 نقطة لكل جلسة بلا مقابل.
+    if proxy and presolve and not rotated:
         try:
             sol = cloudflare_clearance(page_url, proxy, log=log)
             ua = (sol.get("user_agent") or "").strip()
