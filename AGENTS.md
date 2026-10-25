@@ -419,6 +419,12 @@ defences it forced are still in the code and still required if you set
   Playwright refuses a per-context proxy without a global one, and `cf_clearance`
   is IP-bound anyway — so every request has to leave through it.
   `CAPTCHA_CLOUDFLARE_PRESOLVE=0` disables the pre-solve.
+  **Only an explicit `CAPTCHA_PROXY` (or `proxy=` argument) is pre-solved — never a
+  rotation session** (since 2026-10-25). The rotation proxy used to flow into the same
+  variable, so with a captcha key every new context paid 20 points and got YesCaptcha's
+  **Linux** UA on a **Windows** Chrome (UA says Linux, `navigator.platform` and
+  `sec-ch-ua-platform` say Windows — a detection signal on every page), while the Saudi
+  exit shows no challenge at all. `verify_stealth.py` section 6 asserts both sides.
 - Measured 2026-10-21 on @emaad5079 (valid `auth_token`+`ct0`): the real blocker was
   **not** a captcha. `api.x.com` GraphQL returned code 326 «this account is
   temporarily locked … log in to https://twitter.com to unlock», and every browser
@@ -480,7 +486,8 @@ defences it forced are still in the code and still required if you set
   both `proxy_rotation.playwright_proxy` and `captcha_browser._proxy_dict`;
   (b) Playwright's default headless UA contains `HeadlessChrome`, and **x.com
   answers 403** to it (same context with a real Chrome UA: 307 → login page).
-  `new_context` now sets `DEFAULT_UA` unless a caller passes one.
+  That UA is now set browser-wide from the real Chrome version (see «The X browser is
+  Patchright + the installed Chrome»); the old hard-coded `DEFAULT_UA` is gone.
   With the Saudi proxy, public pages (`x.com/explore`, `/i/flow/login`) load with
   **no Cloudflare challenge at all**; only `/account/access` (the locked-account
   page) still shows it — so the CF problem was the egress IP, as suspected.
@@ -493,6 +500,68 @@ defences it forced are still in the code and still required if you set
 - Test: `.\venv\Scripts\python.exe verify_proxy_rotation.py` (35 checks, a local fake
   proxy answers geo and records the usernames, so the provider templates are verified
   without an account).
+
+## The X browser is Patchright + the installed Chrome — one launcher, no automation traces
+- Every X browser (`x_post/x_actions/x_delete/x_follow/x_unfollow/x_profile/x_bookmark` and
+  the `playwright_x` reads) comes from `app/core/stealth_browser.py` via
+  `captcha_browser.launch_browser(p, headless)` (= `x_captcha.launch_browser`), inside
+  `with sync_playwright()` from the same module. Never `p.chromium.launch(...)` or
+  `from playwright.sync_api import sync_playwright` in an X path: `verify_stealth.py` §1 fails.
+- Measured before (2026-10-25, Chrome 155, Playwright 1.46): deviceandbrowserinfo.com
+  «You are a bot!» (`hasWebdriverTrue`, `isAutomatedWithCDP`, `isAutomatedWithCDPInWebWorker`),
+  sannysoft «WebDriver present», CreepJS 67% headless with `HeadlessChrome/155` leaking from the
+  workers; the UA header said Chrome/142 (post/delete: Chrome/120) while `sec-ch-ua` said 155;
+  post/delete ran with `--disable-web-security` (no same-origin policy in a browser holding the
+  account cookies) and `--no-sandbox`. After (Patchright 1.64.1 + installed Chrome, headless):
+  «You are human!» with no flag, sannysoft all passed, CreepJS 0% headless / 0% stealth (its
+  «31% like headless» is identical for a real headful Chrome on this machine), x.com/explore 200
+  through the Saudi proxy, @nxjrjrjdj home + profile read with its cookies.
+- Why Patchright, not Camoufox: same API (every live-verified flow — Lexical composer, uploads,
+  crop dialog, GraphQL response checks — keeps working), drives the real auto-updated Chrome
+  (genuine TLS/JA4 and client hints), and patches the CDP `Runtime.enable` leak and the
+  automation flags. Camoufox is a Firefox fork with injected fingerprints whose README still says
+  it "may not be suitable for stable production use"; every Chrome-verified flow would need
+  re-verification.
+- UA: headless gets `--user-agent` built from the real `browser.version` (reduced
+  `Chrome/<major>.0.0.0`, frozen OS token). A context `user_agent` does NOT reach (Shared)Workers
+  or the service worker — exactly where CreepJS found `HeadlessChrome`. The version is probed once
+  per process; a launch whose major differs (Chrome auto-updated) relaunches with the right UA.
+  Headful keeps the native UA. `context_options()` adds no UA for these browsers, plus a `screen`
+  larger than the viewport (Playwright makes screen == viewport, a headless tell). Never
+  hard-code a UA again (an HTTP client like `x_auth_local`'s curl_cffi `impersonate=chromeNNN`
+  is different: its UA must match its impersonated version).
+- Flags: only `--disable-dev-shm-usage` (Linux) and `--no-sandbox` (Linux as root = Docker);
+  Patchright adds `--disable-blink-features=AutomationControlled` and drops `--enable-automation`
+  itself. No `--disable-web-security`, no `--no-sandbox` on Windows, no `--disable-gpu`
+  (software WebGL «Microsoft Basic Render Driver» = VM/headless signal).
+- Patchright runs `evaluate` in an isolated world: DOM reads (every scraper JS here) work
+  unchanged, page globals are invisible. Anything that must call page JS (captcha callbacks,
+  `___grecaptcha_cfg`, `window[cb]`) goes through `stealth_browser.main_world_evaluate` (it
+  checks the signature, so plain-Playwright test pages still work). `page.on("console")` does not
+  fire in Patchright (Console domain disabled) — don't build on it.
+- `stealth_browser.goto()` retries a navigation ONCE on a transient network error
+  (`ERR_CONNECTION_CLOSED/RESET`, tunnel/proxy failures). The reported
+  `read_timeline/read_my_posts … ERR_CONNECTION_CLOSED` was a dropped residential tunnel, not
+  detection: the same path then loaded home + profile 4/4 times, urllib through the same proxy
+  got 200, and X answers a detected fingerprint with 403 (`ERR_HTTP_RESPONSE_CODE_FAILURE`).
+  Timeouts, 403 and everything else still raise.
+- `X_BROWSER_ENGINE=playwright` forces plain Playwright (diagnostics); a missing patchright warns
+  once and falls back (with `AutomationControlled` + `ignore_default_args=--enable-automation`).
+  `XSUITE_CHROME_CHANNEL` still picks the channel (`chromium` = bundled build, which needs
+  `patchright install chromium`; Docker installs it).
+- Deps: `patchright==1.64.1` + `playwright==1.64.0` with `pyee==14.0.0`/`greenlet==3.5.6`
+  (1.46 pinned pyee 11 / greenlet 3.0.3 — incompatible). After `pip install`, check
+  `site-packages/{patchright,playwright}/driver/node.exe` and `greenlet/_greenlet*.pyd` exist: one
+  install in the OneDrive venv silently left both drivers without `node.exe`
+  (`FileNotFoundError [WinError 2]`) and greenlet without its `.pyd`;
+  `pip install --force-reinstall --no-deps <pkg>` fixed it. Never upgrade the venv under a running
+  app (the live xsuite had 1.46 in memory and the 1.64 driver on disk) — upgrade right before the
+  restart.
+- Test: `.\venv\Scripts\python.exe verify_stealth.py` (offline: static rules, engine, a probe page
+  served by `route` + Worker/SharedWorker, captcha main-world injection, goto retry,
+  context/presolve rules); `--live` adds deviceandbrowserinfo/sannysoft/CreepJS and x.com through
+  the Saudi proxy; `--account <label|cookies.json>` reads home + profile with that account's
+  cookies (read-only).
 
 ## Backend "hangs" are usually a zombie reloader, not a blocked event loop
 - Symptom: port 8000 accepts TCP but answers nothing (even `/api/aeos/health`),

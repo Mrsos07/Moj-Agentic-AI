@@ -31,7 +31,7 @@ google-auth-httplib2==0.3.0
 google-generativeai==0.8.6
 google-genai>=1.0.0
 googleapis-common-protos==1.72.0
-greenlet==3.0.3
+greenlet==3.5.6
 grpcio==1.76.0
 grpcio-status==1.71.2
 gunicorn==21.2.0
@@ -57,7 +57,9 @@ graphiti-core[kuzu]==0.29.2
 opentelemetry-api==1.39.1
 passlib==1.7.4
 pillow==12.1.0
-playwright==1.46.0
+playwright==1.64.0
+# متصفح X الخفي (app/core/stealth_browser.py): Playwright مُرقَّع ضد الكشف يقود Chrome المثبَّت
+patchright==1.64.1
 psutil==7.2.2  # app/x/loginx — كان مستخدماً وغير مُدرج
 proto-plus==1.27.0
 protobuf==5.29.5
@@ -68,7 +70,7 @@ pycparser==2.23
 pydantic==2.12.5
 pydantic-settings==2.12.0
 pydantic_core==2.41.5
-pyee==11.1.0
+pyee==14.0.0
 pyparsing==3.3.2
 python-dotenv==1.0.1
 python-jose==3.5.0

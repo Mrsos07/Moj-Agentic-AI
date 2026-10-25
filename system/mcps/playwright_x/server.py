@@ -82,6 +82,20 @@ def _new_context(browser, storage_state_path: str, *, viewport=None,
     return new_context(browser, storage_state_path, page_url=page_url, **kwargs)
 
 
+def _sync_playwright():
+    """Patchright + Chrome الخفي — نفس مُطلِق وحدات X (``x_captcha``)، لا Playwright العادي."""
+    from app.x.modules.x_captcha import sync_playwright
+
+    return sync_playwright()
+
+
+def _goto(page, url: str, **kwargs):
+    """تنقّل بإعادة واحدة على عطل شبكة عابر (ERR_CONNECTION_CLOSED من نفق البروكسي)."""
+    from app.x.modules.x_captcha import goto
+
+    return goto(page, url, **kwargs)
+
+
 # رأس صفحة الحساب: الاسم والنبذة بمحدّدات read_user_profile المتحقَّق منها حيّاً، والصورة
 # عبر رابط /<handle>/photo، والغلاف عبر /<handle>/header_photo (ولا يظهر profile_banners
 # في صفحة الحساب إلا لغلافه هو). X يرسم الإيموجي <img alt> فيُسقطها innerText — قيس حيّاً:
@@ -555,22 +569,20 @@ class PlaywrightXMCP(IMCPServer):
     # -- Playwright work (sync API, runs in a worker thread) --------------
     def _read(self, storage_state_path: str, url: str, limit: int, headless: bool,
               soft: bool = False) -> List[Dict[str, Any]]:
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser  # reuse chrome-channel launch
 
         seen: Dict[str, Dict[str, Any]] = {}
         # serialize with all other browser automation: sync playwright is not
         # safe to run concurrently across threads and would deadlock the fleet.
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
             context = _new_context(browser, storage_state_path,
                                    viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto(url, wait_until="domcontentloaded")
+                _goto(page, url, wait_until="domcontentloaded")
                 _guard_captcha(page)
                 # انتظر ظهور أول تغريدة (يؤكد نجاح الدخول بالكوكيز). في الوضع
                 # الليّن (soft) لا نفشل الدورة إن لم توجد تغريدات (مثلاً لا توجد
@@ -612,20 +624,18 @@ class PlaywrightXMCP(IMCPServer):
         account or doesn't surface posts, it returns an empty list instead of
         failing the whole cycle.
         """
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
         seen: Dict[str, Dict[str, Any]] = {}
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
             context = _new_context(browser, storage_state_path,
                                    viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto(self._TOP_POSTS_URL, wait_until="domcontentloaded")
+                _goto(page, self._TOP_POSTS_URL, wait_until="domcontentloaded")
                 _guard_captcha(page)
                 # انتظار ليّن: إن لم تظهر بطاقات تغريدات خلال 20 ثانية نرجع فارغاً
                 try:
@@ -667,8 +677,6 @@ class PlaywrightXMCP(IMCPServer):
         ``header_out``: يُملأ برأس الصفحة نفسها (اسم/نبذة/صورة/هيدر) بلا تنقّل إضافي —
         فتبقى بطاقة الموظف مطابقة لهويته على X مع كل قراءة أداء. فشله لا يمس القراءة.
         """
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
@@ -676,14 +684,14 @@ class PlaywrightXMCP(IMCPServer):
 
         target = f"@{handle.lower()}"
         seen: Dict[str, Dict[str, Any]] = {}
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
             context = _new_context(browser, storage_state_path,
                                    viewport={"width": 1280, "height": 1000})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
                 _guard_captcha(page)
                 if header_out is not None:
                     try:
@@ -737,20 +745,18 @@ class PlaywrightXMCP(IMCPServer):
 
         ``lock_timeout`` > 0 لطلب تفاعلي من المالك: يفشل سريعاً برسالة واضحة إن كان
         المتصفح محجوزاً بدورة، بدل انتظار مفتوح حتى تنتهي مهلة الطلب."""
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
         slot = _browser_slot(lock_timeout) if lock_timeout > 0 else browser_lock
-        with slot, sync_playwright() as pw:
+        with slot, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
             context = _new_context(browser, storage_state_path,
                                    viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(30_000)
             try:
-                page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
                 _guard_captcha(page)
                 return _profile_header(page, handle, wait_ms=20_000)
             finally:
@@ -777,8 +783,6 @@ class PlaywrightXMCP(IMCPServer):
         ``from:<handle>`` في فترات أقدم، لأن التبويبين يعيدان الأحدث فقط: هوية
         مأخوذة من آخر أسبوعين هي «مواضيع المرحلة» لا الشخصية.
         """
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
@@ -813,7 +817,7 @@ class PlaywrightXMCP(IMCPServer):
             skip = exclude or set()
             seen: Dict[str, Dict[str, Any]] = {}
             if navigate:
-                page.goto(url, wait_until="domcontentloaded")
+                _goto(page, url, wait_until="domcontentloaded")
                 _guard_captcha(page)
             try:
                 page.locator('article[data-testid="tweet"]').first.wait_for(
@@ -867,7 +871,7 @@ class PlaywrightXMCP(IMCPServer):
             """
             rank = {"pairs": 3, "loose": 2, "originals": 1}
             found: Dict[str, Dict[str, Any]] = {}
-            page.goto(url, wait_until="domcontentloaded")
+            _goto(page, url, wait_until="domcontentloaded")
             _guard_captcha(page)
             try:
                 page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=15_000)
@@ -905,7 +909,7 @@ class PlaywrightXMCP(IMCPServer):
             return found
 
         started = time.time()
-        with _browser_slot(lock_timeout), sync_playwright() as pw:
+        with _browser_slot(lock_timeout), _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
             context = _new_context(browser, storage_state_path,
                                    viewport={"width": 1280, "height": 900})
@@ -914,7 +918,7 @@ class PlaywrightXMCP(IMCPServer):
             try:
                 # 1) الصفحة الرئيسية: البايو + التغريدات الأصلية (تحميل واحد فقط —
                 #    كان الكود يعيد الانتقال إلى نفس الرابط مرتين بلا داعٍ)
-                page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
                 _guard_captcha(page)
                 try:
                     page.locator('div[data-testid="UserName"]').first.wait_for(
@@ -973,19 +977,17 @@ class PlaywrightXMCP(IMCPServer):
 
     def _read_trends(self, storage_state_path: str, limit: int, headless: bool) -> List[Dict[str, Any]]:
         """Read the account's own Trending tab (what X shows THIS account)."""
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
             context = _new_context(browser, storage_state_path,
                                    viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto("https://x.com/explore/tabs/trending", wait_until="domcontentloaded")
+                _goto(page, "https://x.com/explore/tabs/trending", wait_until="domcontentloaded")
                 _guard_captcha(page)
                 page.locator('[data-testid="trend"]').first.wait_for(
                     state="visible", timeout=45_000

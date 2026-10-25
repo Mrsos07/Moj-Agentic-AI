@@ -1,6 +1,7 @@
 flask==3.0.3
 requests==2.32.3
-playwright==1.46.0
+playwright==1.64.0
+patchright==1.64.1
 python-dotenv==1.0.1
 curl_cffi>=0.7.0
 STPyV8>=12.0
