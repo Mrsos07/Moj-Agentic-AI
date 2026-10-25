@@ -1,0 +1,284 @@
+{
+  "slug": "nawah_clone",
+  "label": "نواه — الاستنساخ (NAWAH Clone)",
+  "transport": "stdio",
+  "command": "node",
+  "args": [
+    "{package}/dist/clone-server.mjs"
+  ],
+  "cwd": "{package}",
+  "allowed_tools": [
+    "create_clone",
+    "get_clone",
+    "list_clones",
+    "score"
+  ],
+  "research_tool": "",
+  "research_arg": "",
+  "description": "استنساخ أسلوب كاتب من منشوراته (بصمة: لهجة، سجل، دليل أسلوب، عبارات، ممنوعات) وقياس تطابق أي نص معها. يستعمله استنساخ هوية الموظف داخلياً.",
+  "note": "داخلي: يستدعيه استنساخ الهوية (persona_clone) فقط — لا يظهر كأداة للمنسّق ولا للموظفين. مفتاح النموذج وعنوانه يُحقنان من resolve_llm() وقت الاتصال، ومفتاح Tavily من .env؛ لا أسرار محفوظة له.",
+  "enabled": true,
+  "scope": {
+    "coordinator": false,
+    "employees": false
+  },
+  "source": "config",
+  "added_by": "system",
+  "added_at": "2026-10-25T00:00:00+00:00",
+  "server_info": {
+    "name": "nawah-clone",
+    "version": "1.0.0"
+  },
+  "tools": [
+    {
+      "name": "list_clones",
+      "title": "الاستنساخات",
+      "description": "Lists the cloned voices available in the data directory, with dialect and size. قائمة الاستنساخات الموجودة.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_clone",
+      "title": "بصمة استنساخ",
+      "description": "The full fingerprint of one clone: the style guide the model wrote, the measured habits, signature phrases, what it never uses. بصمة الاستنساخ كاملة.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "clone": {
+            "type": "string",
+            "description": "الاسم أو المعرّف أو @handle"
+          }
+        },
+        "required": [
+          "clone"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_clone",
+      "title": "استنسخ أسلوبًا",
+      "description": "Builds a clone from a writer's own texts: posts from X (at least 5), article bodies, or spoken transcripts. Pass the texts inline or the path of a CSV/TSV export. Measures the habits, asks the model for the style guide, and saves the clone. استنساخ أسلوب من نصوص الكاتب.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "اسم الاستنساخ كما سيظهر"
+          },
+          "handle": {
+            "type": "string",
+            "description": "معرّف الحساب في إكس إن وُجد"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "posts",
+              "articles",
+              "video"
+            ],
+            "default": "posts",
+            "description": "posts: منشورات إكس؛ articles: مقالات كاملة؛ video: نصوص منطوقة من فيديوهات"
+          },
+          "texts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "النصوص نفسها، نص لكل عنصر"
+          },
+          "file": {
+            "type": "string",
+            "description": "أو مسار ملف CSV/TSV فيه عمود للنص (وعمود تفاعل وتاريخ إن وُجدا)"
+          },
+          "category": {
+            "type": "string",
+            "description": "تصنيف اختياري: إخباري، سياسي، تقني…"
+          },
+          "replace": {
+            "type": "string",
+            "description": "معرّف استنساخ موجود لإعادة بنائه بهذه النصوص بدل إنشاء جديد"
+          },
+          "id": {
+            "type": "string",
+            "description": "معرّف ثابت للملف (يُنظَّف ليصلح اسمًا للملف)؛ إن وُجد استنساخ بالمعرّف نفسه أُعيد بناؤه"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "delete_clone",
+      "title": "احذف استنساخًا",
+      "description": "Deletes a clone file. Irreversible. حذف استنساخ نهائيًا.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "clone": {
+            "type": "string"
+          },
+          "confirm_name": {
+            "type": "string",
+            "description": "اسم الاستنساخ كما هو، للتأكيد"
+          }
+        },
+        "required": [
+          "clone",
+          "confirm_name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "write",
+      "title": "اكتب بصوت الاستنساخ",
+      "description": "Writes in a clone's voice: X posts (several variants, each from a different angle), a reply or quote to a given post, a full article (outline then sections), or a short-video scenario (script, arc, shots, job card). Optional web and press research first. Every text comes back with its match score against the measured style. الكتابة بصوت استنساخ.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "clone": {
+            "type": "string",
+            "description": "الاسم أو المعرّف أو @handle"
+          },
+          "topic": {
+            "type": "string",
+            "description": "الموضوع، أو الزاوية والرسالة. ما بين علامتي تنصيص \"…\" أمر يُنفَّذ (مثل \"ابحث عن آخر رقم رسمي\") ويشغّل بحث الويب تلقائيًا. في الرد والاقتباس: توجيه اختياري لما يُقال"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "post",
+              "article",
+              "scenario"
+            ],
+            "description": "منشور لمنصة إكس، أو مقال كامل، أو سيناريو فيديو قصير",
+            "default": "post"
+          },
+          "length": {
+            "type": "string",
+            "enum": [
+              "short",
+              "medium",
+              "long"
+            ],
+            "description": "قصير، متوسط (المعتاد عند الكاتب)، طويل",
+            "default": "medium"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "default": 3,
+            "description": "عدد الصيغ للمنشورات فقط"
+          },
+          "modes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "مختصر",
+                "بالتفاصيل",
+                "بحث وأدلة",
+                "إيجاز",
+                "جدلي",
+                "متسائل",
+                "ساخر"
+              ]
+            },
+            "description": "أنماط اختيارية: مختصر، بالتفاصيل، بحث وأدلة، إيجاز، جدلي، متسائل، ساخر (سخرية لاذعة تدافع عن الموقف بحقائق موثقة؛ تشغّل بحث الويب)",
+            "default": []
+          },
+          "reply_to": {
+            "type": "string",
+            "description": "نص منشور للرد عليه"
+          },
+          "quote": {
+            "type": "string",
+            "description": "نص منشور لاقتباسه (يُنشر فوقه)"
+          },
+          "research": {
+            "type": "string",
+            "enum": [
+              "none",
+              "web",
+              "news",
+              "both"
+            ],
+            "default": "none",
+            "description": "بحث قبل الكتابة: ويب (Tavily)، صحافة (NewsData، يحتاج مفتاحه)، أو الاثنان"
+          }
+        },
+        "required": [
+          "clone",
+          "topic"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "score",
+      "title": "درجة التطابق",
+      "description": "Scores any text against a clone's measured habits: line count, line length, punctuation, hashtags, emoji, questions, openings, dialect markers, and which clone it is closest to. درجة تطابق نص مع أسلوب استنساخ.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "clone": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "post",
+              "article",
+              "scenario"
+            ],
+            "description": "منشور لمنصة إكس، أو مقال كامل، أو سيناريو فيديو قصير",
+            "default": "post"
+          }
+        },
+        "required": [
+          "clone",
+          "text"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ],
+  "env_keys": [],
+  "header_keys": [],
+  "query_keys": []
+}

@@ -1,3 +1,4 @@
+APScheduler==3.11.3  # app/trend_detector/scheduler — كان مستخدماً وغير مُدرج (ModuleNotFoundError عند الإقلاع)
 aiohttp==3.13.5  # كاشف الترندات (app/trend_detector) — كان مستخدماً وغير مُدرج
 alembic==1.18.0
 annotated-doc==0.0.4
@@ -59,6 +60,7 @@ passlib==1.7.4
 pillow==12.1.0
 playwright==1.46.0
 psutil==7.2.2  # app/x/loginx — كان مستخدماً وغير مُدرج
+uiautomator2==3.7.1  # app/x/loginx/j4.py — كان مستخدماً وغير مُدرج (خادم loginx كان يتوقف عند الإقلاع)
 proto-plus==1.27.0
 protobuf==5.29.5
 pyasn1==0.6.1
