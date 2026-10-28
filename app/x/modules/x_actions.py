@@ -577,6 +577,11 @@ def reply_to_tweet(
     reply_text = (reply_text or "").strip()
     if not reply_text:
         raise ValueError("reply_text required")
+    from .x_text import X_LIMIT, weighted_len
+
+    # X يعطّل زر «ردّ» فوق الحد (بلا Premium) فلا يُرسل أبداً: افشل فوراً بسبب واضح لا بعد دقيقتين
+    if weighted_len(reply_text) > X_LIMIT:
+        raise ValueError(f"الرد أطول من حد X ({weighted_len(reply_text)}/{X_LIMIT} حرفاً) — اختصره")
 
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
@@ -619,7 +624,9 @@ def reply_to_tweet(
             # Wait until enabled (no eval/CSP-safe). For video replies this matters.
             publish_selectors = ["button[data-testid='tweetButton']",
                                  "button[data-testid='tweetButtonInline']"]
-            _wait_button_enabled(scope, publish_selectors, timeout_ms=120_000)
+            # الميديا (فيديو) تحتاج وقتاً حتى يُفعَّل الزر؛ النص وحده إن لم يُفعَّل خلال 15 ث فلن يُفعَّل
+            enabled = _wait_button_enabled(scope, publish_selectors,
+                                           timeout_ms=120_000 if media_path else 15_000)
 
             # If it never becomes enabled, we'll still attempt the click (X UI can be flaky)
             _click_reply_publish(scope)
@@ -644,7 +651,9 @@ def reply_to_tweet(
                 except Exception:
                     pass
                 raise RuntimeError(
-                    "لم يتم تأكيد إرسال الرد: بقي المحرّر ممتلئاً ولم يظهر تأكيد الإرسال."
+                    "لم يتم تأكيد إرسال الرد: "
+                    + ("زر «ردّ» بقي معطّلاً (رفض X النص — غالباً تجاوز الحد أو محتوى غير مسموح)."
+                       if not enabled else "بقي المحرّر ممتلئاً ولم يظهر تأكيد الإرسال.")
                 )
 
             # انتظار قصير بعد التأكيد

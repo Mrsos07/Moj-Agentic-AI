@@ -42,6 +42,13 @@
   IS the scope, and a visible mask with no editor-dialog means "wait", never "use the page".
   Measured 2026-10-28: the 800 ms settle wasn't enough and replies failed with a mask-intercepted
   click. Test: section 5g3 of `verify_creator.py`. Verified live with a real posted reply.
+- X length limit: `app/x/modules/x_text.py` (`weighted_len` per twitter-text v3: URLs 23, emoji/CJK 2,
+  Arabic 1; `fit` cuts at a sentence end). Over 280 (no Premium) X DISABLES the Reply/Post button,
+  so nothing is ever sent. Measured 2026-10-28: a 3-point reply was 13 over, failing with «بقي
+  المحرّر ممتلئاً». Replies had no length cap at all. Now: a hard ≤240 line in the reply prompt,
+  `fit(…, 270)` before sending (10 margin: our count said 288 where X said 293), and
+  `x_actions.reply_to_tweet` fails fast with a clear message if text over the limit reaches it.
+  `_normalize_post_text` uses the same `fit`. Test: section 5g4 of `verify_creator.py`.
 - Proxy failover (since 2026-10-28): a residential exit node can die mid-session. Seen live:
   `ERR_PROXY_CONNECTION_FAILED` / `ERR_TIMED_OUT` on every proxied read for ~15 min while direct
   sources worked. `captcha_browser.goto` classifies route errors (`proxy_rotation.ROUTE_ERRORS`, or

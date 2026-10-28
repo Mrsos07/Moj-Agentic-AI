@@ -160,17 +160,10 @@ def _normalize_post_text(text: str) -> str:
     # collapse excessive blank lines
     while "\n\n\n" in t:
         t = t.replace("\n\n\n", "\n\n")
-    if len(t) <= 280:
-        return t
-    # قصّ ذكي: فضّل نهاية جملة تامة، وإلا آخر مسافة — دون قطع كلمة في منتصفها
-    cut = t[:279]
-    ends = list(re.finditer(r"[\.!\?؟…]", cut))
-    if ends and ends[-1].end() >= 140:
-        return cut[: ends[-1].end()].strip()
-    sp = cut.rfind(" ")
-    if sp >= 140:
-        return cut[:sp].rstrip() + "…"
-    return cut.rstrip() + "…"
+    # قصّ ذكي بطول X الفعلي (الإيموجي حرفان، الرابط 23): نهاية جملة تامة وإلا آخر مسافة
+    from app.x.modules.x_text import fit
+
+    return fit(t)
 
 
 #: عبارات القوالب الميتة التي تجعل المنشور يبدو آلياً بلا مضمون. وجود أيّ منها
@@ -783,6 +776,9 @@ class ReplyToUserCapability(ICapability):
                 if brief else
                 "- جملة إلى ثلاث جمل كحد أقصى، بلا هاشتاقات، وإيموجي واحد كحد أقصى.\n"
             )
+            # حد X الصارم يعلو أي أسلوب (بصمة/نقاط مرقّمة من النقد الذاتي): رد 3 نقاط تجاوز 280
+            # بـ13 حرفاً فعطّل X زر الرد (قيس 2026-10-28)
+            length_line += "- الحد الصارم: أقل من 240 حرفاً شاملاً المسافات والترقيم — لا قوائم مرقّمة طويلة في الرد.\n"
             voice_reply = ""
             if vp:
                 voice_reply = "\n" + (voice_profile.voice_block(vp, "reply") + "\n" + plan["block"]
@@ -862,13 +858,15 @@ class ReplyToUserCapability(ICapability):
         if _vp.copies_exemplar(reply_text, _vp.get(context.config)):
             return CapabilityResult.fail(
                 "الرد نسخة شبه حرفية من رد حقيقي للحساب المستنسخ — لا يُنشر", self.name)
-        # حدّ صارم للطول في وضع الاختصار الشديد
-        if brief and len(reply_text) > 160:
-            reply_text = reply_text[:157].rstrip() + "..."
+        from app.x.modules.x_text import fit
+
         if request.params.get("hashtag"):
             from ..employee.trend_intel import ensure_hashtag
 
             reply_text = ensure_hashtag(reply_text, request.params["hashtag"])
+        # حد X بالطول الفعلي (وأقصر في وضع الاختصار الشديد): نص أطول يعطّل زر «ردّ» فلا يُرسل أبداً.
+        # هامش 10: عدّنا للرد الفاشل 288 بينما أظهر X ‎-13 (293) — لا نراهن على تطابق العدّ حرفياً
+        reply_text = fit(reply_text, 150 if brief else 270)
 
         res = context.mcp.call(MCPRequest(
             employee_id=context.config.id, tool="reply",
