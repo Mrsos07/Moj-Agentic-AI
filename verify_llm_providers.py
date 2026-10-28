@@ -276,6 +276,84 @@ check("تغيّر مفتاح التشفير ← المفاتيح القديمة 
 UL._vault = _real_vault
 UL.invalidate(A)
 
+print("6b) OpenRouter من الشات: قائمته نفسها، وعلى رصيد النظام للمدير/المطوّر فقط")
+FAKE_OR = [
+    {"id": "anthropic/claude-sonnet-4.5", "name": "Anthropic: Claude Sonnet 4.5", "context": 1000000,
+     "price_in": 3.0, "price_out": 15.0, "free": False},
+    {"id": "google/gemini-2.5-flash", "name": "Google: Gemini 2.5 Flash", "context": 1048576,
+     "price_in": 0.3, "price_out": 2.5, "free": False},
+    {"id": "openai/gpt-4o-mini", "name": "OpenAI: GPT-4o-mini", "context": 128000,
+     "price_in": 0.15, "price_out": 0.6, "free": False},
+]
+_real_catalog = CAT.openrouter_catalog
+CAT.openrouter_catalog = lambda force=False: FAKE_OR
+C, HC = _user("dev@t.local")
+db = DB.SessionLocal()
+from app.auth.roles import set_role  # noqa: E402
+
+set_role(db.query(M.User).get(C), "developer")
+db.commit()
+db.close()
+UL.invalidate(C)
+UL.invalidate(B)
+try:
+    if SYSTEM.provider == "openrouter":
+        vb = client.get("/api/llm/providers", headers=HB).json()
+        orb = next(p for p in vb["providers"] if p["id"] == "openrouter")
+        check("مستخدم عادي بلا مفتاح: لا رصيد نظام ولا OpenRouter", not vb["system_models"] and not orb["connected"])
+        check("ولا يرى قائمة OpenRouter (400)", client.get("/api/llm/openrouter/models", headers=HB).status_code == 400)
+        r = client.put("/api/llm/selection/chat", headers=HB, json={"provider": "openrouter",
+                                                                     "model": "anthropic/claude-sonnet-4.5"})
+        check("ولا يختار نموذجاً على رصيد النظام (400)", r.status_code == 400, r.text[:120])
+
+        vc = client.get("/api/llm/providers", headers=HC).json()
+        orc = next(p for p in vc["providers"] if p["id"] == "openrouter")
+        check("المطوّر: OpenRouter متاح على رصيد النظام بلا مفتاح", vc["system_models"] and orc["connected"]
+              and orc["via_system"] and not orc["has_key"])
+        lst = client.get("/api/llm/openrouter/models", headers=HC).json()
+        check("القائمة الغنية: اسم وسعر وسياق", lst["via_system"] and lst["models"][0]["price_out"] == 15.0
+              and lst["models"][0]["context"] == 1000000)
+        r = client.put("/api/llm/selection/chat", headers=HC, json={"provider": "openrouter",
+                                                                     "model": "anthropic/claude-sonnet-4.5"})
+        check("يختار نموذجاً من القائمة", r.status_code == 200 and r.json()["model"] == "anthropic/claude-sonnet-4.5")
+        r = client.put("/api/llm/selection/chat", headers=HC, json={"provider": "openrouter", "model": "made/up-model"})
+        check("نموذج خارج القائمة (أو بلا أدوات) ← 400", r.status_code == 400, r.text[:120])
+        ep = resolve_llm(user_id=C, purpose="chat")
+        check("الشات يذهب للنموذج المختار بمفتاح النظام وعنوانه",
+              ep.model == "anthropic/claude-sonnet-4.5" and ep.api_key == SYSTEM.api_key
+              and ep.base_url == SYSTEM.base_url and ep.provider == "openrouter", (ep.model, ep.provider))
+        check("الموظفون يبقون على إعداد النظام (اختيار مستقل)",
+              resolve_llm(user_id=C, purpose="employee").model == SYSTEM.model)
+
+        from app.aeos.services.orchestrator import TOOLS, _Tools  # noqa: E402
+
+        check("أداة المنسّق chat_model مسجّلة", any(t["function"]["name"] == "chat_model" for t in TOOLS))
+        tools = _Tools(C)
+        found = tools.chat_model({"action": "search", "query": "gemini flash"})
+        check("من الشات: بحث «gemini flash» يجد النموذج", found["count"] == 1
+              and found["models"][0]["id"] == "google/gemini-2.5-flash", found)
+        res = tools.chat_model({"action": "set", "model": "google/gemini-2.5-flash"})
+        check("من الشات: set يغيّر نموذج الشات", res["ok"] and resolve_llm(user_id=C).model == "google/gemini-2.5-flash")
+        try:
+            tools.chat_model({"action": "set", "model": "gemini"})
+            ok = False
+        except LookupError:
+            ok = True
+        check("من الشات: اسم غير كامل لا يُحفظ (يجب search أولاً)", ok)
+        check("من الشات: current", tools.chat_model({"action": "current"})["model"] == "google/gemini-2.5-flash")
+        tools.chat_model({"action": "reset"})
+        check("من الشات: reset ← افتراضي النظام", resolve_llm(user_id=C).model == SYSTEM.model)
+        try:
+            _Tools(B).chat_model({"action": "search", "query": "claude"})
+            ok = False
+        except ValueError:
+            ok = True
+        check("أداة الشات تحترم الصلاحية (مستخدم عادي بلا مفتاح)", ok)
+    else:
+        print("  ⚠️ النظام ليس على OpenRouter — تخطّيت فحوص رصيد النظام")
+finally:
+    CAT.openrouter_catalog = _real_catalog
+
 if "--live" in sys.argv:
     print("7) فحص حي (مفاتيح .env، بلا حفظ في القاعدة الحقيقية)")
     from dotenv import dotenv_values

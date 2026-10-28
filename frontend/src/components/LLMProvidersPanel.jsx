@@ -141,7 +141,7 @@ export default function LLMProvidersPanel() {
             <div className="flex items-center justify-between gap-2">
               <p className="font-semibold text-sm text-text-primary-light dark:text-text-primary-dark">{p.label}</p>
               <span className={`text-[11px] px-2 py-0.5 rounded-full ${p.connected ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-100 text-gray-500 dark:bg-gray-800'}`}>
-                {p.connected ? (p.has_key ? `مربوط ••••${p.key_last4}` : 'متاح') : p.id === 'openrouter' ? 'إعداد النظام' : 'غير مربوط'}
+                {p.connected ? (p.has_key ? `مربوط ••••${p.key_last4}` : p.via_system ? 'رصيد النظام — كل نماذجه' : 'متاح') : p.id === 'openrouter' ? 'إعداد النظام' : 'غير مربوط'}
               </span>
             </div>
             {p.note && <p className={muted}>{p.note}</p>}

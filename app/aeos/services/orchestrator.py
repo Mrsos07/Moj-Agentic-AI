@@ -379,6 +379,21 @@ TOOLS: List[Dict[str, Any]] = [
         }, "required": ["employee", "action"]},
     }},
     {"type": "function", "function": {
+        "name": "chat_model",
+        "description": ("نموذج الذكاء الاصطناعي الذي يجيب المالك في الشات (أو دورات الموظفين): "
+                        "current (الحالي)، search (ابحث في قائمة OpenRouter باسم/شركة مثل claude أو "
+                        "gemini flash، يعيد الأسماء والأسعار)، set (اختر نموذجاً بمعرّفه الكامل من نتيجة "
+                        "search، مثل anthropic/claude-sonnet-4.5)، reset (الرجوع لافتراضي النظام). "
+                        "إن طابق الطلب أكثر من نموذج فاعرض الخيارات واسأل قبل set."),
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["current", "search", "set", "reset"]},
+            "query": {"type": "string", "description": "للبحث: اسم أو جزء منه"},
+            "model": {"type": "string", "description": "لـ set: المعرّف الكامل من نتيجة search"},
+            "purpose": {"type": "string", "enum": ["chat", "employee"],
+                        "description": "chat افتراضياً؛ employee لنموذج دورات الموظفين"},
+        }, "required": ["action"]},
+    }},
+    {"type": "function", "function": {
         "name": "control_employee",
         "description": ("تحكّم بتشغيل موظف: activate (تفعيل، ويُنشئ موظفاً لحساب مضاف إن لم "
                         "يكن موظفاً بعد)، pause (إيقاف)، run_cycle (دورة عمل فورية)."),
@@ -715,6 +730,41 @@ class _Tools:
         self._mark(cfg)
         return {"started": True, "employee": cfg.account_username, "target": f"@{target}",
                 "note": "استنساخ عميق يجري في الخلفية (3-5 دقائق)؛ النتيجة تصل للشات."}
+
+    def chat_model(self, args):
+        """تغيير النموذج من الشات نفسه: بحث في قائمة OpenRouter ثم اختيار. يسري من الرسالة التالية."""
+        from app.core import llm_catalog as CAT
+        from app.services import user_llm as UL
+
+        if not self.user_id:
+            raise PermissionError("يلزم تسجيل الدخول")
+        action = str(args.get("action") or "current")
+        purpose = "employee" if args.get("purpose") == "employee" else "chat"
+        if action == "current":
+            sel = UL.public_view(self.user_id)[purpose]
+            return {"purpose": purpose, "provider": sel["provider"] or "system",
+                    "model": sel["model"] or "افتراضي النظام"}
+        if action == "reset":
+            UL.set_selection(self.user_id, purpose, "", "")
+            return {"ok": True, "purpose": purpose, "model": "افتراضي النظام",
+                    "note": "يسري من رسالتك التالية"}
+        if action == "search":
+            catalog = UL.openrouter_models(self.user_id)["models"]
+            words = [w for w in re.split(r"[\s/:_\-.]+", str(args.get("query") or "").lower()) if w]
+            hits = [m for m in catalog
+                    if all(w in (m["id"] + " " + m["name"]).lower() for w in words)] if words else catalog
+            return {"count": len(hits), "models": [
+                {"id": m["id"], "name": m["name"], "context": m["context"],
+                 "usd_per_1M_in": m["price_in"], "usd_per_1M_out": m["price_out"], "free": m["free"]}
+                for m in hits[:12]]}
+        if action == "set":
+            model = str(args.get("model") or "").strip()
+            ids = {m["id"] for m in CAT.openrouter_catalog()}
+            if model not in ids:
+                raise LookupError(f"«{model}» ليس معرّفاً في قائمة OpenRouter — استخدم search أولاً")
+            sel = UL.set_selection(self.user_id, purpose, "openrouter", model)
+            return {"ok": True, "purpose": purpose, **sel, "note": "يسري من رسالتك التالية"}
+        raise ValueError(f"إجراء غير مدعوم: {action}")
 
     def web_search(self, args):
         from . import tools_service as TS

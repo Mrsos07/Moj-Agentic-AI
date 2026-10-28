@@ -85,6 +85,16 @@
   stay on the system endpoint. Ollama's URL is server config (`OLLAMA_BASE_URL`), never user
   input (SSRF). Catalog: `app/core/llm_catalog.py`; service: `app/services/user_llm.py`; API:
   `/api/llm/*`; test: `verify_llm_providers.py [--live]`.
+- **Picking any OpenRouter model from the chat** (since 2026-10-28). `llm_catalog.openrouter_catalog()`
+  reads OpenRouter's own public `GET /models` (no key, cached 1 h) and keeps ONLY chat models
+  whose `supported_parameters` include `tools`, because the coordinator manages employees through
+  tool calls (owner decision; 390 of 456 models). Each item has name, $/1M in/out, context and free.
+  Admin/developer (`llm.system_models` permission) may pick any of them on the SYSTEM key
+  (`via_system`, `_system_openrouter()`); a normal user needs their own key, so nobody drains the
+  system credit with an expensive model. `set_selection` rejects ids not in that list. Ways to change it:
+  the chat header `ChatModelPicker` (search box + prices), `GET /api/llm/openrouter/models`, and the
+  coordinator tool `chat_model` (current/search/set/reset; `set` needs a full id from `search`).
+  The change applies from the next message. Test: section 6b of `verify_llm_providers.py`.
 - OpenRouter wins whenever `OPENROUTER_API_KEY` is set; OpenAI is the fallback.
   Both use the same `openai` package — only `base_url` and the model name differ.
 - **Model names must be provider-qualified**: `openai/gpt-4o-mini`, not `gpt-4`.
