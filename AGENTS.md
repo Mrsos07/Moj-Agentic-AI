@@ -35,6 +35,13 @@
   Waiting never fixes it; clicking Try again (≤3) does. Measured 2026-10-26: one whole cycle did
   nothing because timeline, trends and specialty search each burned 45 s on that screen. The
   account itself was fine (HomeTimeline 200, rate limit 499/500). Test: section 5g2 of `verify_creator.py`.
+- Reply composer (`x_actions._reply_scope` / `_open_reply_composer`): a tweet page has TWO
+  `tweetTextarea_0` (inline `inline_reply_offscreen` + the reply modal). The modal's mask covers
+  the page immediately, but the `[aria-modal]` dialog stays 0 px high until its content loads (slow
+  over the proxy). So never require the dialog to be `is_visible()`: a dialog that contains the editor
+  IS the scope, and a visible mask with no editor-dialog means "wait", never "use the page".
+  Measured 2026-10-28: the 800 ms settle wasn't enough and replies failed with a mask-intercepted
+  click. Test: section 5g3 of `verify_creator.py`. Verified live with a real posted reply.
 - Proxy failover (since 2026-10-28): a residential exit node can die mid-session. Seen live:
   `ERR_PROXY_CONNECTION_FAILED` / `ERR_TIMED_OUT` on every proxied read for ~15 min while direct
   sources worked. `captcha_browser.goto` classifies route errors (`proxy_rotation.ROUTE_ERRORS`, or

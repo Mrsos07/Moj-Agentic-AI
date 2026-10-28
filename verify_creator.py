@@ -688,6 +688,58 @@ def check_x_error_screen_recovery() -> None:
     check("وإن لم تُشفَ: فشل واضح بسببه بعد 3 محاولات (لا ضغط بلا حد)", ok)
 
 
+def check_reply_modal_race() -> None:
+    """مودال الرد: القناع يغطي الصفحة فوراً والمودال ارتفاعه 0 حتى يُحمَّل محتواه (قيس 2026-10-28
+    عبر البروكسي). كان النطاق يُعاد «الصفحة» فيُنقر المحرّر المضمّن خلف القناع ← Timeout 30 ث."""
+    from app.x.modules import x_actions as XA
+
+    class _L:
+        def __init__(self, page, sel, inside=None):
+            self.page, self.sel, self.inside = page, sel, inside
+
+        first = property(lambda self: self)
+        last = property(lambda self: self)
+
+        def locator(self, sel):
+            return _L(self.page, sel, inside=self.sel)
+
+        def _present(self):
+            st = self.page.st
+            if self.sel == "#layers [data-testid='mask']":
+                return st["mask"]
+            if self.sel.startswith("div[role='dialog']"):
+                return st["dialog_tb"]
+            if self.sel == XA._REPLY_TB:
+                return st["dialog_tb"] if self.inside else (st["dialog_tb"] or st["inline_tb"])
+            return False
+
+        def count(self):
+            return 1 if self._present() else 0
+
+        def is_visible(self):
+            if self.sel.startswith("div[role='dialog']"):
+                return False                     # ارتفاع 0 أثناء التحميل
+            return self._present()
+
+    class _P:
+        def __init__(self, **st):
+            self.st = st
+
+        def locator(self, sel):
+            return _L(self, sel)
+
+    p = _P(mask=True, dialog_tb=True, inline_tb=True)
+    scope = XA._reply_scope(p)
+    check("مودال ارتفاعه 0 لكن محرّره موجود ← النطاق هو المودال لا الصفحة",
+          scope is not p and getattr(scope, "sel", "").startswith("div[role='dialog']"))
+    p = _P(mask=True, dialog_tb=False, inline_tb=True)
+    check("قناع مودال بلا محرّر بعد ← لا يُختار المحرّر المضمّن خلف القناع",
+          XA._reply_scope(p) is p and XA._modal_layer_open(p))
+    p = _P(mask=False, dialog_tb=False, inline_tb=True)
+    check("بلا مودال ← المحرّر المضمّن تحت التغريدة (سلوك صحيح)",
+          XA._reply_scope(p) is p and not XA._modal_layer_open(p))
+
+
 def check_emotion_comes_from_graph_memory() -> None:
     """الحالة العاطفية يجب أن تُبنى على حقائق الذاكرة المعرفية لا على التعليمات."""
     from app.aeos.cognition.phases import EmotionPhase
@@ -1251,6 +1303,8 @@ def main() -> int:
     check_no_false_success_on_status_page()
     print("\n=== 5g2) شاشة خطأ X تُشفى تلقائياً ===")
     check_x_error_screen_recovery()
+    print("\n=== 5g3) سباق مودال الرد (القناع قبل المودال) ===")
+    check_reply_modal_race()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")
