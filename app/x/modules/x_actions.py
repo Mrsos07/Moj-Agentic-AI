@@ -250,22 +250,37 @@ def _reply_scope(page):
     بنية DOM المقيسة: ``#layers > [role=dialog]`` (ارتفاعه 0 فـ``is_visible`` خاطئ) ``> [role=group]
     > [role=dialog][aria-modal=true]`` (المودال الفعلي)، والمحرّر المضمّن
     ``inline_reply_offscreen`` يسبقه في ترتيب DOM — لذا المودال الداخلي تحديداً.
+
+    لا يُشترط ظهور المودال نفسه: قيس 2026-10-28 أن القناع يغطي الصفحة فوراً بينما المودال
+    ارتفاعه 0 حتى يُحمَّل محتواه (أبطأ عبر البروكسي)، فكان ``is_visible`` خاطئاً فيُعاد نطاق
+    الصفحة والمحرّر المضمّن خلف القناع ← نفس Timeout. وجود المحرّر داخله يكفي.
     """
     for sel in (f"div[role='dialog'][aria-modal='true']:has({_REPLY_TB})",
                 f"div[role='dialog']:has({_REPLY_TB})"):
         dlg = page.locator(sel).last
         try:
-            if dlg.count() and dlg.is_visible():
+            if dlg.count():
                 return dlg
         except Exception:
             pass
     return page
 
 
+def _modal_layer_open(page) -> bool:
+    """قناع طبقة مودال يغطي الصفحة (#layers [data-testid=mask]) — لا نقر على الصفحة خلفه."""
+    try:
+        mask = page.locator("#layers [data-testid='mask']")
+        return bool(mask.count() and mask.first.is_visible())
+    except Exception:
+        return False
+
+
 def _open_reply_composer(page, tweet_url: str, timeout_ms: int = 30_000):
     """افتح محرّر الرد للتغريدة المستهدفة وأعد نطاقه (المودال أو الصفحة)."""
     def ready():
         scope = _reply_scope(page)
+        if scope is page and _modal_layer_open(page):
+            return None                  # مودال يُفتح ولم يظهر محرّره بعد: انتظر، لا الصفحة خلفه
         tb = scope.locator(_REPLY_TB)
         try:
             return scope if (tb.count() and tb.first.is_visible()) else None
@@ -275,6 +290,10 @@ def _open_reply_composer(page, tweet_url: str, timeout_ms: int = 30_000):
     scope = ready()
     if scope is not None:
         return scope
+    if _modal_layer_open(page) and _reply_scope(page) is page:
+        # مودال آخر بلا محرّر (إعلان/تنبيه من X) يحجب زر الرد: أغلقه أولاً
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(600)
     # زر الرد في التغريدة المستهدفة نفسها: صفحة الرد تعرض الأصل فوقها، وأول زر في
     # الصفحة كان قد يفتح الرد على تغريدة أخرى
     try:
@@ -570,7 +589,16 @@ def reply_to_tweet(
             # كل ما يلي داخل نطاق محرّر واحد (المودال أو المضمّن) — انظر _reply_scope
             scope = _open_reply_composer(page, tweet_url)
             tb = scope.locator(_REPLY_TB).first
-            tb.click()
+            try:
+                tb.click(timeout=10_000)
+            except Exception:
+                # حُجب النقر (مودال انفتح بعد اختيار النطاق): أعد تحديد المحرّر ثم ركّز بلا نقر
+                scope = _open_reply_composer(page, tweet_url)
+                tb = scope.locator(_REPLY_TB).first
+                try:
+                    tb.click(timeout=10_000)
+                except Exception:
+                    tb.focus()
             try:
                 tb.fill(reply_text)
             except Exception:
