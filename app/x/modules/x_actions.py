@@ -237,17 +237,98 @@ def _success_toast_sent(page) -> bool:
         return False
 
 
-def _reply_submitted(page, filled_text: str = "", timeout_ms: int = 20_000) -> bool:
+_REPLY_TB = "div[data-testid='tweetTextarea_0']"
+
+
+def _reply_scope(page):
+    """نطاق محرّر الرد: مودال الرد إن انفتح، وإلا الصفحة (المحرّر المضمّن تحت التغريدة).
+
+    صفحة التغريدة فيها محرّر رد مضمّن، وزر «رد» يفتح مودالاً بمحرّر ثانٍ بنفس
+    ``data-testid``. البحث على مستوى الصفحة بـ``.first`` كان يلتقط المضمّن خلف قناع
+    المودال: «mask ... intercepts pointer events» ثم Timeout، أو يُكتب النص في المودال
+    ويُضغط زر الصفحة فيبقى المحرّر ممتلئاً (قيس 2026-10-25 بلقطة debug_reply.png).
+    بنية DOM المقيسة: ``#layers > [role=dialog]`` (ارتفاعه 0 فـ``is_visible`` خاطئ) ``> [role=group]
+    > [role=dialog][aria-modal=true]`` (المودال الفعلي)، والمحرّر المضمّن
+    ``inline_reply_offscreen`` يسبقه في ترتيب DOM — لذا المودال الداخلي تحديداً.
+    """
+    for sel in (f"div[role='dialog'][aria-modal='true']:has({_REPLY_TB})",
+                f"div[role='dialog']:has({_REPLY_TB})"):
+        dlg = page.locator(sel).last
+        try:
+            if dlg.count() and dlg.is_visible():
+                return dlg
+        except Exception:
+            pass
+    return page
+
+
+def _open_reply_composer(page, tweet_url: str, timeout_ms: int = 30_000):
+    """افتح محرّر الرد للتغريدة المستهدفة وأعد نطاقه (المودال أو الصفحة)."""
+    def ready():
+        scope = _reply_scope(page)
+        tb = scope.locator(_REPLY_TB)
+        try:
+            return scope if (tb.count() and tb.first.is_visible()) else None
+        except Exception:
+            return None
+
+    scope = ready()
+    if scope is not None:
+        return scope
+    # زر الرد في التغريدة المستهدفة نفسها: صفحة الرد تعرض الأصل فوقها، وأول زر في
+    # الصفحة كان قد يفتح الرد على تغريدة أخرى
+    try:
+        focal_tweet(page, tweet_url).locator("[data-testid='reply']").first.click(timeout=10_000)
+    except Exception:
+        _click_first_visible(page, ["div[data-testid='reply']", "button[data-testid='reply']"],
+                             timeout_ms=timeout_ms)
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        if ready() is not None:
+            page.wait_for_timeout(800)  # حركة فتح المودال: «element is not stable» ثم إعادة تركيب
+            scope = ready()
+            if scope is not None:
+                return scope
+        page.wait_for_timeout(300)
+    raise RuntimeError("لم ينفتح محرّر الرد على التغريدة.")
+
+
+def _click_reply_publish(scope) -> None:
+    """زر نشر الرد داخل نطاق المحرّر نفسه (tweetButton في المودال، tweetButtonInline في الصفحة)."""
+    for sel in ("button[data-testid='tweetButton']", "button[data-testid='tweetButtonInline']"):
+        btn = scope.locator(sel)
+        try:
+            if not (btn.count() and btn.first.is_visible()):
+                continue
+        except Exception:
+            continue
+        btn.first.scroll_into_view_if_needed()
+        try:
+            btn.first.click(timeout=8_000)
+        except Exception:
+            btn.first.click(timeout=8_000, force=True)
+        return
+    raise RuntimeError("لم أجد زر نشر الرد داخل المحرّر.")
+
+
+def _reply_submitted(page, filled_text: str = "", timeout_ms: int = 20_000, scope=None) -> bool:
     """تأكيد فعلي أن الرد أُرسل.
 
     إشارتان موثوقتان بعد الضغط على زر النشر:
       1) ظهور توست نجاح ("Your reply was sent" / "تم إرسال ردك").
-      2) إفراغ/اختفاء محرّر الرد (tweetTextarea_0) بعد أن كان يحوي النص.
+      2) إفراغ/اختفاء محرّر الرد (tweetTextarea_0) بعد أن كان يحوي النص — داخل
+         نطاق المحرّر الذي كُتب فيه (المودال)، لا أول محرّر في الصفحة.
     إن بقي المحرّر ممتلئاً بالنص ولم يظهر توست => الرد لم يُرسل.
+    توست خطأ صريح من X (تكرار/حد) يُرفع استثناءً بنصه بدل «لم يتأكد».
     """
+    from .x_post import _error_toast_text
+
     deadline = time.time() + (timeout_ms / 1000.0)
-    tb = page.locator("div[data-testid='tweetTextarea_0']")
+    tb = (scope if scope is not None else page).locator(_REPLY_TB)
     while time.time() < deadline:
+        err = _error_toast_text(page)
+        if err:
+            raise RuntimeError(f"رفض X نشر الرد: {err}")
         if _success_toast_sent(page):
             return True
         try:
@@ -486,63 +567,50 @@ def reply_to_tweet(
         try:
             _goto_tweet(page, tweet_url)
 
-            # Open reply composer (if needed)
-            reply_btn_selectors = [
-                "div[data-testid='reply']",
-                "button[data-testid='reply']",
-                "div[role='button'][data-testid='reply']",
-                "[aria-label*='Reply']",
-                "[aria-label*='رد']",
-            ]
-            # If textbox already visible, skip clicking reply
-            textbox = page.locator("div[data-testid='tweetTextarea_0']")
-            if not (textbox.count() and textbox.first.is_visible()):
-                _click_first_visible(page, reply_btn_selectors, timeout_ms=30_000)
-
-            # Textbox
-            tb = page.locator("div[data-testid='tweetTextarea_0'][role='textbox']")
-            if not tb.count():
-                tb = page.locator("div[data-testid='tweetTextarea_0']")
-            tb.first.wait_for(state="visible", timeout=60_000)
-            tb.first.click()
+            # كل ما يلي داخل نطاق محرّر واحد (المودال أو المضمّن) — انظر _reply_scope
+            scope = _open_reply_composer(page, tweet_url)
+            tb = scope.locator(_REPLY_TB).first
+            tb.click()
             try:
-                tb.first.fill(reply_text)
+                tb.fill(reply_text)
             except Exception:
-                tb.first.press("Control+A")
-                
+                tb.press("Control+A")
+                tb.type(reply_text, delay=10)
+            if not (tb.inner_text() or "").strip():
+                tb.type(reply_text, delay=10)
 
             # Attach media (optional) for reply
             if media_path and str(media_path).strip():
-                scope = _get_scope(page)
                 file_input = _pick_file_input(scope)
                 if file_input is None:
                     raise RuntimeError("Could not find file input for reply composer.")
                 file_input.wait_for(state="attached", timeout=60_000)
                 file_input.set_input_files(media_path)
                 _wait_media_uploaded_in_composer(page, timeout_ms=media_timeout_ms)
-            
-            
-            # Publish reply: tweetButtonInline preferred
-            publish_selectors = [
-                "button[data-testid='tweetButtonInline']",
-                "button[data-testid='tweetButton']",
-                # fallback by visible text (EN/AR)
-                "button:has-text('Reply')",
-                "button:has-text('رد')",
-                "button:has-text('نشر')",
-                "button:has-text('Post')",
-            ]
 
             # Wait until enabled (no eval/CSP-safe). For video replies this matters.
-            scope = _get_scope(page)
-            _wait_button_enabled(scope, ["button[data-testid='tweetButtonInline']", "button[data-testid='tweetButton']", "button:has-text('Reply')", "button:has-text('رد')", "button:has-text('نشر')", "button:has-text('Post')"], timeout_ms=120_000)
+            publish_selectors = ["button[data-testid='tweetButton']",
+                                 "button[data-testid='tweetButtonInline']"]
+            _wait_button_enabled(scope, publish_selectors, timeout_ms=120_000)
 
             # If it never becomes enabled, we'll still attempt the click (X UI can be flaky)
-            _click_first_visible(page, publish_selectors, timeout_ms=30_000)
+            _click_reply_publish(scope)
             page.wait_for_timeout(1500)
 
-            # تأكيد فعلي أن الرد أُرسل قبل اعتبار العملية ناجحة (يمنع النجاح الكاذب).
-            if not _reply_submitted(page, filled_text=reply_text, timeout_ms=20_000):
+            # تأكيد فعلي أن الرد أُرسل قبل اعتبار العملية ناجحة (يمنع النجاح الكاذب)،
+            # ثم فولباك Ctrl+Enter كالنشر والاقتباس (محرّر X يتجاهل النقر البرمجي أحياناً).
+            sent = _reply_submitted(page, filled_text=reply_text, timeout_ms=15_000, scope=scope)
+            if not sent:
+                try:
+                    box = scope.locator(_REPLY_TB)
+                    if box.count() and box.first.is_visible():
+                        box.first.click(timeout=5_000)
+                        page.keyboard.press("Control+Enter")
+                        page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+                sent = _reply_submitted(page, filled_text=reply_text, timeout_ms=10_000, scope=scope)
+            if not sent:
                 try:
                     page.screenshot(path="debug_reply.png", full_page=True)
                 except Exception:

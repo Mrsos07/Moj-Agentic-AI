@@ -37,6 +37,8 @@ proxy_status = _browser.proxy_status
 sync_playwright = _browser.sync_playwright
 launch_browser = _browser.launch_browser
 goto = _browser.goto
+ProxyRouteError = _browser.ProxyRouteError
+with_proxy_failover = _browser.with_proxy_failover
 
 
 def guard(page, log: Optional[Callable[[str], None]] = None) -> None:

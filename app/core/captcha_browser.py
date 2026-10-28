@@ -42,8 +42,10 @@ CaptchaError = _solver.CaptchaError
 def _proxy_module():
     """وحدة تدوير IP المشتركة (تُحمّل بالمسار مثل الحلّال)."""
     name = "moj_proxy_rotation"
-    mod = sys.modules.get(name)
+    # نسخة واحدة فقط: الجلسات الساقطة (mark_bad) حالة في الذاكرة، ونسختان = حالتان متناقضتان
+    mod = sys.modules.get(name) or sys.modules.get("app.core.proxy_rotation")
     if mod is not None:
+        sys.modules.setdefault(name, mod)
         return mod
     spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("proxy_rotation.py"))
     mod = importlib.util.module_from_spec(spec)
@@ -68,7 +70,52 @@ def _stealth_module():
 _stealth = _stealth_module()
 #: نقطة الدخول الوحيدة لمتصفح X: ``with sync_playwright() as p: browser = launch_browser(p, headless)``
 sync_playwright = _stealth.sync_playwright
-goto = _stealth.goto
+
+
+class ProxyRouteError(RuntimeError):
+    """سقط مسار البروكسي في **أول** تنقّل للصفحة — قبل أي فعل على X، فإعادة العملية كاملة
+    بجلسة (IP) جديدة آمنة: لا نشر/رد/إعجاب مكرر."""
+
+
+def goto(page, url: str, **kwargs):
+    """``stealth.goto`` + تبديل IP عند سقوط مسار البروكسي.
+
+    خطأ مسار (ERR_PROXY_CONNECTION_FAILED…، أو مهلة تنقّل) على سياق تدوير ← تُعلَّم جلسة الحساب
+    ساقطة فيأخذ كل ما يليه IP سعودياً آخر. وإن كان أول تنقّل للصفحة يُرفع ``ProxyRouteError``
+    لتعيد ``with_proxy_failover`` العملية مرة واحدة بالجلسة الجديدة.
+    """
+    first = (getattr(page, "url", "") or "about:blank") == "about:blank"
+    try:
+        return _stealth.goto(page, url, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        try:
+            scope = getattr(page.context, "_moj_proxy_scope", None)
+        except Exception:  # noqa: BLE001
+            scope = None
+        rotation = _proxy_module()
+        if scope and (rotation.is_route_error(msg) or "Page.goto: Timeout" in msg):
+            rotation.mark_bad(scope)
+            _stealth._log.warning("proxy route failed for %s (%s) — new Saudi IP for next attempts",
+                                  scope, msg.splitlines()[0][:120])
+            if first:
+                raise ProxyRouteError(f"سقط مسار البروكسي ({msg.splitlines()[0][:160]})") from e
+        raise
+
+
+def with_proxy_failover(fn):
+    """أعد العملية مرة واحدة بIP جديد إن سقط مسار البروكسي قبل أي فعل (``ProxyRouteError``)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ProxyRouteError as e:
+            _stealth._log.warning("%s: %s — إعادة واحدة بIP سعودي جديد", fn.__name__, e)
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 # ── الكشف ───────────────────────────────────────────────────────────────────
@@ -683,4 +730,11 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
             log(f"⚠️ تعذّر تجهيز Cloudflare مسبقاً: {e} — سياق عادي")
     if proxy.startswith("http"):
         kwargs["proxy"] = _proxy_dict(proxy)
-    return browser.new_context(storage_state=storage_state, **kwargs)
+    ctx = browser.new_context(storage_state=storage_state, **kwargs)
+    if rotated:
+        # goto يعرف منه جلسة أي حساب يُبدَّل IPها عند سقوط المسار
+        try:
+            ctx._moj_proxy_scope = scope or "x"
+        except Exception:  # noqa: BLE001
+            pass
+    return ctx

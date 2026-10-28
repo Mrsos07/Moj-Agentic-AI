@@ -267,6 +267,112 @@ with env(**{**BASE_ENV, "PROXY_USERNAME": ""}):
     check("بلا تدوير: launch بلا proxy", CB.launch_proxy_kwargs() == {},
           str(CB.launch_proxy_kwargs()))
 
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n6) سقوط مسار البروكسي ⇒ IP سعودي آخر (قيس 2026-10-28: ERR_PROXY_CONNECTION_FAILED)")
+with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs", "PROXY_PORT": sa.port, "PROXY_CITY": ""}):
+    PR.reset_cache()
+    user = PR.build_url(PR.load_config(), "mojx").split("://", 1)[1].split(":", 1)[0]
+    check("بلا مدينة: كل السعودية (لا -city- في اسم المستخدم)",
+          "-cc-SA-sessid-" in user and "-city-" not in user, user)
+
+    first = PR.acquire("emaad5079")
+    check("نفس النافذة بلا سقوط ⇒ نفس الجلسة", PR.acquire("emaad5079") == first)
+    PR.mark_bad("emaad5079")
+    second = PR.acquire("emaad5079")
+    check("بعد السقوط ⇒ جلسة جديدة (IP آخر)", second and second != first)
+    check("وتثبت لبقية النافذة (لا قفز كل طلب)", PR.acquire("emaad5079") == second)
+    check("حساب آخر لا يتأثر", PR.acquire("other_emp") != second)
+    PR.mark_bad("emaad5079")
+    check("سقوط ثانٍ ⇒ جلسة ثالثة", PR.acquire("emaad5079") not in (first, second))
+
+    for msg, want in (("Page.goto: net::ERR_PROXY_CONNECTION_FAILED at https://x.com", True),
+                      ("net::ERR_TUNNEL_CONNECTION_FAILED", True), ("net::ERR_TIMED_OUT", True),
+                      ("Locator.click: Timeout 30000ms exceeded", False),
+                      ("net::ERR_NAME_NOT_RESOLVED", False)):
+        check(f"تصنيف: {msg[:44]} ⇒ {'مسار بروكسي' if want else 'ليس مسار'}",
+              PR.is_route_error(msg) is want)
+
+with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs", "PROXY_ROTATE": "request"}):
+    check("per-request: لا جلسة بديلة (كل طلب IP جديد أصلاً)", PR.mark_bad("e") is None)
+
+
+class _Ctx:
+    _moj_proxy_scope = "emaad5079"
+
+
+class _Page:
+    def __init__(self, url, fail_with):
+        self.url, self.fail_with, self.context = url, fail_with, _Ctx()
+
+    def goto(self, url, **kw):
+        raise RuntimeError(self.fail_with)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+with env(**{**BASE_ENV, "PROXY_PROVIDER": "oxylabs", "PROXY_PORT": sa.port}):
+    PR.reset_cache()
+    before = PR.acquire("emaad5079")
+    try:
+        CB.goto(_Page("about:blank", "Page.goto: net::ERR_PROXY_CONNECTION_FAILED at https://x.com"),
+                "https://x.com/home")
+        kind = ""
+    except Exception as e:  # noqa: BLE001
+        kind = type(e).__name__
+    check("أول تنقّل يسقط مساره ⇒ ProxyRouteError (إعادة آمنة)", kind == "ProxyRouteError", kind)
+    check("و goto بدّل جلسة الحساب فوراً", PR.acquire("emaad5079") != before)
+
+    mid = PR.acquire("emaad5079")
+    try:
+        CB.goto(_Page("https://x.com/home", "net::ERR_TIMED_OUT"), "https://x.com/notifications")
+        kind = ""
+    except Exception as e:  # noqa: BLE001
+        kind = type(e).__name__
+    check("تنقّل بعد أول صفحة ⇒ الخطأ الأصلي (لا إعادة قد تكرر فعلاً)", kind == "RuntimeError", kind)
+    check("لكن الجلسة تُبدَّل للعملية القادمة", PR.acquire("emaad5079") != mid)
+
+    stable = PR.acquire("emaad5079")
+    try:
+        CB.goto(_Page("about:blank", "Locator.wait_for: Timeout 45000ms"), "https://x.com/home")
+    except Exception:  # noqa: BLE001
+        pass
+    check("خطأ ليس من مسار البروكسي لا يبدّل IP", PR.acquire("emaad5079") == stable)
+
+    calls = []
+
+    @CB.with_proxy_failover
+    def _op():
+        calls.append(PR.acquire("emaad5079"))
+        if len(calls) == 1:
+            PR.mark_bad("emaad5079")
+            raise CB.ProxyRouteError("سقط مسار البروكسي")
+        return "ok"
+
+    check("with_proxy_failover: إعادة واحدة بجلسة جديدة ثم نجاح",
+          _op() == "ok" and len(calls) == 2 and calls[0] != calls[1], str(len(calls)))
+
+    @CB.with_proxy_failover
+    def _always():
+        calls.append(1)
+        raise CB.ProxyRouteError("ما زال ساقطاً")
+
+    calls.clear()
+    try:
+        _always()
+        raised = False
+    except CB.ProxyRouteError:
+        raised = True
+    check("ولا تكرار بلا حد: محاولتان ثم الخطأ", raised and len(calls) == 2, str(len(calls)))
+
+import inspect  # noqa: E402
+
+from app.x.modules import sync_bridge  # noqa: E402
+
+check("كل أفعال X (sync_safe) محمية بالإعادة", "with_proxy_failover" in inspect.getsource(sync_bridge.sync_safe))
+_px_src = open(os.path.join(ROOT, "system", "mcps", "playwright_x", "server.py"), encoding="utf-8").read()
+check("كل قراءات X الست محمية بالإعادة", _px_src.count("@_failover") == 6)
+
 sa.stop()
 us.stop()
 

@@ -16,6 +16,40 @@
 - Windows console is cp1252 by default; set `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`
   before running scripts that print Arabic, otherwise they crash with a
   `charmap` codec error.
+- `.env` must be UTF-8. Saved as UTF-16 (BOM `FF FE`, e.g. by PowerShell `>`/Notepad) it
+  crashes `load_dotenv` in `app/main.py` with `UnicodeDecodeError ... 0xff` and the runner
+  restarts the worker forever.
+- Local services on a fresh machine:
+  - **Neo4j** (graph memory): `.\venv\Scripts\python.exe scripts\install_neo4j.py` — installs
+    pinned JDK 21 + Neo4j 5.26 LTS into `%LOCALAPPDATA%\Moj-Agentic-AI` (SHA-256 checked), sets
+    the initial password and verifies bolt. After that `neo4j_service.ensure_neo4j()` autostarts it.
+    Without it: `Neo4j autostart: install missing` and the employee has no emotional state.
+  - **Redis** (session cache, optional): Docker container
+    `docker run -d --name moj-redis --restart unless-stopped -p 127.0.0.1:6379:6379 -v moj-redis-data:/data redis:7.4.10-alpine redis-server --appendonly yes`.
+    It only runs while Docker Desktop runs. `RedisClient` caches a failed connect for the
+    whole process, so start Redis before `run.py`, or restart the app.
+  - **loginx** needs `uiautomator2` (in requirements.txt). Without it the server dies at startup with `ModuleNotFoundError`.
+- X reads (timeline/trends/search/profile) must wait via `playwright_x/server.py::_wait_cards`,
+  never a bare `locator.wait_for`. Through the residential proxy X sometimes fails to load its
+  vendor JS (`?failedScript=vendor`) and shows «Something went wrong, but don't fret… Try again».
+  Waiting never fixes it; clicking Try again (≤3) does. Measured 2026-10-26: one whole cycle did
+  nothing because timeline, trends and specialty search each burned 45 s on that screen. The
+  account itself was fine (HomeTimeline 200, rate limit 499/500). Test: section 5g2 of `verify_creator.py`.
+- Proxy failover (since 2026-10-28): a residential exit node can die mid-session. Seen live:
+  `ERR_PROXY_CONNECTION_FAILED` / `ERR_TIMED_OUT` on every proxied read for ~15 min while direct
+  sources worked. `captcha_browser.goto` classifies route errors (`proxy_rotation.ROUTE_ERRORS`, or
+  a `Page.goto` timeout) on a rotated context (`ctx._moj_proxy_scope`). It then calls `mark_bad(scope)`,
+  so the rest of the window uses a NEW Saudi session. On the page's FIRST navigation (nothing done on X yet)
+  it raises `ProxyRouteError`, and `with_proxy_failover` retries the whole operation once. That wrapper is
+  applied in `sync_bridge.sync_safe` (all X actions) and `@_failover` on the 6 playwright_x readers.
+  A later-navigation error is NOT retried (it could duplicate an action), only rotated.
+  `proxy_rotation` must exist as ONE module instance (it's registered under both names), otherwise
+  the rotation state splits in two. `PROXY_CITY` is empty = all of Saudi Arabia (owner decision; the
+  Riyadh-only pool kept dropping). Test: section 6 of `verify_proxy_rotation.py`.
+- Port 8000 can be taken by another desktop app (measured: Beem, an Electron app with `--inspect=8000`).
+  The bind then fails with `WinError 10013`, and the listener is invisible to `netstat`
+  (psutil sees it, status `NONE`). `run.py::_free_port` uses psutil and kills only `python*`
+  leftovers. Any other owner gets a clear message and exit 1. Never auto-kill another app.
 
 ## The LLM provider is OpenRouter — resolve it ONLY via `resolve_llm()`
 - `app/core/llm_provider.py::resolve_llm()` is the single source of truth for
@@ -870,6 +904,32 @@ independent structural causes — none of them fixable by telling the model to
   so a Google News logo is never attached; a generated image takes over instead.
 - `_image_prompt()` keeps one visual style (`image_style`) for brand consistency
   and forbids text in the image (Arabic renders garbled in image models).
+
+## unslop: no AI-sounding writing, for every employee (since 2026-10-26)
+- Upstream skill https://github.com/theclaymethod/unslop (MIT) is vendored UNCHANGED in
+  `system/skills/unslop/` (coordinator skill; commit pinned in `UPSTREAM.md`). Don't edit it.
+  Its own AGENTS.md/CLAUDE.md rules (eval-first) apply only to the upstream repo.
+- **Its scanners are English-only** and decline other languages. Measured: an English AI
+  paragraph gave 4 flags, and the same text in Arabic gave 0. So `app/aeos/employee/unslop.py` has two layers:
+  - English → the upstream `scripts/banned_phrase_scan.py` (`scan_for_violations`), loaded via
+    `system_loader`. sys.path is restored after loading so its scripts can't shadow packages.
+  - Arabic → a pattern table built on unslop's own categories. Following unslop, patterns are
+    contextual, not word bans: «يقف شاهداً على» flags, literal «شاهد على الحادث» doesn't. «ليس مجرد/فقط X بل Y»
+    flags, a real correction «ليس اليوم بل غداً» doesn't. Text inside «…» / "…" quotes is exempt.
+    Text is normalised first (tashkeel, أإآ→ا, ى→ي, ة→ه): «الحقيقه» is common on X.
+- Policy (owner decision): any hard finding, or ≥2 soft ones → ONE rewrite with the actual
+  phrases (`fix_hint`). The new version is kept only if it scores cleaner (`polish`, plus `accept`
+  for replies: no repetition). It NEVER blocks publishing: `ai_slop` is in `_HARD_QUALITY_ISSUES`,
+  NOT in `_BLOCKING_QUALITY_ISSUES`. Owner-written text (`params.text`/`reply_text`) is never touched.
+- Wired into: posts (`_quality_issues` + `_generate_quality_post`), replies, quotes, threads
+  (whole thread), scheduled posts, plus a prevention line in `_content_prompt` and in the
+  reply/quote prompts. `system/skills/unslop_guard` is the always_on employee skill (dashboard
+  toggle). Per-employee opt-out: `business_rules.unslop = false`.
+- `use_system_skill` now takes `resource` so the coordinator can read files a SKILL.md points to
+  (`references/…`). Text files only, no path escape, 60k cap.
+- Adding a skill changes the counts hard-coded in `verify_system_admin.py`
+  (`default_skills()` length and overview `coordinator`/`employee`): update them.
+- Test (no posting, no LLM): `.\venv\Scripts\python.exe verify_unslop.py`.
 
 ## Content-creator brain
 - `app/aeos/employee/strategy.py` owns content pillars, formats (incl. threads),
