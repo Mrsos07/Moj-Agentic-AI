@@ -13,7 +13,7 @@ import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
-from ..employee import x_algorithm
+from ..employee import unslop, x_algorithm
 from ..mcp.base import MCPRequest
 from ..memory.base import MemoryLayerType
 from .base import CapabilityRequest, CapabilityResult, ICapability
@@ -258,12 +258,15 @@ def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> 
             if " ".join(str(prev).split()[:3]).lower() == opening:
                 issues.append("repeated_opening")
                 break
+    # علامات الكتابة الآلية (مهارة unslop): إعادة توليد بتصحيح محدد، لا منع للنشر
+    if unslop.enabled(context.config) and unslop.needs_fix(unslop.scan(t)):
+        issues.append("ai_slop")
     return issues
 
 
 #: عيوب تستحق إعادة توليد
 _HARD_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief",
-                        "repeated_opening", "question_ending", "copied_exemplar"}
+                        "repeated_opening", "question_ending", "copied_exemplar", "ai_slop"}
 
 #: عيوب تمنع النشر نهائياً لو بقيت بعد إعادة التوليد. تكرار المطلع ليس منها:
 #: شخصية تبدأ منشوراتها دائماً بنمط واحد (مثل «عاجل:») كانت ستُمنع من النشر
@@ -546,6 +549,7 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
             f"{_pick_variant(context, 'voice', _POST_VOICES)}"),
         "- تنوّعُ الأسلوب لا يُلغي الشخصية: الموقف والقيم والتخصص ثابتة، "
         "والمتغير هو الصياغة والإيقاع.",
+        unslop.prompt_rules(context.config),
     ]
     if vp:
         lines += ["", voice_profile.voice_block(vp, "post")]
@@ -606,6 +610,9 @@ def _generate_quality_post(brief: str, context: "ExecutionContext",
 
     hints = "\n".join(f"- {_QUALITY_FIX_HINTS[i]}" for i in hard
                       if i in _QUALITY_FIX_HINTS)
+    if "ai_slop" in hard:
+        # تصحيح بالعبارات الفعلية التي ظهرت في هذا النص (لا توجيه عام)
+        hints = (hints + "\n" if hints else "") + unslop.fix_hint(unslop.scan(text))
     logger.info("post quality retry (issues=%s)", hard)
     retry = _autofix_post_text(_generate_post_text(brief, context, hints))
     if not retry:
@@ -808,6 +815,7 @@ class ReplyToUserCapability(ICapability):
                 "- لا تذكر أنك ترد أو تعلّق، اكتب الرد مباشرة وبدون علامات اقتباس.\n"
                 "- إن كان النص الأصلي خارج مجال تخصصك أو يبدو إعلانياً/ترويجياً فلا تنجرف وراءه، وحافظ على رد مهني ضمن اختصاصك فقط.\n"
                 "- التزم حرفياً بتعليمات الشخصية ومحظوراتها (Do/Don't) وقيمها الواردة في تعليمات النظام.\n"
+                + (unslop.prompt_rules(context.config) + "\n" if unslop.enabled(context.config) else "")
                 + voice_reply
                 + x_algorithm.algo_prompt_block("reply")
             )
@@ -837,6 +845,11 @@ class ReplyToUserCapability(ICapability):
                 if retry:
                     reply_text = retry
                     issues = voice_profile.reply_repetition(reply_text, own_replies, plan["banned"])
+            if reply_text and not issues:
+                # unslop: مرة واحدة، والنسخة الجديدة مقبولة فقط إن لم تكرر الردود السابقة
+                reply_text, _ = unslop.polish(
+                    reply_text, _generate_reply, context.config,
+                    accept=lambda r: not voice_profile.reply_repetition(r, own_replies, plan["banned"]))
             if issues and bool((context.config.business_rules or {}).get("quality_gate", True)):
                 return CapabilityResult.fail(
                     f"رُفض الرد في بوابة التكرار ({', '.join(issues)}): «{reply_text[:80]}»", self.name)
@@ -1523,7 +1536,7 @@ class PublishThreadCapability(ICapability):
     _MAX_PART = 270
 
     def _generate_parts(self, request: CapabilityRequest,
-                        context: "ExecutionContext") -> List[str]:
+                        context: "ExecutionContext", hint: str = "") -> List[str]:
         wanted = max(2, min(int(request.params.get("parts", 4) or 4), 8))
         brief = request.params.get("brief") or "اكتب ثريداً مفيداً في مجال تخصصك."
         if not (context.llm and context.llm.available):
@@ -1548,6 +1561,7 @@ class PublishThreadCapability(ICapability):
                 "- بلا ترقيم آلي (1/5) وبلا هاشتاقات إلا واحداً في الأخيرة كحد أقصى.\n"
                 "- بلا عبارات تمهيدية مثل «ثريد:» أو «سلسلة تغريدات».\n"
                 + x_algorithm.algo_prompt_block("thread", include_common=False)
+                + (f"\n\nتصحيحات إلزامية لهذه المحاولة:\n{hint}" if hint else "")
             ),
             temperature=0.8,
         ) or {}
@@ -1565,6 +1579,13 @@ class PublishThreadCapability(ICapability):
         parts = [str(t).strip() for t in (request.params.get("texts") or []) if str(t).strip()]
         if not parts:
             parts = self._generate_parts(request, context)
+            # unslop على الثريد كاملاً: إعادة توليد واحدة بتصحيح محدد، ويُحتفظ بالأفضل
+            if len(parts) >= 2:
+                joined, _ = unslop.polish(
+                    "\n\n".join(parts),
+                    lambda hint: "\n\n".join(self._generate_parts(request, context, hint)),
+                    context.config, accept=lambda t: len([p for p in t.split("\n\n") if p.strip()]) >= 2)
+                parts = [p for p in joined.split("\n\n") if p.strip()]
         if len(parts) < 2:
             return CapabilityResult.fail(
                 "could not generate a thread (need at least 2 parts)", self.name)
@@ -1636,28 +1657,33 @@ class QuotePostCapability(ICapability):
             # الاقتباس يضيف «زاوية أو معلومة»: أدوات الموظف (Tavily…) تعطيه المعلومة فعلاً
             research_block = (_with_tool_research("", original, context)
                               if (context.config.business_rules or {}).get("research_before_quotes", True) else "")
-            gen = context.mcp.call(MCPRequest(
-                employee_id=context.config.id, tool="generate",
-                params={
-                    "prompt": _trend_prompt(request.params, research_block + (
-                        f"هذه تغريدة في مجالك:\n«{original}»\n\n"
-                        f"اكتب تعليق اقتباس (Quote) قصيراً باللغة ({lang})"
-                        + (f" وبلهجة {dialect}" if dialect else "") + ":\n"
-                        "- أضف زاوية أو معلومة أو موقفاً واضحاً لا يكرّر نص التغريدة.\n"
-                        "- جملتان كحد أقصى، أقل من 200 حرف، بلا هاشتاقات، وبلا اقتباس النص حرفياً.\n"
-                        "- لا تقل «أقتبس» أو «أشارككم»، اكتب التعليق مباشرة.\n"
-                        f"- النبرة المطلوبة هذه المرة (تتغير): "
-                        f"{_pick_variant(context, 'voice', _POST_VOICES)}\n"
-                        "- لا تنهِ التعليق بسؤال روتيني من نوع «ما رأيكم؟».\n"
-                        "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر.\n"
-                        + x_algorithm.algo_prompt_block("quote")
-                    )),
-                    "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
-                    "temperature": 0.85, "max_tokens": 160,
-                },
-                context={"server": "content"},
+
+            prompt = _trend_prompt(request.params, research_block + (
+                f"هذه تغريدة في مجالك:\n«{original}»\n\n"
+                f"اكتب تعليق اقتباس (Quote) قصيراً باللغة ({lang})"
+                + (f" وبلهجة {dialect}" if dialect else "") + ":\n"
+                "- أضف زاوية أو معلومة أو موقفاً واضحاً لا يكرّر نص التغريدة.\n"
+                "- جملتان كحد أقصى، أقل من 200 حرف، بلا هاشتاقات، وبلا اقتباس النص حرفياً.\n"
+                "- لا تقل «أقتبس» أو «أشارككم»، اكتب التعليق مباشرة.\n"
+                f"- النبرة المطلوبة هذه المرة (تتغير): "
+                f"{_pick_variant(context, 'voice', _POST_VOICES)}\n"
+                "- لا تنهِ التعليق بسؤال روتيني من نوع «ما رأيكم؟».\n"
+                "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر.\n"
+                + unslop.prompt_rules(context.config) + "\n"
+                + x_algorithm.algo_prompt_block("quote")
             ))
-            text = (gen.data.get("text", "") or "").strip()
+
+            def _gen_quote(hint: str = "") -> str:
+                gen = context.mcp.call(MCPRequest(
+                    employee_id=context.config.id, tool="generate",
+                    params={"prompt": prompt + (f"\n⚠️ تصحيح: {hint}\n" if hint else ""),
+                            "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
+                            "temperature": 0.85, "max_tokens": 160},
+                    context={"server": "content"},
+                ))
+                return (gen.data.get("text", "") or "").strip()
+
+            text, _ = unslop.polish(_gen_quote(), _gen_quote, context.config)
         if not text:
             return CapabilityResult.fail("no quote comment generated", self.name)
         text = _normalize_post_text(text)
@@ -1727,14 +1753,19 @@ class SchedulePostCapability(ICapability):
         text = (request.params.get("text") or "").strip()
         if not text:
             brief = request.params.get("brief") or "اكتب منشوراً أصلياً في مجال تخصصك."
-            gen = context.mcp.call(MCPRequest(
-                employee_id=context.config.id, tool="generate",
-                params={"prompt": _content_prompt(brief, context),
-                        "system": context.persona_prompt(),
-                        "temperature": 0.85, "max_tokens": 220},
-                context={"server": "content"},
-            ))
-            text = (gen.data.get("text", "") or "").strip()
+
+            def _gen_scheduled(hint: str = "") -> str:
+                gen = context.mcp.call(MCPRequest(
+                    employee_id=context.config.id, tool="generate",
+                    params={"prompt": _content_prompt(brief, context)
+                            + (f"\n\nتصحيحات إلزامية لهذه المحاولة:\n{hint}" if hint else ""),
+                            "system": context.persona_prompt(),
+                            "temperature": 0.85, "max_tokens": 220},
+                    context={"server": "content"},
+                ))
+                return (gen.data.get("text", "") or "").strip()
+
+            text, _ = unslop.polish(_gen_scheduled(), _gen_scheduled, context.config)
         if not text:
             return CapabilityResult.fail("no content to schedule", self.name)
         text = _normalize_post_text(text)

@@ -15,7 +15,8 @@
     PROXY_USERNAME=customer-XXXX        # الأساس بلا country/session
     PROXY_PASSWORD=...
     PROXY_COUNTRY=sa
-    PROXY_CITY=riyadh                   # اختياري (مدن المزوّد)
+    PROXY_CITY=                         # اختياري (مدن المزوّد). فارغ = كل السعودية: مجمّع أوسع
+                                        # وأثبت (قيس 2026-10-28: جلسات الرياض تسقط وسط الدورة)
     PROXY_ROTATE=session                # session | request | sticky
     PROXY_SESSION_TTL=600               # ثانية: عمر الجلسة الثابتة للموظف
     PROXY_VERIFY=1
@@ -52,6 +53,21 @@ _DEFAULT_HOSTS = {
 _DOTENV_CACHE: Optional[Dict[str, str]] = None
 _VERIFIED: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _REQ_COUNTER = itertools.count()
+#: نطاق ← (جلسة بديلة، انتهاؤها): بعد سقوط جلسة لا نعود إليها حتى نهاية نافذتها
+_ROTATED: Dict[str, Tuple[str, float]] = {}
+
+#: أخطاء Chrome التي تعني أن **مسار البروكسي** نفسه سقط (لا X ولا الحساب). البروكسي السكني يخرج
+#: من جهاز منزلي حقيقي؛ إن انقطع ماتت الجلسة كلها. قيس 2026-10-28: دورتان متتاليتان خسرتا
+#: الخط الزمني/الترندات/البحث/المنشنات بهذه الأخطاء بينما المصادر المباشرة تعمل.
+ROUTE_ERRORS = (
+    "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED", "ERR_TIMED_OUT",
+    "ERR_CONNECTION_TIMED_OUT", "ERR_PROXY_AUTH_UNSUPPORTED", "ERR_PROXY_AUTH_REQUESTED",
+    "ERR_EMPTY_RESPONSE", "ERR_CONNECTION_RESET", "ERR_CONNECTION_CLOSED",
+)
+
+
+def is_route_error(message: str) -> bool:
+    return any(code in (message or "") for code in ROUTE_ERRORS)
 
 
 class ProxyError(RuntimeError):
@@ -274,10 +290,14 @@ def acquire(scope: str, *, verify: Optional[bool] = None, force_new: bool = Fals
     if not cfg.enabled:
         return None
     must_verify = cfg.verify if verify is None else verify
+    rotated = _ROTATED.get(scope)
+    if rotated and time.time() >= rotated[1]:
+        _ROTATED.pop(scope, None)
+        rotated = None
 
     last: Dict[str, Any] = {}
     for attempt in range(cfg.max_tries):
-        sid = session_id(scope, cfg)
+        sid = rotated[0] if rotated else session_id(scope, cfg)
         if attempt or force_new:
             # جلسة جديدة صريحة عند إعادة المحاولة (نفس النطاق، بذرة مختلفة)
             sid = session_id(f"{scope}:{attempt}:{time.time_ns()}", cfg, bucket=0)
@@ -299,11 +319,28 @@ def acquire(scope: str, *, verify: Optional[bool] = None, force_new: bool = Fals
         last = info
         if code == cfg.country.upper():
             _VERIFIED[key] = (time.time() + cfg.verify_ttl, info)
+            if attempt and cfg.rotate != "request":
+                # جلسة النافذة لم تمرّ الفحص وهذه نجحت: تثبت لبقية النافذة بدل إعادة الفحص كل مرة
+                _ROTATED[scope] = (sid, time.time() + cfg.session_ttl)
             return url
     raise ProxyError(
         f"لم أجد IP سعودياً بعد {cfg.max_tries} محاولات (آخر نتيجة: "
         f"{last.get('countryCode') or last.get('error') or 'غير معروفة'})",
         code="NOT_SAUDI")
+
+
+def mark_bad(scope: str) -> Optional[str]:
+    """جلسة هذا النطاق سقطت (مسار البروكسي): انتقل إلى جلسة جديدة = IP سعودي آخر.
+
+    تبقى البديلة حتى ``PROXY_SESSION_TTL`` ثم يعود الحساب لدورة النوافذ العادية. كان كل ما يلي
+    السقوط داخل النافذة (15 دقيقة) يعود للجلسة الميتة نفسها فيفشل. per-request لا تحتاجها.
+    """
+    cfg = load_config()
+    if not cfg.enabled or cfg.rotate == "request":
+        return None
+    sid = session_id(f"{scope}:rot:{time.time_ns()}:{next(_REQ_COUNTER)}", cfg, bucket=0)
+    _ROTATED[scope] = (sid, time.time() + cfg.session_ttl)
+    return sid
 
 
 def status(check: bool = False, scope: str = "status-probe") -> Dict[str, Any]:
@@ -333,3 +370,13 @@ def status(check: bool = False, scope: str = "status-probe") -> Dict[str, Any]:
 
 def reset_cache() -> None:
     _VERIFIED.clear()
+    _ROTATED.clear()
+
+
+# captcha_browser يحمّل هذا الملف بالمسار باسم moj_proxy_rotation (عمليات app/x بلا حزمة app).
+# إن استُورد أولاً باسمه العادي نسجّله بالاسمين: نسخة واحدة = حالة جلسات واحدة.
+import sys as _sys  # noqa: E402
+
+_sys.modules.setdefault("moj_proxy_rotation", _sys.modules[__name__])
+if __name__ == "moj_proxy_rotation":
+    _sys.modules.setdefault("app.core.proxy_rotation", _sys.modules[__name__])

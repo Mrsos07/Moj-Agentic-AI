@@ -611,6 +611,16 @@ def check_no_false_success_on_status_page() -> None:
     check("ويفشل صريحاً إن لم يتأكّد الإرسال",
           "لم يتم تأكيد نشر الاقتباس" in src)
 
+    # الرد: محرّر المودال وزرّه لا المحرّر المضمّن خلف القناع (mask intercepts pointer events)
+    src = inspect.getsource(x_actions.reply_to_tweet)
+    check("الرد يكتب وينشر ويتأكّد داخل نطاق محرّر واحد",
+          "_open_reply_composer" in src and "_click_reply_publish(scope)" in src
+          and "scope=scope" in src and "_click_first_visible(page, publish" not in src)
+    check("الرد لا يفقد النص إن فشل fill (كان Ctrl+A بلا كتابة)",
+          "tb.type(reply_text" in src)
+    check("نطاق الرد هو المودال الحاوي للمحرّر",
+          "div[role='dialog']:has(" in inspect.getsource(x_actions._reply_scope))
+
     # كل إجراء يغيّر حالة على X يجب أن يتحقّق من أثره لا أن يفترضه
     for fn, marker in (
         (x_actions.like_tweet, "unlike"),
@@ -622,6 +632,60 @@ def check_no_false_success_on_status_page() -> None:
         body = inspect.getsource(fn)
         check(f"{fn.__name__} يتحقّق من نجاحه فعلياً",
               marker in body and "raise" in body, marker)
+
+
+def check_x_error_screen_recovery() -> None:
+    """شاشة X «Something went wrong… Try again» (failedScript=vendor عبر البروكسي) تُشفى بالضغط.
+
+    قيس 2026-10-26: دورة كاملة بلا فعل لأن كل قراءات X انتظرت 45 ث شاشة لا تتغير أبداً."""
+    from app.aeos.mcp.servers import playwright_x_mcp as PX
+    mod = sys.modules[type(PX.PlaywrightXMCP()).__module__]
+
+    class _Loc:
+        def __init__(self, page, kind):
+            self.page, self.kind = page, kind
+
+        @property
+        def first(self):
+            return self
+
+        def wait_for(self, state="visible", timeout=0):
+            if not self.page.content_ok:
+                raise TimeoutError("Locator.wait_for: Timeout")
+
+        def count(self):
+            return 1 if (self.kind == "btn" and not self.page.content_ok) else 0
+
+        def is_visible(self):
+            return self.count() > 0
+
+        def click(self, timeout=0):
+            self.page.clicks += 1
+            if self.page.clicks >= self.page.heal_after:
+                self.page.content_ok = True
+
+    class _Page:
+        url = "https://x.com/home?failedScript=vendor"
+
+        def __init__(self, heal_after):
+            self.content_ok, self.clicks, self.heal_after = False, 0, heal_after
+
+        def locator(self, sel):
+            return _Loc(self, "cards")
+
+        def get_by_role(self, role, name=None):
+            return _Loc(self, "btn")
+
+    page = _Page(heal_after=2)
+    mod._wait_cards(page, 'article[data-testid="tweet"]', 20_000)
+    check("شاشة خطأ X تُشفى بـ«Try again» (ضغطتان) بدل انتظار المهلة", page.content_ok and page.clicks == 2)
+    page = _Page(heal_after=99)
+    try:
+        mod._wait_cards(page, 'article[data-testid="tweet"]', 1_500, retries=3)
+        ok = False
+    except TimeoutError as exc:
+        ok = "Something went wrong" in str(exc) and page.clicks == 3
+    check("وإن لم تُشفَ: فشل واضح بسببه بعد 3 محاولات (لا ضغط بلا حد)", ok)
 
 
 def check_emotion_comes_from_graph_memory() -> None:
@@ -1185,6 +1249,8 @@ def main() -> int:
     check_browser_slot()
     print("\n=== 5g) لا نجاح كاذب في الاقتباس ===")
     check_no_false_success_on_status_page()
+    print("\n=== 5g2) شاشة خطأ X تُشفى تلقائياً ===")
+    check_x_error_screen_recovery()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")

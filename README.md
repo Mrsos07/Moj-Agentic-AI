@@ -257,7 +257,7 @@ copy .env.example .env      # ثم عدّل القيم
 | `PROXY_PROVIDER` | `oxylabs` \| `brightdata` \| `decodo` \| `iproyal` \| `soax` \| `generic` |
 | `PROXY_HOST` / `PROXY_PORT` | نقطة المزوّد (لها افتراضي لكل مزوّد) |
 | `PROXY_USERNAME` / `PROXY_PASSWORD` | الأساس بلا `country/session` — نضيفهما نحن |
-| `PROXY_COUNTRY` / `PROXY_CITY` | `sa` و`riyadh` (مدن المزوّد) |
+| `PROXY_COUNTRY` / `PROXY_CITY` | `sa`، والمدينة فارغة = كل السعودية (أوسع وأثبت؛ `riyadh` يقيّد بمدن المزوّد) |
 | `PROXY_ROTATE` | `session` (افتراضي) \| `request` \| `sticky` |
 | `PROXY_SESSION_TTL` | عمر الجلسة بالثواني (افتراضي 600) |
 | `PROXY_VERIFY` / `PROXY_MAX_TRIES` | فحص الجنسية (افتراضي مفعّل) وعدد المحاولات |

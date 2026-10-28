@@ -308,7 +308,7 @@ check("مصفوفة الصلاحيات تُعرض", {r["id"] for r in perms["rol
       and any(p["id"] == "system.mcp.manage" and p["min_role"] == "developer" for p in perms["permissions"]))
 ov = client.get("/api/admin/system/overview", headers=HA).json()
 check("نظرة عامة: المستخدمون حسب الدور والقدرات", ov["users"]["total"] == 3
-      and ov["skills"]["coordinator"] == 3 and ov["skills"]["employee"] == 12, ov.get("skills"))
+      and ov["skills"]["coordinator"] == 4 and ov["skills"]["employee"] == 13, ov.get("skills"))
 
 print("9) المجلد الرئيسي الموحّد: كل الخوادم والمهارات في system/")
 check("الخوادم المدمجة الثمانية تُحمَّل من system/mcps (لا تسجيل يدوي)",
@@ -343,8 +343,9 @@ check("الخادم المدمج الأصلي لا يُعدَّل ولا يُح�
 from app.aeos.skills import builtin as BI  # noqa: E402
 
 skills_loaded = [s.name for s in BI.default_skills()]
-check("مهارات الموظفين الـ12 تُحمَّل من system/skills بترتيبها (+ مشغّل المخصّصة)",
-      len(skills_loaded) == 13 and "system_tools" in skills_loaded, skills_loaded)
+check("مهارات الموظفين الـ13 تُحمَّل من system/skills بترتيبها (+ مشغّل المخصّصة)",
+      len(skills_loaded) == 14 and "system_tools" in skills_loaded
+      and "unslop_guard" in skills_loaded, skills_loaded)
 check("الترتيب محفوظ (الاقتباس/الترند قبل الإعجاب)",
       skills_loaded.index("trend_participation") < skills_loaded.index("timeline_engager"), skills_loaded)
 from app.core.system_loader import load_module  # noqa: E402

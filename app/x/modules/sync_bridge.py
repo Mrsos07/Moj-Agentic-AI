@@ -50,8 +50,13 @@ def run_sync(fn, *args, **kwargs):
 def sync_safe(fn):
     """مُزيّن للدوال العامة المتزامنة (نشر/تفاعل/ملف/حذف)."""
 
+    from .x_captcha import with_proxy_failover
+
+    # سقوط مسار البروكسي في أول تنقّل (قبل أي فعل على X) ← إعادة واحدة بIP سعودي جديد
+    safe = with_proxy_failover(fn)
+
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        return run_sync(fn, *args, **kwargs)
+        return run_sync(safe, *args, **kwargs)
 
     return wrapper

@@ -96,6 +96,57 @@ def _goto(page, url: str, **kwargs):
     return goto(page, url, **kwargs)
 
 
+def _failover(fn):
+    """القراءة تُعاد مرة واحدة بIP سعودي جديد إن سقط مسار البروكسي في أول تنقّل
+    (``ProxyRouteError`` من ``goto``) — كل قراءة تفتح متصفحاً جديداً فتأخذ الجلسة البديلة."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from app.x.modules.x_captcha import with_proxy_failover
+
+        return with_proxy_failover(fn)(*args, **kwargs)
+
+    return wrapper
+
+
+#: زر شاشة خطأ X («Something went wrong, but don't fret — let's give it another shot.»)
+_RETRY_BUTTON = re.compile(r"^\s*(?:Try again|Retry|حاول مرة أخرى|حاول مجدداً|إعادة المحاولة|أعد المحاولة)\s*$", re.I)
+
+
+def _wait_cards(page, selector: str, timeout_ms: int, retries: int = 3) -> None:
+    """انتظر بطاقات المحتوى، وإن ظهرت شاشة خطأ X اضغط «Try again» بدل انتظار المهلة كاملة.
+
+    قيس 2026-10-26: دورة كاملة بلا أي فعل لأن الخط الزمني والترندات وبحث التخصص فشلت كلها
+    بـ«Locator.wait_for: Timeout 45000ms». الصفحة كانت شاشة «Something went wrong… Try again»
+    (الحساب سليم: HomeTimeline أعاد 200 وحدّه 499/500)، وبعد ضغطتين ظهر المحتوى. الانتظار
+    وحده لا يشفيها أبداً. يرفع الخطأ كما كان إن لم يظهر المحتوى (المستدعون يعاملونه كفشل/فراغ).
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    loc = page.locator(selector).first
+    clicks = 0
+    while (remaining := deadline - time.time()) > 0:
+        try:
+            loc.wait_for(state="visible", timeout=int(min(4.0, max(0.5, remaining)) * 1000))
+            return
+        except Exception:  # noqa: BLE001 - لم يظهر بعد
+            pass
+        if clicks >= retries:
+            continue
+        try:
+            btn = page.get_by_role("button", name=_RETRY_BUTTON)
+            if btn.count() and btn.first.is_visible():
+                btn.first.click(timeout=5_000)
+                clicks += 1
+                logger.info("X error screen at %s → Try again (%d/%d)", page.url, clicks, retries)
+        except Exception:  # noqa: BLE001
+            pass
+    if clicks:
+        raise TimeoutError(f"X أظهر «Something went wrong» ولم يظهر المحتوى بعد {clicks} محاولات "
+                           f"«Try again» ({page.url})")
+    loc.wait_for(state="visible", timeout=500)   # يرفع خطأ Playwright الأصلي
+
+
 # رأس صفحة الحساب: الاسم والنبذة بمحدّدات read_user_profile المتحقَّق منها حيّاً، والصورة
 # عبر رابط /<handle>/photo، والغلاف عبر /<handle>/header_photo (ولا يظهر profile_banners
 # في صفحة الحساب إلا لغلافه هو). X يرسم الإيموجي <img alt> فيُسقطها innerText — قيس حيّاً:
@@ -162,7 +213,7 @@ def account_header(raw: Dict[str, Any]) -> Dict[str, str]:
 
 def _profile_header(page, handle: str, wait_ms: int = 15_000) -> Dict[str, str]:
     """اقرأ رأس صفحة الحساب المفتوحة: ينتظر الاسم ثم يمهل الصورة لحظة ليُعرف رابطها."""
-    page.locator('div[data-testid="UserName"]').first.wait_for(state="visible", timeout=wait_ms)
+    _wait_cards(page, 'div[data-testid="UserName"]', wait_ms)
     try:
         page.locator('img[src*="profile_images"]').first.wait_for(state="attached", timeout=5_000)
     except Exception:  # noqa: BLE001
@@ -567,6 +618,7 @@ class PlaywrightXMCP(IMCPServer):
             return MCPResponse.fail(f"{tool} failed: {exc}")
 
     # -- Playwright work (sync API, runs in a worker thread) --------------
+    @_failover
     def _read(self, storage_state_path: str, url: str, limit: int, headless: bool,
               soft: bool = False) -> List[Dict[str, Any]]:
         from app.services.x_bridge import browser_lock
@@ -588,9 +640,7 @@ class PlaywrightXMCP(IMCPServer):
                 # الليّن (soft) لا نفشل الدورة إن لم توجد تغريدات (مثلاً لا توجد
                 # منشنات) بل نرجع قائمة فارغة.
                 try:
-                    page.locator('article[data-testid="tweet"]').first.wait_for(
-                        state="visible", timeout=(20_000 if soft else 45_000)
-                    )
+                    _wait_cards(page, 'article[data-testid="tweet"]', 20_000 if soft else 45_000)
                 except Exception:  # noqa: BLE001
                     if soft:
                         logger.info("no tweet cards at %s (soft read -> empty)", url)
@@ -616,6 +666,7 @@ class PlaywrightXMCP(IMCPServer):
 
         return list(seen.values())[:limit]
 
+    @_failover
     def _read_top_posts(self, storage_state_path: str, limit: int, headless: bool) -> List[Dict[str, Any]]:
         """Read the Creator "Inspiration → Top Posts" page.
 
@@ -639,9 +690,7 @@ class PlaywrightXMCP(IMCPServer):
                 _guard_captcha(page)
                 # انتظار ليّن: إن لم تظهر بطاقات تغريدات خلال 20 ثانية نرجع فارغاً
                 try:
-                    page.locator('article[data-testid="tweet"]').first.wait_for(
-                        state="visible", timeout=20_000
-                    )
+                    _wait_cards(page, 'article[data-testid="tweet"]', 20_000)
                 except Exception:  # noqa: BLE001
                     logger.info("top_posts page has no tweet cards (account may lack creator tools)")
                     return []
@@ -664,6 +713,7 @@ class PlaywrightXMCP(IMCPServer):
 
         return list(seen.values())[:limit]
 
+    @_failover
     def _read_my_posts(self, storage_state_path: str, handle: str,
                        limit: int, headless: bool,
                        header_out: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
@@ -699,9 +749,7 @@ class PlaywrightXMCP(IMCPServer):
                     except Exception:  # noqa: BLE001
                         logger.info("profile header not read for @%s", handle)
                 try:
-                    page.locator('article[data-testid="tweet"]').first.wait_for(
-                        state="visible", timeout=25_000
-                    )
+                    _wait_cards(page, 'article[data-testid="tweet"]', 25_000)
                 except Exception:  # noqa: BLE001
                     logger.info("no posts on profile of @%s", handle)
                     return []
@@ -739,6 +787,7 @@ class PlaywrightXMCP(IMCPServer):
 
         return list(seen.values())[:limit]
 
+    @_failover
     def _read_account_profile(self, storage_state_path: str, handle: str, headless: bool,
                               lock_timeout: float = 0.0) -> Dict[str, str]:
         """هوية الحساب كما تظهر على X الآن (اسم/نبذة/صورة/هيدر) — لبطاقة الموظف.
@@ -763,6 +812,7 @@ class PlaywrightXMCP(IMCPServer):
                 context.close()
                 browser.close()
 
+    @_failover
     def _read_user_profile(self, storage_state_path: str, handle: str,
                            limit: int, headless: bool,
                            lock_timeout: float = 45.0,
@@ -820,9 +870,7 @@ class PlaywrightXMCP(IMCPServer):
                 _goto(page, url, wait_until="domcontentloaded")
                 _guard_captcha(page)
             try:
-                page.locator('article[data-testid="tweet"]').first.wait_for(
-                    state="visible", timeout=15_000
-                )
+                _wait_cards(page, 'article[data-testid="tweet"]', 15_000)
             except Exception:  # noqa: BLE001
                 logger.info("no tweet cards at %s (empty/protected profile?)", url)
                 return []
@@ -874,7 +922,7 @@ class PlaywrightXMCP(IMCPServer):
             _goto(page, url, wait_until="domcontentloaded")
             _guard_captcha(page)
             try:
-                page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=15_000)
+                _wait_cards(page, 'article[data-testid="tweet"]', 15_000)
             except Exception:  # noqa: BLE001
                 logger.info("no tweet cards at %s", url)
                 return found
@@ -918,12 +966,20 @@ class PlaywrightXMCP(IMCPServer):
             try:
                 # 1) الصفحة الرئيسية: البايو + التغريدات الأصلية (تحميل واحد فقط —
                 #    كان الكود يعيد الانتقال إلى نفس الرابط مرتين بلا داعٍ)
-                _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
+                # أول تحميل عبر جلسة بروكسي سكني باردة قد يتجاوز 30 ث (قيس 2026-10-25:
+                # فشل الاستنساخ بمهلة goto، وطلب HTML نفسه أخذ 15.5 ث بارداً ثم 1.4-2.4 ث
+                # دافئاً، والإعادة نجحت في 7.5 ث) — إعادة واحدة بمهلة أطول، ثم فشل صريح.
+                try:
+                    _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
+                except Exception as exc:  # noqa: BLE001
+                    if "Timeout" not in str(exc):
+                        raise
+                    logger.warning("read_user_profile @%s: goto timeout — إعادة واحدة", handle)
+                    _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded",
+                          timeout=60_000)
                 _guard_captcha(page)
                 try:
-                    page.locator('div[data-testid="UserName"]').first.wait_for(
-                        state="visible", timeout=20_000
-                    )
+                    _wait_cards(page, 'div[data-testid="UserName"]', 20_000)
                     profile.update(page.evaluate(bio_js) or {})
                 except Exception:  # noqa: BLE001
                     logger.info("profile header not found for @%s", handle)
@@ -975,6 +1031,7 @@ class PlaywrightXMCP(IMCPServer):
         }
         return profile
 
+    @_failover
     def _read_trends(self, storage_state_path: str, limit: int, headless: bool) -> List[Dict[str, Any]]:
         """Read the account's own Trending tab (what X shows THIS account)."""
         from app.services.x_bridge import browser_lock
@@ -989,9 +1046,7 @@ class PlaywrightXMCP(IMCPServer):
             try:
                 _goto(page, "https://x.com/explore/tabs/trending", wait_until="domcontentloaded")
                 _guard_captcha(page)
-                page.locator('[data-testid="trend"]').first.wait_for(
-                    state="visible", timeout=45_000
-                )
+                _wait_cards(page, '[data-testid="trend"]', 45_000)
                 page.wait_for_timeout(1200)
                 trends = page.evaluate(_TRENDS_JS) or []
             finally:

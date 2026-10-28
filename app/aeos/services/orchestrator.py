@@ -338,9 +338,13 @@ TOOLS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "use_system_skill",
         "description": "حمّل التعليمات الكاملة لمهارة من «مهارات النظام» المذكورة في تعليماتك "
-                       "عندما يطابق طلب المالك وصفها، ثم اتبعها خطوة بخطوة.",
-        "parameters": {"type": "object", "properties": {"name": {"type": "string"}},
-                       "required": ["name"]},
+                       "عندما يطابق طلب المالك وصفها، ثم اتبعها خطوة بخطوة. إن أحالتك التعليمات "
+                       "إلى ملف مرجعي (مثل references/core-contract.md) فاستدعِها مجدداً مع resource.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "resource": {"type": "string",
+                         "description": "مسار ملف نصي داخل مجلد المهارة، اختياري"},
+        }, "required": ["name"]},
     }},
     {"type": "function", "function": {
         "name": "web_search",
@@ -798,6 +802,9 @@ class _Tools:
         if not sk or not sk.get("enabled") or sk.get("error") or sk.get("kind") != "coordinator":
             names = [s["name"] for s in SS.coordinator_skills()]
             raise LookupError(f"مهارة نظام غير معروفة. المتاح: {', '.join(names) or 'لا شيء'}")
+        if args.get("resource"):
+            return {"skill": sk["name"], "resource": str(args["resource"]),
+                    "content": SS.read_resource(sk["slug"], str(args["resource"]))}
         return {"skill": sk["name"], "instructions": sk["body"],
                 "allowed_tools": sk.get("allowed_tools"), "resources": sk.get("resources") or []}
 

@@ -62,14 +62,23 @@ def _free_port(port: int) -> None:
     print(f"[Runner] المنفذ {port} مشغول ببقية تشغيل سابق — أُخليه ...")
     try:
         if sys.platform == "win32":
-            out = subprocess.run(["netstat", "-ano", "-p", "tcp"],
-                                 capture_output=True, text=True, timeout=5).stdout
-            pids = {
-                line.split()[-1] for line in out.splitlines()
-                if f":{port}" in line and "LISTENING" in line
-            }
-            for pid in pids - {str(os.getpid())}:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+            # psutil لا netstat: مستمع عملية معزولة (قيس 2026-10-26: Beem بـ--inspect=8000،
+            # حالة NONE) لا يظهر في netstat إطلاقاً، فكان المنفذ «مشغولاً» بلا PID ثم
+            # يفشل الربط بـWinError 10013
+            import psutil
+
+            pids = {c.pid for c in psutil.net_connections(kind="tcp")
+                    if c.laddr and c.laddr.port == port and c.pid
+                    and c.status in (psutil.CONN_LISTEN, psutil.CONN_NONE)}
+            for pid in pids - {os.getpid()}:
+                # بقايا تشغيل سابق = python فقط. برنامج آخر على المنفذ لا يُقتل أبداً
+                # (كان taskkill /F /T يقتل أي مستمع) — نتوقف برسالة واضحة بدلاً من ذلك.
+                image = psutil.Process(pid).name()
+                if not image.lower().startswith("python"):
+                    print(f"[Runner] ⛔ المنفذ {port} يستخدمه برنامج آخر: {image} (PID={pid}) — "
+                          "لن أوقفه. أغلقه أو شغّل بمنفذ آخر: PORT=8001")
+                    sys.exit(1)
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                                capture_output=True, timeout=10)
                 print(f"[Runner] أُوقفت العملية القديمة PID={pid}")
         else:
