@@ -740,6 +740,57 @@ def check_reply_modal_race() -> None:
           XA._reply_scope(p) is p and not XA._modal_layer_open(p))
 
 
+def check_reply_fits_x_limit() -> None:
+    """الرد لا يتجاوز حد X: رد من 3 نقاط تجاوز 280 فعطّل X زر «ردّ» (قيس 2026-10-28، العدّاد ‎-13)."""
+    from app.aeos.capabilities import handlers as H
+    from app.aeos.capabilities.base import CapabilityRequest
+    from app.aeos.mcp.base import MCPResponse
+    from app.x.modules import x_actions as XA
+    from app.x.modules.x_text import fit, weighted_len
+
+    failed = ("1) الزيارة هنا ليست بروتوكولاً فقط؛ هي رسالة جاهزية على الحد الجنوبي، حيث تُقاس الوقائع لا "
+              "الشعارات.\n2) هذا هو الفارق بين دولةٍ تُثبت حضورها بالميدان، وبين ميليشيا تعيش على التضليل "
+              "والاختباء.\n3) طبعاً، من يفهم الرسائل العسكرية يدرك لماذا يُستفز خصوم الأمن كلما ظهرت "
+              "القيادة بين المرابطين.")
+    check("عدّ X: العربية حرف، الإيموجي حرفان، الرابط 23",
+          weighted_len("مرحبا") == 5 and weighted_len("👍") == 2
+          and weighted_len("https://example.com/a/very/long/path") == 23)
+    short = fit(failed, 270)
+    check("القصّ عند نهاية جملة تامة (لا نص مبتور) وضمن الحد",
+          weighted_len(short) <= 270 and short.endswith(".") and "3)" not in short, short[-40:])
+
+    class _MCP:
+        def __init__(self):
+            self.sent = []
+
+        def call(self, req):
+            if req.tool == "generate":
+                return MCPResponse.ok(text=failed)
+            self.sent.append(dict(req.params))
+            return MCPResponse.ok()
+
+    ctx = make_context(make_config(unslop=False), with_signals=False)
+    ctx.mcp = _MCP()
+    orig = H._record_interaction
+    H._record_interaction = lambda *a, **k: None
+    try:
+        res = H.ReplyToUserCapability().execute(CapabilityRequest(
+            name="reply_to_user", params={"tweet_url": "https://x.com/a/status/1",
+                                          "original_text": "زيارة رئيس الأركان للحد الجنوبي"}), ctx)
+    finally:
+        H._record_interaction = orig
+    sent = (ctx.mcp.sent or [{}])[0].get("reply_text", "")
+    check("رد مولَّد أطول من الحد ← يُرسَل مقصوصاً ضمن 270", res.success and 0 < weighted_len(sent) <= 270,
+          f"{weighted_len(sent)}")
+    try:
+        XA.reply_to_tweet("x.json", "https://x.com/a/status/1", failed + " " + failed, headless=True)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("طبقة النشر تفشل فوراً بسبب واضح إن وصلها نص فوق الحد (لا انتظار دقيقتين)",
+          "أطول من حد X" in msg, msg)
+
+
 def check_emotion_comes_from_graph_memory() -> None:
     """الحالة العاطفية يجب أن تُبنى على حقائق الذاكرة المعرفية لا على التعليمات."""
     from app.aeos.cognition.phases import EmotionPhase
@@ -1305,6 +1356,8 @@ def main() -> int:
     check_x_error_screen_recovery()
     print("\n=== 5g3) سباق مودال الرد (القناع قبل المودال) ===")
     check_reply_modal_race()
+    print("\n=== 5g4) الرد ضمن حد X ===")
+    check_reply_fits_x_limit()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")
