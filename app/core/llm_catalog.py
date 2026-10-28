@@ -137,6 +137,52 @@ def test(provider: str, api_key: str, model: str) -> Dict[str, Any]:
         raise ValueError(msg) from None
 
 
+_OR_CACHE: Dict[str, Any] = {"at": 0.0, "items": []}
+_OR_TTL = 3600
+
+
+def _per_million(price: Any) -> Optional[float]:
+    try:
+        return round(float(price) * 1_000_000, 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def openrouter_catalog(force: bool = False) -> List[Dict[str, Any]]:
+    """قائمة OpenRouter نفسها (``GET /models`` عامة بلا مفتاح)، نماذج الدردشة **الداعمة للأدوات**
+    فقط: المنسّق يدير الموظفين باستدعاء الأدوات، ونموذج بلاها يعطّله (قرار المالك). مخزّنة ساعة.
+
+    كل عنصر: ``id`` · ``name`` · ``context`` · ``price_in``/``price_out`` (دولار لكل مليون رمز) · ``free``.
+    """
+    import time
+
+    if not force and _OR_CACHE["items"] and time.time() - _OR_CACHE["at"] < _OR_TTL:
+        return _OR_CACHE["items"]
+    try:
+        r = requests.get(PROVIDERS["openrouter"]["base_url"] + "/models", timeout=_TIMEOUT)
+        r.raise_for_status()
+        data = r.json().get("data") or []
+    except requests.RequestException as exc:
+        if _OR_CACHE["items"]:
+            return _OR_CACHE["items"]               # قائمة قديمة أفضل من لا شيء
+        raise ValueError(f"تعذّر جلب قائمة OpenRouter ({type(exc).__name__})") from None
+    items = []
+    for m in data:
+        mid = m.get("id") or ""
+        arch = m.get("architecture") or {}
+        if not mid or "text" not in (arch.get("output_modalities") or ["text"]):
+            continue
+        if "tools" not in (m.get("supported_parameters") or []):
+            continue
+        pricing = m.get("pricing") or {}
+        p_in, p_out = _per_million(pricing.get("prompt")), _per_million(pricing.get("completion"))
+        items.append({"id": mid, "name": m.get("name") or mid, "context": m.get("context_length") or 0,
+                      "price_in": p_in, "price_out": p_out,
+                      "free": mid.endswith(":free") or (p_in == 0 and p_out == 0)})
+    _OR_CACHE.update(at=time.time(), items=items)
+    return items
+
+
 def public_catalog() -> List[Dict[str, Any]]:
     return [{"id": k, "label": v["label"], "needs_key": v["needs_key"], "default_model": v["default_model"],
              "key_hint": v.get("key_hint", ""), "note": v.get("note", "")} for k, v in PROVIDERS.items()]

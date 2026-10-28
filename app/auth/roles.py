@@ -38,6 +38,7 @@ PERMISSIONS: Dict[str, str] = {
     "system.mcp.manage": "developer",     # رفع/تعديل/ربط/حذف خوادم MCP
     "system.skills.manage": "developer",  # رفع/تعديل/حذف مهارات النظام
     "admin.roles.grant_developer": "developer",
+    "llm.system_models": "admin",         # اختيار أي نموذج OpenRouter على مفتاح النظام (رصيده)
 }
 PERMISSION_LABELS = {
     "own.manage": "إدارة موظفيه وحساباته",
@@ -49,6 +50,7 @@ PERMISSION_LABELS = {
     "system.mcp.manage": "إضافة/تعديل/حذف خوادم MCP",
     "system.skills.manage": "إضافة/تعديل/حذف مهارات النظام",
     "admin.roles.grant_developer": "منح دور المطوّر",
+    "llm.system_models": "اختيار نماذج OpenRouter على رصيد النظام",
 }
 
 
