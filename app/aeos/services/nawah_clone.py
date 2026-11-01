@@ -44,7 +44,8 @@ DEFAULT_MODEL = "google/gemini-3.7-flash"
 DEFAULT_FALLBACK = "google/gemini-3.6-flash"
 #: أقل عدد نصوص تقبله نواه لبناء بصمة منشورات
 MIN_TEXTS = 5
-MAX_TEXTS = 400
+#: عيّنة البصمة: 70 منشوراً أصلياً كحد أقصى (قرار المالك 2026-11-01) — تغريدات فقط، لا ردود
+MAX_TEXTS = 70
 CALL_TIMEOUT = 240.0
 _URL_RE = re.compile(r"https?://\S+")
 
@@ -129,15 +130,12 @@ def clone_id(cookie_label: str, handle: str) -> str:
 
 
 def _texts(profile: Dict[str, Any]) -> List[str]:
-    """المنشورات الأصلية أولاً (البصمة بصمة منشورات)؛ الردود تكمّل فقط إن قلّت المنشورات."""
+    """المنشورات الأصلية فقط (حتى 70): البصمة بصمة منشورات — الردود لا تدخلها أبداً."""
     def clean(t: str) -> str:
         return _URL_RE.sub("", t or "").strip()
 
     tweets = [clean(t.get("text", "")) for t in profile.get("tweets") or []]
-    out = [t for t in tweets if t]
-    if len(out) < 20:
-        out += [clean(r.get("text", "")) for r in profile.get("replies") or [] if clean(r.get("text", ""))]
-    return out[:MAX_TEXTS]
+    return [t for t in tweets if t][:MAX_TEXTS]
 
 
 def build_fingerprint(profile: Dict[str, Any], cookie_label: str,

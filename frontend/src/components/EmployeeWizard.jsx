@@ -298,7 +298,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
       const tgt = data?.target || {}
       const cov = tgt.coverage || {}
       const score = data?.fidelity?.score
-      onNotify?.(`🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} تغريدة و${tgt.reply_count ?? '?'} رداً (${tgt.pairs ?? 0} مع سياقها)` +
+      onNotify?.(`🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} منشوراً أصلياً (بلا ردود)` +
         (cov.from ? ` من ${cov.from} إلى ${cov.to}` : '') +
         (score != null ? ` · درجة المطابقة ${score}%` : '') + '. راجع الحقول.')
     } catch (e) {

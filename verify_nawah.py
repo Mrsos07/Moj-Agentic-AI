@@ -86,6 +86,13 @@ for k, v in saved.items():
         os.environ.pop(k, None)
     else:
         os.environ[k] = v
+_big = {"tweets": [{"text": f"منشور رقم {i} عن الاقتصاد https://t.co/x"} for i in range(120)],
+        "replies": [{"text": "رد يجب ألا يدخل البصمة أبداً"}] * 30}
+_tx = NC._texts(_big)
+check("البصمة من 70 منشوراً أصلياً كحد أقصى وبلا ردود وبلا روابط", len(_tx) == NC.MAX_TEXTS == 70
+      and not any("رد يجب" in t for t in _tx) and not any("http" in t for t in _tx))
+check("قلّة المنشورات لا تجلب الردود", NC._texts({"tweets": [{"text": "واحد فقط"}], "replies": [{"text": "رد"}] * 9}) == ["واحد فقط"])
+check("عيّنة السحب 70 بلا ردود", PC.SAMPLE == {"limit": 70, "replies_limit": 0, "tab_budget_seconds": 45.0})
 check("clone_id ثابت ونظيف", NC.clone_id("@My Label", "@tmrrah9") == "My-Label__tmrrah9")
 check("clone_id يقاوم المحارف", "/" not in NC.clone_id("a/b", "c:d") and NC.clone_id("", "") == "x__x")
 

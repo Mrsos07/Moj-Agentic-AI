@@ -705,7 +705,7 @@ class _Tools:
 
             platform = _platform()
             try:
-                # استنساخ عميق (الافتراضي): مجمّع ردود كبير موزّع زمنياً + فترات أقدم بالبحث
+                # عيّنة: حتى 70 منشوراً أصلياً (بلا ردود) → بصمة نواه → برسونا
                 res = clone_persona(cfg.account_username, target, platform.llm)
                 fresh = platform.repository.get(cfg.id) or cfg
                 apply_to_employee(fresh, res["persona"], res["voice_profile"], platform.repository)
@@ -713,9 +713,8 @@ class _Tools:
                 a = (res["voice_profile"].get("analysis") or {})
                 cov = t.get("coverage") or {}
                 msg = (f"🧬 **استنسخت هوية @{target} إلى @{cfg.account_username}**\n"
-                       f"العيّنة: {t.get('tweet_count', 0)} تغريدة و{t.get('reply_count', 0)} رداً "
-                       f"({t.get('pairs', 0)} مع سياقها) من {cov.get('from', '?')} إلى {cov.get('to', '?')}، "
-                       f"حُلّل منها {t.get('analyzed_replies', 0)} رداً موزّعة على {cov.get('days', '?')} يوماً."
+                       f"العيّنة: {t.get('tweet_count', 0)} منشوراً أصلياً (بلا ردود) "
+                       f"من {cov.get('from', '?')} إلى {cov.get('to', '?')} على {cov.get('days', '?')} يوماً."
                        + (f"\nالصوت: {a['voice_summary'][:300]}" if a.get("voice_summary") else "")
                        + (f"\nدرجة المطابقة في الاختبار: **{fid['score']}%**" if fid.get("score") is not None else "")
                        + (f" · درجة نواه: **{fid['nawah_score']}/100**" if fid.get("nawah_score") is not None else "")

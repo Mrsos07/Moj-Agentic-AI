@@ -551,10 +551,10 @@ def persona_clone(body: PersonaCloneIn,
     label_or_404(body.account_username.strip(), current_user)
     cfg = _employee_or_404(body.employee_id, current_user) if body.apply else None
 
-    limit = max(40, min(int(body.limit or PC.DEEP["limit"]), 150))
+    # عيّنة الاستنساخ: حتى 70 منشوراً أصلياً (قرار المالك) — لا ردود ولا بحث تاريخي
+    limit = max(20, min(int(body.limit or PC.SAMPLE["limit"]), PC.SAMPLE["limit"]))
 
     def run(progress) -> Dict[str, Any]:
-        # استنساخ عميق دائماً: مجمّع ردود كبير موزّع زمنياً + فترات أقدم بالبحث
         result = PC.clone_persona(
             cookie_label=body.account_username.strip(), handle=handle, llm=get_platform().llm,
             limit=limit, language=body.language or "ar", test=body.test, progress=progress)
