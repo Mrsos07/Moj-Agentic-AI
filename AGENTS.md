@@ -395,6 +395,16 @@ defences it forced are still in the code and still required if you set
   UI helper `frontend/src/hooks/clonePersona.js`) — a deep clone takes 3-5 min.
   Test: `verify_voice.py` (82 checks).
 
+## Clone sample = 70 original tweets, no replies (owner decision, 2026-11-01)
+- `persona_clone.SAMPLE = {limit: 70, replies_limit: 0}`; `scrape_profile`/`clone_persona` default to
+  `deep=False`, which sends `include_replies=False` to `read_user_profile`: the scraper reads the
+  profile tab only (no `/with_replies`, no history windows) and trims to `limit`. `replies_limit=0`
+  alone is NOT enough — the scraper used to fall back to `want // 2` replies. The API caps `limit`
+  at 70. `nawah_clone._texts` sends tweets only (`MAX_TEXTS = 70`), never replies.
+- Consequence: `voice_profile` has empty reply kinds/policy/exemplars for new clones, so
+  `reply_plan` runs on defaults and the card shows no reply section — intended. `deep=True`
+  still exists for the old behaviour (verify_voice's deep-profile checks use it in-memory).
+
 ## Voice fingerprint comes from the NAWAH clone server (since 2026-10-25)
 - Persona cloning still scrapes X with the employee's cookies (`persona_clone.scrape_profile`) and still
   measures the Arabic reply side itself (reply kinds, reply policy, exemplars, era phrases). What changed is
