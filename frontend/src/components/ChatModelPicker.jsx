@@ -11,8 +11,11 @@ import authHeaders from '../authHeaders'
 const price = (v) => (v === null || v === undefined ? '—' : v === 0 ? '0' : v < 0.01 ? v.toFixed(3) : v < 10 ? v.toFixed(2) : v.toFixed(0))
 const ctx = (n) => (!n ? '' : n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M` : `${Math.round(n / 1000)}K`)
 
-export default function ChatModelPicker() {
+// employeeId (اختياري): المنتقي نفسه في بطاقة الموظف — يحفظ نموذج هذا الموظف وحده
+// (business_rules.llm) بدل نموذج الشات، و«الافتراضي» فيه = نموذج الموظفين العام من الإعدادات.
+export default function ChatModelPicker({ employeeId = null, onChanged = null }) {
   const [data, setData] = useState(null)
+  const [emp, setEmp] = useState(null)            // اختيار الموظف + ما يعمل به فعلاً
   const [open, setOpen] = useState(false)
   const [models, setModels] = useState({})        // مزوّدون آخرون: provider -> [ids]
   const [orList, setOrList] = useState(null)      // قائمة OpenRouter الغنية
@@ -24,10 +27,17 @@ export default function ChatModelPicker() {
   const searchRef = useRef(null)
   const navigate = useNavigate()
 
-  const load = () => axios.get('/api/llm/providers', { headers: authHeaders() })
-    .then((r) => { setData(r.data); return r.data }).catch(() => null)
+  const load = () => {
+    if (employeeId) {
+      axios.get(`/api/aeos/employees/${employeeId}/llm`, { headers: authHeaders() })
+        .then((r) => setEmp(r.data)).catch(() => {})
+    }
+    return axios.get('/api/llm/providers', { headers: authHeaders() })
+      .then((r) => { setData(r.data); return r.data }).catch(() => null)
+  }
 
-  useEffect(() => { load() }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load() }, [employeeId])
   useEffect(() => {
     const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
     document.addEventListener('mousedown', close)
@@ -66,10 +76,13 @@ export default function ChatModelPicker() {
     setBusy(true)
     setError('')
     try {
-      await axios.put('/api/llm/selection/chat', { provider, model }, { headers: authHeaders() })
+      const url = employeeId ? `/api/aeos/employees/${employeeId}/llm` : '/api/llm/selection/chat'
+      const r = await axios.put(url, { provider, model }, { headers: authHeaders() })
+      if (employeeId) setEmp(r.data)
       await load()
       setOpen(false)
       setQuery('')
+      onChanged?.(provider ? model : '')
     } catch (e) { setError(e?.response?.data?.detail || 'تعذّر تغيير النموذج') }
     setBusy(false)
   }
@@ -81,10 +94,14 @@ export default function ChatModelPicker() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [orList, q])
 
-  if (!data) return null
-  const sel = data.chat || {}
-  const current = sel.provider ? sel.model : 'افتراضي النظام'
-  const currentLabel = sel.provider ? (data.providers.find((p) => p.id === sel.provider)?.label || '') : 'OpenRouter'
+  if (!data || (employeeId && !emp)) return null
+  const sel = employeeId ? (emp.selection || {}) : (data.chat || {})
+  const defaultLabel = employeeId
+    ? `يتبع نموذج الموظفين العام (${emp.owner_default?.model || 'افتراضي النظام'})`
+    : 'افتراضي النظام (OpenRouter)'
+  const current = employeeId ? (emp.effective?.model || '') : (sel.provider ? sel.model : 'افتراضي النظام')
+  const currentLabel = sel.provider ? (data.providers.find((p) => p.id === sel.provider)?.label || '')
+    : employeeId ? (emp.source === 'owner' ? 'نموذج الموظفين العام' : 'افتراضي النظام') : 'OpenRouter'
   const item = 'w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-gray-50 dark:hover:bg-background-dark'
   const muted = 'text-[10px] text-text-secondary-light dark:text-text-secondary-dark'
 
@@ -92,9 +109,10 @@ export default function ChatModelPicker() {
     <div className="relative" ref={ref}>
       <button type="button" onClick={openMenu} disabled={busy}
         className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border-light dark:border-border-dark hover:bg-gray-50 dark:hover:bg-card-dark text-xs text-text-primary-light dark:text-text-primary-dark max-w-[240px]"
-        title={`نموذج الشات: ${currentLabel} — ${current}`}>
+        title={`${employeeId ? 'نموذج هذا الموظف' : 'نموذج الشات'}: ${currentLabel} — ${current}`}>
         <span>🧠</span>
         <span className="truncate font-medium" dir="ltr">{current}</span>
+        {employeeId && !sel.provider && <span className="shrink-0 text-[10px] opacity-60">(عام)</span>}
         <span className="opacity-60">▾</span>
       </button>
       {open && (
@@ -108,7 +126,7 @@ export default function ChatModelPicker() {
             {!q && (
               <button type="button" onClick={() => choose('', '')}
                 className={`w-full text-start px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-background-dark ${!sel.provider ? 'font-bold text-primary' : ''}`}>
-                {!sel.provider ? '✓ ' : ''}افتراضي النظام (OpenRouter)
+                {!sel.provider ? '✓ ' : ''}{defaultLabel}
               </button>
             )}
 

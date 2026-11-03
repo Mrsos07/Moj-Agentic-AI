@@ -207,10 +207,8 @@ def test(user_id: int, provider: str, model: str = "") -> Dict[str, Any]:
     return res
 
 
-def set_selection(user_id: int, purpose: str, provider: str, model: str) -> Dict[str, str]:
-    """اختيار نموذج الشات أو الموظفين. provider فارغ ⇒ الرجوع لإعداد النظام."""
-    if purpose not in PURPOSES:
-        raise ValueError("الاختيار: chat أو employee")
+def _validate(user_id: int, provider: str, model: str) -> tuple:
+    """تحقّق اختيار (مزوّد، نموذج) لهذا المستخدم. provider فارغ ⇒ ("", "") = الافتراضي."""
     provider, model = (provider or "").strip(), (model or "").strip()[:200]
     if provider:
         if provider not in CAT.PROVIDERS:
@@ -228,6 +226,14 @@ def set_selection(user_id: int, purpose: str, provider: str, model: str) -> Dict
                 ids = set()                         # القائمة غير متاحة الآن: لا نمنع الحفظ
             if ids and model not in ids:
                 raise ValueError(f"«{model}» ليس في قائمة OpenRouter للنماذج الداعمة للأدوات")
+    return provider, (model if provider else "")
+
+
+def set_selection(user_id: int, purpose: str, provider: str, model: str) -> Dict[str, str]:
+    """اختيار نموذج الشات أو الموظفين. provider فارغ ⇒ الرجوع لإعداد النظام."""
+    if purpose not in PURPOSES:
+        raise ValueError("الاختيار: chat أو employee")
+    provider, model = _validate(user_id, provider, model)
     db = _session()
     try:
         row = _row(db, user_id, create=True)
@@ -241,9 +247,50 @@ def set_selection(user_id: int, purpose: str, provider: str, model: str) -> Dict
     return {"provider": provider, "model": model if provider else ""}
 
 
+# ─────────────────────────── نموذج كل موظف ───────────────────────────
+#: مفتاح الاختيار داخل ``business_rules`` (عمود JSON موجود — بلا ترحيل). يُدمج عند حفظ البطاقة
+#: (``bootstrap`` يستدعي ``business_rules.update``) فلا يمسحه حفظ بقية الحقول.
+EMPLOYEE_KEY = "llm"
+
+
+def employee_selection(cfg) -> Dict[str, str]:
+    sel = (getattr(cfg, "business_rules", None) or {}).get(EMPLOYEE_KEY) or {}
+    return {"provider": str(sel.get("provider") or ""), "model": str(sel.get("model") or "")}
+
+
+def employee_view(user_id: int, cfg) -> Dict[str, Any]:
+    """اختيار الموظف نفسه + ما يعمل به فعلاً (اختياره ← نموذج «الموظفين» العام للمالك ← النظام)."""
+    own = employee_selection(cfg)
+    d = _load(user_id)
+    general = d["employee"]
+    ep = endpoint_for(user_id, "employee", own if own["provider"] else None)
+    from app.core.llm_provider import resolve_llm
+
+    own_ok = bool(own["provider"]) and _connected(own["provider"], d["keys"], d.get("system_ok", False))
+    source = "employee" if own_ok and ep else "owner" if ep else "system"
+    return {"selection": own, "owner_default": general, "source": source,
+            "effective": {"provider": ep.provider if ep else "system", "model": ep.model if ep else resolve_llm().model}}
+
+
+def set_employee_selection(user_id: int, cfg, provider: str, model: str) -> Dict[str, str]:
+    """نموذج خاص لهذا الموظف (بمفاتيح مالكه/صلاحيته). provider فارغ ⇒ يتبع نموذج الموظفين العام."""
+    provider, model = _validate(user_id, provider, model)
+    rules = dict(getattr(cfg, "business_rules", None) or {})
+    if provider:
+        rules[EMPLOYEE_KEY] = {"provider": provider, "model": model}
+    else:
+        rules.pop(EMPLOYEE_KEY, None)
+    cfg.business_rules = rules
+    return {"provider": provider, "model": model}
+
+
 # ─────────────────────────── للتشغيل ───────────────────────────
-def endpoint_for(user_id: Optional[int], purpose: str):
-    """``LLMEndpoint`` لاختيار المستخدم، أو ``None`` ⇒ استخدم إعداد النظام."""
+def endpoint_for(user_id: Optional[int], purpose: str, override: Optional[Dict[str, str]] = None):
+    """``LLMEndpoint`` لاختيار المستخدم، أو ``None`` ⇒ استخدم إعداد النظام.
+
+    ``override``: اختيار موظف بعينه (``business_rules.llm``) يتقدّم على اختيار المالك العام لهذا
+    الغرض — يُتحقق بمفاتيح المالك وصلاحيته نفسها، فمفتاح محذوف أو صلاحية سُحبت ⇒ يُتجاهل.
+    """
     if not user_id or purpose not in PURPOSES:
         return None
     try:
@@ -252,6 +299,9 @@ def endpoint_for(user_id: Optional[int], purpose: str):
         logger.debug("user llm settings unavailable", exc_info=True)
         return None
     sel = d.get(purpose) or {}
+    if override and override.get("provider") and override.get("model") and _connected(
+            override["provider"], d["keys"], d.get("system_ok", False)):
+        sel = override
     provider, model = sel.get("provider") or "", sel.get("model") or ""
     if not provider or not model or not _connected(provider, d["keys"], d.get("system_ok", False)):
         return None

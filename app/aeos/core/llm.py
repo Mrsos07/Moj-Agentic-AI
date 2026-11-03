@@ -131,7 +131,7 @@ class RoutedLLMProvider(ILLMProvider):
         try:
             from app.services.user_llm import endpoint_for
 
-            ep = endpoint_for(owner[0], owner[1])
+            ep = endpoint_for(owner[0], owner[1], owner[2] if len(owner) > 2 else None)
         except Exception:  # noqa: BLE001 - إعدادات المستخدم لا توقف الدورة
             ep = None
         if ep is None or not ep.available:                # لا اختيار للمستخدم ⇒ الافتراضي المبني مسبقاً

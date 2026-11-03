@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import EmployeeWizard from './EmployeeWizard'
 import ToolsPanel from './ToolsPanel'
+import ChatModelPicker from './ChatModelPicker'
 import VoiceProfileView from './VoiceProfileView'
 import MemoryPanel from './MemoryPanel'
 import clonePersona from '../hooks/clonePersona'
@@ -1736,6 +1737,14 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                         '🧠 ذاكرة الموظف',
                         'ما قلته له أو عنه في الشات من تفضيلات وتعليمات دائمة، ودروس تقييم دوراته. يلتزم بها في كل دورة ودردشة. تُحفظ فوراً.',
                         <MemoryPanel employeeId={agent.employee_id} />
+                      )}
+
+                      {/* ── نموذج الذكاء الاصطناعي لهذا الموظف وحده (يُحفظ فوراً) ── */}
+                      {agent?.employee_id && settingsGroup(
+                        '🧠 نموذج الذكاء الاصطناعي',
+                        'النموذج الذي يكتب ويقرّر به هذا الموظف في دوراته. «يتبع العام» = نموذج الموظفين من الإعدادات. يُحفظ فوراً ويسري من دورته التالية.',
+                        <ChatModelPicker employeeId={agent.employee_id}
+                          onChanged={(m) => onNotify?.(m ? `🧠 @${label} صار يعمل بـ ${m} من دورته التالية` : `🧠 @${label} يتبع نموذج الموظفين العام`)} />
                       )}
 
                       {/* ── الأدوات: بحث الويب + خوادم MCP خارجية (تُحفظ فوراً) ── */}

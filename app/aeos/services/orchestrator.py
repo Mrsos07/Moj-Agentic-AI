@@ -390,7 +390,9 @@ TOOLS: List[Dict[str, Any]] = [
             "query": {"type": "string", "description": "للبحث: اسم أو جزء منه"},
             "model": {"type": "string", "description": "لـ set: المعرّف الكامل من نتيجة search"},
             "purpose": {"type": "string", "enum": ["chat", "employee"],
-                        "description": "chat افتراضياً؛ employee لنموذج دورات الموظفين"},
+                        "description": "chat افتراضياً؛ employee لنموذج دورات كل الموظفين"},
+            "employee": {"type": "string",
+                         "description": "يوزر موظف بعينه: نموذج دوراته هو وحده (يتقدّم على العام)"},
         }, "required": ["action"]},
     }},
     {"type": "function", "function": {
@@ -740,6 +742,20 @@ class _Tools:
             raise PermissionError("يلزم تسجيل الدخول")
         action = str(args.get("action") or "current")
         purpose = "employee" if args.get("purpose") == "employee" else "chat"
+        if str(args.get("employee") or "").strip() and action in ("current", "set", "reset"):
+            cfg = self._cfg(args)                      # موظف بعينه: business_rules.llm
+            if action == "current":
+                v = UL.employee_view(self.user_id, cfg)
+                return {"employee": cfg.account_username, **v["effective"], "source": v["source"]}
+            model = str(args.get("model") or "").strip()
+            if action == "set" and model not in {m["id"] for m in CAT.openrouter_catalog()}:
+                raise LookupError(f"«{model}» ليس معرّفاً في قائمة OpenRouter — استخدم search أولاً")
+            sel = UL.set_employee_selection(self.user_id, cfg, "openrouter" if action == "set" else "",
+                                            model if action == "set" else "")
+            _platform().repository.save(cfg)
+            return {"ok": True, "employee": cfg.account_username,
+                    **(sel if sel["provider"] else {"model": "يتبع نموذج الموظفين العام"}),
+                    "note": "يسري من دورته التالية"}
         if action == "current":
             sel = UL.public_view(self.user_id)[purpose]
             return {"purpose": purpose, "provider": sel["provider"] or "system",
