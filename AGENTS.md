@@ -95,6 +95,13 @@
   the chat header `ChatModelPicker` (search box + prices), `GET /api/llm/openrouter/models`, and the
   coordinator tool `chat_model` (current/search/set/reset; `set` needs a full id from `search`).
   The change applies from the next message. Test: section 6b of `verify_llm_providers.py`.
+- **Per-employee model** (employee card «🧠 نموذج الذكاء الاصطناعي», `GET/PUT /api/aeos/employees/{id}/llm`,
+  or the coordinator: `chat_model` with an `employee` arg). Stored in `business_rules.llm` (existing JSON
+  column, no migration). `bootstrap` merges `business_rules`, so saving the card doesn't wipe it.
+  `runtime/manager.py` sets `LLM_OWNER = (user_id, "employee", business_rules.llm)`, and
+  `endpoint_for(user, purpose, override)` gives it priority over the owner's general «employee»
+  model, validated with the OWNER's keys/permission (a deleted key or revoked permission means it's ignored).
+  Resolution order: employee choice → owner's employee model → system. Test: section 6c of `verify_llm_providers.py`.
 - OpenRouter wins whenever `OPENROUTER_API_KEY` is set; OpenAI is the fallback.
   Both use the same `openai` package — only `base_url` and the model name differ.
 - **Model names must be provider-qualified**: `openai/gpt-4o-mini`, not `gpt-4`.

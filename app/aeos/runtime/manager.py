@@ -303,7 +303,9 @@ class RuntimeManager(IRuntimeManager):
         # كل نداءات LLM في هذه الدورة تذهب لنموذج «الموظفين» الذي اختاره مالكه (إن اختار)
         from app.core.llm_provider import LLM_OWNER
 
-        owner_token = LLM_OWNER.set((getattr(config, "user_id", None), "employee"))
+        # ثالثاً: نموذج هذا الموظف بعينه إن اختاره المالك من بطاقته (يتقدّم على نموذج الموظفين العام)
+        owner_token = LLM_OWNER.set((getattr(config, "user_id", None), "employee",
+                                     (config.business_rules or {}).get("llm")))
         try:
             report = cycle.run(context)
         except Exception as exc:  # noqa: BLE001

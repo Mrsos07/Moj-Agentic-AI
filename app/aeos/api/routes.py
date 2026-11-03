@@ -776,6 +776,38 @@ def _save_skill(cfg, spec):
     return saved
 
 
+class EmployeeLLMIn(BaseModel):
+    provider: str = ""
+    model: str = ""
+
+
+@router.get("/employees/{employee_id}/llm")
+def get_employee_llm(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """نموذج هذا الموظف: اختياره الخاص، ونموذج الموظفين العام لمالكه، وما يعمل به فعلاً."""
+    from app.services import user_llm as UL
+
+    cfg = _employee_or_404(employee_id, current_user)
+    return {"ok": True, "employee_id": cfg.id, **UL.employee_view(cfg.user_id or current_user.id, cfg)}
+
+
+@router.put("/employees/{employee_id}/llm")
+def put_employee_llm(employee_id: str, body: EmployeeLLMIn,
+                     current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """اختيار نموذج خاص لهذا الموظف (provider فارغ ⇒ يتبع نموذج الموظفين العام). يسري من دورته التالية.
+
+    يُتحقق بمفاتيح **مالك الموظف** وصلاحيته (رصيد النظام للمدير/المطوّر فقط)."""
+    from app.services import user_llm as UL
+
+    cfg = _employee_or_404(employee_id, current_user)
+    owner = cfg.user_id or current_user.id
+    try:
+        UL.set_employee_selection(owner, cfg, body.provider, body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    get_platform().repository.save(cfg)
+    return {"ok": True, "employee_id": cfg.id, **UL.employee_view(owner, cfg)}
+
+
 @router.get("/employees/{employee_id}/skills")
 def list_employee_skills(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """مهارات هذا الموظف: المدمجة المثبّتة + المخصّصة التي أنشأها المالك."""

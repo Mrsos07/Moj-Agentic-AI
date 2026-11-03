@@ -349,6 +349,48 @@ try:
         except ValueError:
             ok = True
         check("أداة الشات تحترم الصلاحية (مستخدم عادي بلا مفتاح)", ok)
+        print("6c) نموذج لكل موظف من بطاقته")
+        from app.aeos.employee.repository import SqlEmployeeRepository  # noqa: E402
+        from verify_creator import make_config  # noqa: E402
+
+        repo = SqlEmployeeRepository()
+        emp1, emp2 = make_config(), make_config()
+        emp1.id, emp1.user_id, emp1.account_username, emp1.cookie_label = "emp-one", C, "emp_one", "emp_one"
+        emp2.id, emp2.user_id, emp2.account_username, emp2.cookie_label = "emp-two", C, "emp_two", "emp_two"
+        repo.save(emp1)
+        repo.save(emp2)
+        v = client.get("/api/aeos/employees/emp-one/llm", headers=HC).json()
+        check("بلا اختيار: الموظف يتبع العام ← النظام", v["source"] == "system" and not v["selection"]["provider"], v)
+        r = client.put("/api/aeos/employees/emp-one/llm", headers=HC,
+                       json={"provider": "openrouter", "model": "anthropic/claude-sonnet-4.5"})
+        check("المالك يختار نموذجاً لهذا الموظف من بطاقته", r.status_code == 200 and r.json()["source"] == "employee"
+              and r.json()["effective"]["model"] == "anthropic/claude-sonnet-4.5", r.text[:160])
+        saved = repo.get("emp-one")
+        check("يُحفظ في business_rules.llm (بلا ترحيل) ولا يمسح بقية القواعد",
+              saved.business_rules.get("llm", {}).get("model") == "anthropic/claude-sonnet-4.5"
+              and saved.business_rules.get("daily_post_target") == 2, saved.business_rules.get("llm"))
+        client.put("/api/llm/selection/employee", headers=HC, json={"provider": "openrouter", "model": "openai/gpt-4o-mini"})
+        sel1 = (saved.business_rules or {}).get("llm")
+        sel2 = (repo.get("emp-two").business_rules or {}).get("llm")
+        check("داخل الدورة: الموظف المختار بنموذجه هو", UL.endpoint_for(C, "employee", sel1).model == "anthropic/claude-sonnet-4.5")
+        check("وزميله بلا اختيار يتبع نموذج الموظفين العام",
+              UL.endpoint_for(C, "employee", sel2).model == "openai/gpt-4o-mini")
+        tok = LLM_OWNER.set((C, "employee", sel1))
+        picked = LLMMOD.RoutedLLMProvider(_Default())._pick()
+        LLM_OWNER.reset(tok)
+        check("RoutedLLMProvider يوجّه نداءات الدورة لنموذج الموظف (LLM_OWNER بثلاثة عناصر)",
+              getattr(picked, "_model", "") == "anthropic/claude-sonnet-4.5", getattr(picked, "_model", picked))
+        r = client.put("/api/aeos/employees/emp-one/llm", headers=HC, json={"provider": "openrouter", "model": "made/up"})
+        check("نموذج خارج القائمة ← 400", r.status_code == 400)
+        check("موظف مستخدم آخر ← 404", client.get("/api/aeos/employees/emp-one/llm", headers=HB).status_code == 404)
+        r = client.put("/api/aeos/employees/emp-one/llm", headers=HC, json={"provider": "", "model": ""})
+        check("«يتبع العام» يزيل الاختيار الخاص", r.json()["source"] == "owner"
+              and "llm" not in repo.get("emp-one").business_rules, r.json())
+        res = _Tools(C).chat_model({"action": "set", "employee": "emp_two", "model": "google/gemini-2.5-flash"})
+        check("من الشات: «خلّ @emp_two يستخدم Gemini» ← لهذا الموظف وحده",
+              res["ok"] and repo.get("emp-two").business_rules["llm"]["model"] == "google/gemini-2.5-flash"
+              and "llm" not in repo.get("emp-one").business_rules)
+        client.put("/api/llm/selection/employee", headers=HC, json={"provider": "", "model": ""})
     else:
         print("  ⚠️ النظام ليس على OpenRouter — تخطّيت فحوص رصيد النظام")
 finally:
