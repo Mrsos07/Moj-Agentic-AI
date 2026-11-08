@@ -1081,6 +1081,14 @@ independent structural causes — none of them fixable by telling the model to
   auto-called, and calls happen only at write time (posts, quotes; replies if
   `research_before_replies`). 6h query cache; built-in search via Tavily suppresses a duplicate
   Tavily-MCP search.
+- **Usage plan per MCP server** (`tool_use.usage_plan`, stored in `data/mcp_usage_plans.json`, rebuilt
+  when the tool list changes). Tools that aren't search/extract/news (e.g. trendsmcp
+  `get_top_trends(type,country)`) used to be ignored. Now the system model writes a plan once per
+  server: `observe` = called once each cycle with fixed args (2h cache) → `scratch["mcp_signals"]`
+  → post prompt; `research` = called before writing with the topic in `topic_arg`; `skip` = never
+  called. `_valid_plan` keeps only real schema args and drops a tool if a required arg has no
+  value or the tool is a write tool. Failed calls are not cached. A server is used by
+  employees only if `scope.employees` is true AND its keys are set: trendsmcp needs `Authorization: Bearer …`.
 - Tavily is the ONLY search/trend provider (user decision): built-in `system/mcps/search`
   (`tavily_search()` helper) and the Trend Detector's single `TavilyCollector` (queries = Saudi/Gulf
   news + employees' top interests, `topic=news`, `time_range=day`; landing pages/social hosts

@@ -400,6 +400,19 @@ class ObservePhase(ICognitivePhase):
                 observations["news_error"] = str(exc)
                 _source("📻", "أخبار قوقل", None, error=str(exc))
 
+        # أدوات MCP المفعّلة (ترندات حية…) حسب خطة استخدام كل خادم — مرة كل دورة
+        try:
+            from ..employee import tool_use
+
+            signals = tool_use.observe(context)
+            if signals:
+                observations["mcp_signals_count"] = len(signals)
+                observations["mcp_signals_preview"] = [f"{s['source']}: {s['text'][:100]}" for s in signals]
+                _source("🧰", "أدوات MCP (" + "، ".join(dict.fromkeys(s["source"] for s in signals)) + ")",
+                        len(signals), "إشارة")
+        except Exception as exc:  # noqa: BLE001 - الأدوات تحسين لا شرط للدورة
+            logger.warning("mcp observe failed: %s", exc)
+
         context.scratch["observations"] = observations
 
         # احفظ نتيجة المسح الحي كلقطة تعاد قراءتها في الدورات القادمة (ضمن الصلاحية)

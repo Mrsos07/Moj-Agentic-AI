@@ -3,6 +3,7 @@
   "label": "trendsmcp",
   "transport": "http",
   "url": "https://api.trendsmcp.ai/mcp",
+  "http_mode": "streamable",
   "allowed_tools": null,
   "research_tool": "",
   "research_arg": "",
@@ -10,15 +11,11 @@
   "enabled": true,
   "scope": {
     "coordinator": true,
-    "employees": false
+    "employees": true
   },
   "source": "config",
   "added_by": "saudallosh@gmail.com",
   "added_at": "2026-10-13T23:42:13+00:00",
-  "server_info": {
-    "name": "trendsmcp",
-    "version": "1.0.0"
-  },
   "tools": [
     {
       "name": "trends___get_growth",
@@ -136,6 +133,10 @@
       }
     }
   ],
+  "server_info": {
+    "name": "trendsmcp",
+    "version": "1.0.0"
+  },
   "env_keys": [],
   "header_keys": [
     "Authorization"
