@@ -855,6 +855,36 @@ def check_mcp_usage_plan() -> None:
     check("رد مقطوع ← العناوين", T._compact(cut) == "تطورات الحوثي اليوم", T._compact(cut))
 
 
+def check_specialty_trends_drive_cycle() -> None:
+    """ترندات التخصص (أدوات MCP): بحث X يبحث بها، وتصير مرشّح منشور حتى بلا تطابق كلمات."""
+    from app.aeos.capabilities.base import CapabilityRequest
+    from app.aeos.capabilities.handlers import BrowseSpecialtyNewsCapability
+    from app.aeos.mcp.base import MCPResponse
+    from app.aeos.skills.builtin import _grounded_candidates
+
+    cfg = make_config()
+    cfg.persona.interests = ["politics"]
+    ctx = make_context(cfg, with_signals=False)
+    seen = {}
+
+    class _MCP:
+        def call(self, req):
+            seen.update(req.params)
+            return MCPResponse.ok(tweets=[{"text": "اعتراض مسيّرة حوثية جديدة اليوم", "url": "https://x.com/a/status/1"}])
+
+    ctx.mcp = _MCP()
+    ctx.scratch["specialty_trends"] = [{"topic": "اليمن والحوثيون", "x_query": "مسيّرة حوثية", "why": "تصعيد",
+                                        "headlines": ["اعتراض وتدمير طائرة مسيرة أطلقها الحوثيون باتجاه مكة المكرمة"]}]
+    ctx.scratch["trend_x_queries"] = ["مسيّرة حوثية"]
+    BrowseSpecialtyNewsCapability().execute(CapabilityRequest(name="browse_specialty_news", params={}), ctx)
+    check("بحث X يبحث بموضوع ترند التخصص أولاً", '"مسيّرة حوثية"' in seen.get("query", ""), seen.get("query"))
+    check("تغريدات موضوع الترند تمر فلتر الصلة", len(ctx.scratch.get("specialty_news") or []) == 1)
+    cands = _grounded_candidates(ctx)
+    st = next((c for c in cands if c["source"] == "specialty_trend"), None)
+    check("موضوع ترند التخصص مرشّح منشور مع تغريدات X عنه",
+          st is not None and "اعتراض مسيّرة حوثية" in st["summary"], str(st)[:200])
+
+
 def check_emotion_comes_from_graph_memory() -> None:
     """الحالة العاطفية يجب أن تُبنى على حقائق الذاكرة المعرفية لا على التعليمات."""
     from app.aeos.cognition.phases import EmotionPhase
@@ -1426,6 +1456,7 @@ def main() -> int:
     check_handle_change_followed()
     print("\n=== 5g6) خطة استخدام خوادم MCP ===")
     check_mcp_usage_plan()
+    check_specialty_trends_drive_cycle()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")

@@ -1138,8 +1138,12 @@ class BrowseSpecialtyNewsCapability(ICapability):
 
         lang = getattr(context.config.persona, "language", "ar") or "ar"
         limit = int(request.params.get("limit", 12))
-        # استعلام بحث حي على X لأحدث ما يخص التخصص (Playwright فقط)
-        query = " OR ".join(interests[:3])
+        # استعلام بحث حي على X لأحدث ما يخص التخصص (Playwright فقط). مواضيع ترند التخصص
+        # (أدوات MCP هذه الدورة) تتقدّم: يبحث الموظف في X عمّا يُتداول الآن في مجاله
+        trend_q = [q for q in (context.scratch.get("trend_x_queries") or []) if q][:2]
+        terms = [f'"{q}"' if " " in q else q for q in trend_q] + interests[:3 - min(len(trend_q), 2)]
+        interests = list(interests) + trend_q           # فلتر الصلة يقبل تغريدات موضوع الترند
+        query = " OR ".join(terms)
         if lang in ("ar", "en"):
             query = f"({query}) lang:{lang}"
 
