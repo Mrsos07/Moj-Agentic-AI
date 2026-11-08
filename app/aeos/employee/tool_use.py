@@ -159,7 +159,7 @@ def _call(context: "ExecutionContext", entry: Dict[str, Any], value: str) -> str
     text = (r.data.get("text") or "") if r.success else ""
     if not r.success:
         logger.info("tool %s.%s failed: %s", entry["server"], entry["tool"], r.error)
-    text = re.sub(r"\s+", " ", text).strip()[:_SNIPPET]
+    text = re.sub(r"\s+", " ", _compact(text)).strip()[:_SNIPPET]
     _store(key, text)
     return text
 
@@ -195,6 +195,8 @@ def gather(context: "ExecutionContext", query: str, material: str = "",
                 items.append({"source": t["label"], "title": "", "url": url, "snippet": text})
                 used.append(f"{t['label']}.{t['tool']}")
     for t in planned(context.config, "research"):            # خطة الاستخدام: بحث بموضوع المنشور
+        if f"{t['label']}.{t['tool']}" in used:              # استُدعيت للتوّ بالتصنيف التلقائي
+            continue
         text = _call_planned(context, t, query)
         if text:
             items.append({"source": t["label"], "title": t.get("purpose") or "", "url": "", "snippet": text})
@@ -259,8 +261,8 @@ def _valid_plan(c: Dict[str, Any], raw: Any) -> List[Dict[str, Any]]:
         props = _props(spec)
         args = {k: v for k, v in (p.get("args") or {}).items() if k in props and isinstance(v, (str, int, float))}
         topic = str(p.get("topic_arg") or "")
-        if phase == "research" and topic not in props:
-            continue
+        if phase == "research" and (topic not in props or topic in _URL_ARGS):
+            continue                                         # الموضوع نص لا رابط
         need = set((spec.get("inputSchema") or {}).get("required") or []) - set(args) - ({topic} if topic else set())
         if need:
             continue                                         # وسيط مطلوب بلا قيمة ⇒ النداء سيفشل
@@ -270,7 +272,7 @@ def _valid_plan(c: Dict[str, Any], raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def _build_plan(c: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_plan(c: Dict[str, Any], avoid: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     from ..core.llm import build_llm_provider
 
     tools = [{"name": t.get("name"), "description": (t.get("description") or "")[:900],
@@ -282,11 +284,70 @@ def _build_plan(c: Dict[str, Any]) -> List[Dict[str, Any]]:
     try:
         raw = build_llm_provider().complete_json(
             _PLAN_SYSTEM, f"الخادم: {c.get('label') or c.get('slug')} — {c.get('description') or ''}\n"
-                          f"الأدوات:\n{json.dumps(tools, ensure_ascii=False)}", temperature=0.1)
+                          f"الأدوات:\n{json.dumps(tools, ensure_ascii=False)}"
+                          + ("\n\nجُرّبت هذه النداءات فعلياً وأعادت لوحة فارغة — لا تكرّرها، واختر لوحات "
+                             "أخرى لنفس الجمهور (منصات أو أنواع أخرى للسعودية):\n" + "\n".join(avoid)
+                             if avoid else ""), temperature=0.1)
     except Exception as exc:  # noqa: BLE001 - الخطة تحسين: لا تمنع الدورة
         logger.warning("usage plan for %s failed: %s", c.get("slug"), exc)
         return []
     return _valid_plan(c, raw)
+
+
+def _compact(text: str) -> str:
+    """رد MCP (غالباً JSON داخل body) ← سطر كلمات مرتّب. لوحة فارغة (count=0) ← "".
+
+    قيس 2026-11-08 على trendsmcp: لوحتا X وGoogle للسعودية ``count: 0`` بينما YouTube/TikTok
+    للسعودية مليئة؛ والنص الخام JSON طويل يضيّع موجّه الكتابة."""
+    try:
+        outer = json.loads(text)
+        body = json.loads(outer["body"]) if isinstance(outer, dict) and isinstance(outer.get("body"), str) else outer
+    except (ValueError, TypeError, KeyError):
+        # رد مقطوع (قيس: get_context يصل مقصوصاً عند 6000 حرف) ← العناوين بالتعبير النمطي
+        flat = re.sub(r"\\+u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text).replace('\\"', '"')
+        titles = re.findall(r'"(?:title|keyword_title|headline)":\s*"([^"]{4,200})"', flat)
+        return " | ".join(dict.fromkeys(re.sub(r"\s+", " ", t) for t in titles[:8])) if titles else text
+    if not isinstance(body, dict):
+        return text
+    rows = body.get("data")
+    if isinstance(rows, list):
+        if not rows:
+            return ""
+        words = []
+        for row in rows[:15]:
+            if isinstance(row, list):
+                words.append(" ".join(str(x) for x in row[1:] if not isinstance(x, (list, dict)))[:90])
+            elif isinstance(row, dict):
+                words.append(str(row.get("keyword") or row.get("title") or row.get("name") or "")[:90])
+        return "، ".join(f"{i + 1}) {w}" for i, w in enumerate(w for w in words if w))
+    if isinstance(body.get("sources"), list):                 # get_context: مصادر ← عناصر
+        lines = []
+        for src in body["sources"]:
+            for it in (src.get("items") or [])[:4] if isinstance(src, dict) else []:
+                if isinstance(it, dict):
+                    t = it.get("title") or it.get("text") or it.get("content") or it.get("body") or ""
+                    if t:
+                        lines.append(f"[{src.get('source', '')}] {re.sub(r'\s+', ' ', str(t))[:200]}")
+        return " | ".join(lines)                             # لا عناصر في أي مصدر ← ""
+    return text
+
+
+def _probe_empty(c: Dict[str, Any], plan: List[Dict[str, Any]]) -> List[str]:
+    """جرّب أدوات الرصد مرة عند بناء الخطة: أي لوحة فارغة تُستبعد (لا نستهلك حصة على لا شيء)."""
+    from ..mcp.base import MCPRequest
+    from ..mcp.servers import external_mcp as X
+    from ..services import tools_service as TS
+
+    empty = []
+    for p in [p for p in plan if p["phase"] == "observe"]:
+        try:
+            r = TS.registry().call(MCPRequest(employee_id="plan-probe", tool=f"{X.PREFIX}{c['slug']}.{p['tool']}",
+                                              params=p["args"], context={"server": X.PREFIX + c["slug"]}))
+        except Exception:  # noqa: BLE001
+            continue
+        if r.success and not _compact((r.data or {}).get("text") or ""):
+            empty.append(json.dumps({"tool": p["tool"], **p["args"]}, ensure_ascii=False))
+    return empty
 
 
 def usage_plan(c: Dict[str, Any], rebuild: bool = False) -> List[Dict[str, Any]]:
@@ -298,6 +359,13 @@ def usage_plan(c: Dict[str, Any], rebuild: bool = False) -> List[Dict[str, Any]]
         if hit and hit.get("signature") == sig and not rebuild:
             return hit.get("tools") or []
     plan = _build_plan(c)
+    empty = _probe_empty(c, plan) if plan else []
+    if empty:
+        # أعد التخطيط مرة واحدة مع إخبار النموذج بما رجع فارغاً، ثم استبعد ما بقي فارغاً
+        plan = _build_plan(c, avoid=empty) or plan
+        still = set(_probe_empty(c, plan))
+        plan = [p for p in plan if p["phase"] != "observe"
+                or json.dumps({"tool": p["tool"], **p["args"]}, ensure_ascii=False) not in still]
     with _plan_lock:
         plans = _load_plans()
         plans[c.get("slug") or ""] = {"signature": sig, "tools": plan,
@@ -326,7 +394,11 @@ def planned(cfg, phase: str) -> List[Dict[str, Any]]:
     out = []
     for c, private in _servers(cfg):
         srv = X.ExternalMCPServer(c)
-        allowed = set(srv.allowed)
+        # ما يصنّفه ``classify`` (بحث/قراءة/أخبار) له طريقه في gather؛ الخطة لما سواه فقط
+        auto = {t.get("name") for t in c.get("tools") or [] if classify(t)} | {c.get("research_tool") or ""}
+        allowed = set(srv.allowed) - auto
+        if not allowed:
+            continue
         try:
             plan = usage_plan(c)
         except Exception:  # noqa: BLE001
@@ -351,7 +423,7 @@ def _call_planned(context: "ExecutionContext", entry: Dict[str, Any], topic: str
             return hit[1]
     r = context.mcp.call(MCPRequest(employee_id=context.config.id, tool=f"{entry['server']}.{entry['tool']}",
                                     params=params, context={"server": entry["server"]}))
-    text = re.sub(r"\s+", " ", (r.data.get("text") or "") if r.success else "").strip()[:size]
+    text = re.sub(r"\s+", " ", _compact((r.data.get("text") or "") if r.success else "")).strip()[:size]
     if not r.success:
         logger.info("planned tool %s.%s failed: %s", entry["server"], entry["tool"], r.error)
     if re.search(r"(?i)plan.?limit|rate.?limit|quota", text) and len(text) < 300:

@@ -825,6 +825,36 @@ def check_handle_change_followed() -> None:
           and snap.get("handle_changed_from") == "nxjrjrjdj", str(snap))
 
 
+def check_mcp_usage_plan() -> None:
+    """خطة استخدام خادم MCP: لا وسائط مخترعة ولا أدوات كتابة، والردود تُختصر لسطر مقروء."""
+    import json
+
+    from app.aeos.employee import tool_use as T
+
+    c = {"slug": "trendsmcp", "tools": [
+        {"name": "trends___get_top_trends", "inputSchema": {"properties": {"type": {}, "country": {}},
+                                                            "required": ["type"]}},
+        {"name": "trends___get_growth", "inputSchema": {"properties": {"keyword": {}, "source": {}},
+                                                        "required": ["keyword", "source"]}},
+        {"name": "delete_all", "inputSchema": {"properties": {}}}]}
+    plan = T._valid_plan(c, {"tools": [
+        {"tool": "trends___get_top_trends", "phase": "observe", "args": {"type": "TikTok", "hack": 1}},
+        {"tool": "trends___get_growth", "phase": "observe", "args": {}},
+        {"tool": "trends___get_growth", "phase": "research", "topic_arg": "keyword", "args": {"source": "x"}},
+        {"tool": "delete_all", "phase": "observe", "args": {}}]})
+    check("الخطة تُسقط الوسائط المخترعة", plan and plan[0]["args"] == {"type": "TikTok"}, str(plan))
+    check("الخطة تُسقط أداة ينقصها وسيط مطلوب وأدوات الكتابة",
+          [(p["tool"], p["phase"]) for p in plan] == [("trends___get_top_trends", "observe"),
+                                                      ("trends___get_growth", "research")], str(plan))
+    check("خطة فاسدة من النموذج ← لا شيء", T._valid_plan(c, "garbage") == [])
+    wrap = lambda b: json.dumps({"statusCode": 200, "body": json.dumps(b)})  # noqa: E731
+    check("لوحة فارغة ← لا إشارة", T._compact(wrap({"count": 0, "data": []})) == "")
+    check("لوحة ترند ← سطر مرتّب", T._compact(wrap({"data": [[1, "ترند"], [2, "الرياض"]]})) == "1) ترند، 2) الرياض")
+    cut = wrap({"sources": [{"source": "YouTube", "items": [{"title": "تطورات الحوثي اليوم"},
+                                                            {"title": "عنوان يُقطع في منتصفه"}]}]})[:-30]
+    check("رد مقطوع ← العناوين", T._compact(cut) == "تطورات الحوثي اليوم", T._compact(cut))
+
+
 def check_emotion_comes_from_graph_memory() -> None:
     """الحالة العاطفية يجب أن تُبنى على حقائق الذاكرة المعرفية لا على التعليمات."""
     from app.aeos.cognition.phases import EmotionPhase
@@ -1394,6 +1424,8 @@ def main() -> int:
     check_reply_fits_x_limit()
     print("\n=== 5g5) تغيّر يوزر الحساب على X ===")
     check_handle_change_followed()
+    print("\n=== 5g6) خطة استخدام خوادم MCP ===")
+    check_mcp_usage_plan()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")
