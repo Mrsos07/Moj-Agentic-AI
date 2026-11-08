@@ -1092,7 +1092,18 @@ independent structural causes — none of them fixable by telling the model to
   as a URL arg). When the plan is built, each observe board is probed once. Measured 2026-11-08:
   trendsmcp's X and Google boards for SA returned `count: 0`, while TikTok SA was full. Empty boards
   are re-planned once, then dropped. `_compact` turns replies into one ranked line. `get_context`
-  arrives cut at 6000 chars (invalid JSON), so titles are pulled by regex. Test: section 5g6 of `verify_creator.py`. A server is used by
+  arrives cut at 6000 chars (invalid JSON), so titles are pulled by regex. Test: section 5g6 of `verify_creator.py`.
+- **Specialty trends every cycle** (`tool_use.specialty_trends`, called in `ObservePhase` BEFORE
+  `browse_specialty_news`, and also on the signal-snapshot path):
+  1. Two search keywords are derived from the persona's role, bio and audience (`_specialty_keywords`,
+     cached per day). The raw interest `politics` returned US politics in English for a Saudi account.
+  2. The first `research` tool is called with each keyword (1 h cache), together with the boards and the X trends.
+  3. The employee's LLM picks ≤2 topics INSIDE the specialty, each with an `x_query` and evidence headline numbers.
+  4. Results go into `scratch["specialty_trends"]` and `scratch["trend_x_queries"]`:
+     - `browse_specialty_news` searches X with those queries first, and the relevance filter accepts them.
+     - `_grounded_candidates` adds a `specialty_trend` candidate (`_priority` 6) with the headlines and
+       matching X tweets, and `_editorial_pick` chooses among the candidates.
+  Measured live: «اليمن والحوثيون» was picked, with 3 real headlines. Test: `check_specialty_trends_drive_cycle`. A server is used by
   employees only if `scope.employees` is true AND its keys are set: trendsmcp needs `Authorization: Bearer …`.
 - Tavily is the ONLY search/trend provider (user decision): built-in `system/mcps/search`
   (`tavily_search()` helper) and the Trend Detector's single `TavilyCollector` (queries = Saudi/Gulf
