@@ -544,6 +544,11 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
         "والمتغير هو الصياغة والإيقاع.",
         unslop.prompt_rules(context.config),
     ]
+    from ..employee import tool_use as _tu
+
+    mcp_block = _tu.signals_block(context)        # ترندات/إشارات أدوات MCP المرصودة هذه الدورة
+    if mcp_block:
+        lines += ["", mcp_block]
     if vp:
         lines += ["", voice_profile.voice_block(vp, "post")]
     if focus:
