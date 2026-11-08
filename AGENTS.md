@@ -157,6 +157,18 @@
   (`assign_angle`). The skill writes from `media_brief` (no shallow research). The quality gate's
   echo check uses `echo_ref` = instructions only — comparing against the full brief (with
   research/facts) flagged faithful fact-quoting as `echo_brief`. Test: `verify_media_brief.py`.
+- **Campaigns** (`plan_campaign` coordinator tool, prompt rule 5ب) are for any direct "make the team
+  post about X" task:
+  1. One media brief.
+  2. `_propose_assignments`: the LLM, acting as editor-in-chief, gives each employee a DIFFERENT
+     sub-topic, angle, hook and format (post/thread) based on role and interests. An employee far from
+     the topic gets `skip`, and unknown handles are dropped. Without an LLM it falls back to rotating the angles.
+  3. With `dispatch=false` (the default) the coordinator shows the brief and the proposals and asks «أوجّههم؟».
+  4. `dispatch=true` (or `only=[…]`) reuses the SAME cached plan (30 min, no new search) and dispatches
+     with `for_employee(brief, angle_text=…)`.
+  `order_publish` stays for a single employee. When there is no `TAVILY_API_KEY`, `_research` falls
+  back to Google News RSS (`when:2d`, then `7d`). Measured 2026-11-08: no key in `.env` and the Tavily
+  MCP needed OAuth, so every directed publish had gone out with NO research. Test: the campaign section of `verify_media_brief.py`.
 - Post images go through `app/aeos/employee/visual_director.py` (NOT a raw prompt): an LLM art
   director turns the post into a concrete, literal news scene (subject/setting/composition/
   lighting/camera/palette/mood) with banned clichés (chess, crowns, maps, flags…), Gulf cultural
