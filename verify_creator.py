@@ -791,6 +791,40 @@ def check_reply_fits_x_limit() -> None:
           "أطول من حد X" in msg, msg)
 
 
+def check_handle_change_followed() -> None:
+    """المالك غيّر يوزر الحساب على X (nxjrjrjdj ← nxjrjrjdj2): الهوية والأداء يُقرآن من اليوزر الحالي."""
+    import tempfile
+
+    from app.aeos.mcp.servers import playwright_x_mcp as PX
+    from app.aeos.services import identity_store as IS
+
+    mod = sys.modules[type(PX.PlaywrightXMCP()).__module__]
+
+    class _Link:
+        first = property(lambda self: self)
+
+        def wait_for(self, state="attached", timeout=0):
+            pass
+
+        def get_attribute(self, name):
+            return "/nxjrjrjdj2"
+
+    class _Page:
+        def locator(self, sel):
+            return _Link()
+
+    check("اليوزر الحالي يُقرأ من رابط «الملف الشخصي» في قائمة X", mod._own_handle(_Page()) == "nxjrjrjdj2")
+    orig = IS._dir
+    tmp = tempfile.mkdtemp()
+    IS._dir = lambda eid: __import__("pathlib").Path(tmp) / eid
+    try:
+        snap = IS.save_x_profile("e1", "nxjrjrjdj", {"name": "صقر", "handle": "nxjrjrjdj2"}, "live")
+    finally:
+        IS._dir = orig
+    check("البطاقة تحفظ اليوزر الحالي وتسجّل القديم", snap["handle"] == "nxjrjrjdj2"
+          and snap.get("handle_changed_from") == "nxjrjrjdj", str(snap))
+
+
 def check_emotion_comes_from_graph_memory() -> None:
     """الحالة العاطفية يجب أن تُبنى على حقائق الذاكرة المعرفية لا على التعليمات."""
     from app.aeos.cognition.phases import EmotionPhase
@@ -1358,6 +1392,8 @@ def main() -> int:
     check_reply_modal_race()
     print("\n=== 5g4) الرد ضمن حد X ===")
     check_reply_fits_x_limit()
+    print("\n=== 5g5) تغيّر يوزر الحساب على X ===")
+    check_handle_change_followed()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")

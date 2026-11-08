@@ -49,6 +49,12 @@
   `fit(…, 270)` before sending (10 margin: our count said 288 where X said 293), and
   `x_actions.reply_to_tweet` fails fast with a clear message if text over the limit reaches it.
   `_normalize_post_text` uses the same `fit`. Test: section 5g4 of `verify_creator.py`.
+- The owner can rename the X handle at any time. Measured 2026-11-08: nxjrjrjdj became nxjrjrjdj2 and
+  `x.com/nxjrjrjdj` showed «هذا الحساب غير موجود», so the identity refresh timed out waiting for
+  `UserName`. Readers of the account's OWN page (`_read_account_profile`, `_read_my_posts`) go
+  through `_goto_own_profile`, which reads the real handle from `AppTabBar_Profile_Link` and
+  re-navigates. The snapshot stores the current `handle` plus `handle_changed_from`.
+  `cfg.account_username` is NOT auto-renamed (chat mentions/ledger key on it). Test: section 5g5 of `verify_creator.py`.
 - Proxy failover (since 2026-10-28): a residential exit node can die mid-session. Seen live:
   `ERR_PROXY_CONNECTION_FAILED` / `ERR_TIMED_OUT` on every proxied read for ~15 min while direct
   sources worked. `captcha_browser.goto` classifies route errors (`proxy_rotation.ROUTE_ERRORS`, or

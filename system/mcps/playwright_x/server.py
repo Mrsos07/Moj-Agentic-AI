@@ -211,6 +211,33 @@ def account_header(raw: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _own_handle(page, wait_ms: int = 15_000) -> str:
+    """يوزر الحساب المسجّل فعلاً من رابط «الملف الشخصي» في قائمة X الجانبية — لا من إعداداتنا.
+
+    قيس 2026-11-08: المالك غيّر يوزر الحساب على X (nxjrjrjdj ← nxjrjrjdj2)، فصارت
+    ``x.com/nxjrjrjdj`` «هذا الحساب غير موجود» وفشل جلب الهوية بانتظار رأس لا يظهر أبداً.
+    """
+    link = page.locator('a[data-testid="AppTabBar_Profile_Link"]').first
+    try:
+        link.wait_for(state="attached", timeout=wait_ms)
+        return (link.get_attribute("href") or "").strip("/").split("/")[0].split("?")[0]
+    except Exception:  # noqa: BLE001 - لا قائمة جانبية (تخطيط آخر): نبقى على المعروف
+        return ""
+
+
+def _goto_own_profile(page, handle: str) -> str:
+    """افتح صفحة الحساب نفسه بيوزره **الحالي** على X وأعده (قد يختلف عن المحفوظ عندنا)."""
+    _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
+    _guard_captcha(page)
+    own = _own_handle(page)
+    if own and own.lower() != (handle or "").lower():
+        logger.warning("X handle changed: @%s is now @%s — reading the current profile", handle, own)
+        _goto(page, f"https://x.com/{own}", wait_until="domcontentloaded")
+        _guard_captcha(page)
+        return own
+    return handle
+
+
 def _profile_header(page, handle: str, wait_ms: int = 15_000) -> Dict[str, str]:
     """اقرأ رأس صفحة الحساب المفتوحة: ينتظر الاسم ثم يمهل الصورة لحظة ليُعرف رابطها."""
     _wait_cards(page, 'div[data-testid="UserName"]', wait_ms)
@@ -741,9 +768,11 @@ class PlaywrightXMCP(IMCPServer):
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
-                _guard_captcha(page)
+                # يوزر الحساب الحالي على X (قد يكون تغيّر): منه تُقاس «منشوراتي» لا من المحفوظ
+                handle = _goto_own_profile(page, handle)
+                target = f"@{handle.lower()}"
                 if header_out is not None:
+                    header_out["handle"] = handle
                     try:
                         header_out.update(_profile_header(page, handle))
                     except Exception:  # noqa: BLE001
@@ -805,9 +834,8 @@ class PlaywrightXMCP(IMCPServer):
             page = context.new_page()
             page.set_default_timeout(30_000)
             try:
-                _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
-                _guard_captcha(page)
-                return _profile_header(page, handle, wait_ms=20_000)
+                handle = _goto_own_profile(page, handle)
+                return {**_profile_header(page, handle, wait_ms=20_000), "handle": handle}
             finally:
                 context.close()
                 browser.close()

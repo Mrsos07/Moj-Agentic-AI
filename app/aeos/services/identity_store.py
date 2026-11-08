@@ -233,7 +233,11 @@ def save_x_profile(employee_id: str, handle: str, header: Dict[str, Any],
     if not (header and (header.get("name") or header.get("avatar_url"))):
         return None
     snap = {k: str(header.get(k) or "") for k in ("name", "bio", "avatar_url", "banner_url")}
-    snap.update(handle=str(handle or "").lstrip("@"), fetched_at=_now().isoformat(), source=source)
+    # اليوزر كما قرأه المتصفح من X الآن يتقدّم على المحفوظ عندنا (المالك قد يغيّره من X)
+    current = str(header.get("handle") or handle or "").lstrip("@")
+    snap.update(handle=current, fetched_at=_now().isoformat(), source=source)
+    if handle and current.lower() != str(handle).lstrip("@").lower():
+        snap["handle_changed_from"] = str(handle).lstrip("@")
     with _LOCK:
         _write(employee_id, "x_profile.json", snap)
     return snap
