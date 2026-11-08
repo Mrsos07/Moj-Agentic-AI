@@ -144,6 +144,57 @@ full = pp.get("brief", "") + "\n\n" + m1 + " ذوباب جبهة اختبار ت
 check("منشور يقتبس حقائق الرسالة لا يُعلَّم «إعادة صياغة التعليمات» (كان يُقارن بالبريف كاملاً)",
       "echo_brief" in _quality_issues(post, ctx, full) and "echo_brief" not in _quality_issues(post, ctx, pp.get("brief", "")))
 
+print("\n— حملة المنسّق: بحث ← رسالة ← مقترح لكل موظف ← توجيه بعد الموافقة")
+from app.aeos.services import media_brief as _MB  # noqa: E402
+from app.aeos.services import orchestrator as _O  # noqa: E402
+
+_brief = {"ok": True, "topic": "t", "headline": "عنوان", "summary": "خلاصة", "angles": ["أمنية", "سياسية"],
+          "facts": [{"fact": "حقيقة", "src": 1}], "sources": [{"n": 1, "title": "x", "url": "https://a.com/1",
+                                                               "site": "a.com", "date": ""}]}
+_builds = []
+_orig_build = _MB.build
+_MB.build = lambda topic, **k: (_builds.append(topic), _brief)[1]
+_emps = [NS(account_username="pol", persona=NS(role="محلل سياسي", interests=["politics"], tone="جاد"),
+            status=NS(value="active")),
+         NS(account_username="spt", persona=NS(role="رياضي", interests=["football"], tone="خفيف"),
+            status=NS(value="active"))]
+_orig_emps, _orig_platform = _O.employees_for, _O._platform
+_O.employees_for = lambda uid: _emps
+
+
+class _LLM:
+    available = True
+
+    def complete_json(self, system, prompt, temperature=0.2):
+        return {"proposals": [
+            {"employee": "@pol", "topic": "الردع", "angle": "قراءة سياسية", "format": "thread", "hook": "لماذا؟"},
+            {"employee": "spt", "topic": "-", "angle": "-", "skip": True, "why": "خارج تخصصه"},
+            {"employee": "ghost", "topic": "دخيل"}]}
+
+
+_O._platform = lambda: NS(llm=_LLM())
+_T = _O._Tools(1, "")
+_sent = []
+_T._dispatch = lambda cfg, payload, caps, label: _sent.append((cfg.account_username, caps[0], payload))
+try:
+    _r = _T.plan_campaign({"topic": "حملة اختبار"})
+    _props = {p["employee"]: p for p in _r["proposals"]}
+    check("الخطة: رسالة كاملة + مقترح لكل موظف بلا توجيه قبل الموافقة",
+          _r["media_brief"]["headline"] == "عنوان" and set(_props) == {"pol", "spt"} and not _sent
+          and "أوجّههم" in _r["next"], str(_r)[:300])
+    check("موظف خارج اقتراح النموذج لا يُخترع (ghost) والبعيد عن تخصصه skip",
+          "ghost" not in _props and _props["spt"]["skip"])
+    _r2 = _T.plan_campaign({"topic": "حملة اختبار", "dispatch": True})
+    check("الموافقة تعيد استخدام الخطة نفسها (بحث واحد)", len(_builds) == 1, _builds)
+    check("التوجيه للمناسبين فقط بزاوية الخطة وصيغتها", _r2["dispatched"] == ["pol"] and _sent[0][1] == "publish_thread"
+          and "الردع — قراءة سياسية" in _sent[0][2]["media_brief"], str(_sent)[:300])
+    _MB.build = lambda topic, **k: (_ for _ in ()).throw(RuntimeError("x"))  # لن يُستدعى: الخطة مخزّنة
+    _sent.clear()
+    _T.plan_campaign({"topic": "حملة اختبار", "dispatch": True, "only": ["spt"]})
+    check("only يحصر التوجيه (والمستبعَد بـskip لا يُوجَّه)", _sent == [])
+finally:
+    _MB.build, _O.employees_for, _O._platform = _orig_build, _orig_emps, _orig_platform
+
 print()
 if FAILED:
     print(f"❌ {len(FAILED)} فحص فشل: {FAILED}")
