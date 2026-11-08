@@ -1087,7 +1087,12 @@ independent structural causes — none of them fixable by telling the model to
   server: `observe` = called once each cycle with fixed args (2h cache) → `scratch["mcp_signals"]`
   → post prompt; `research` = called before writing with the topic in `topic_arg`; `skip` = never
   called. `_valid_plan` keeps only real schema args and drops a tool if a required arg has no
-  value or the tool is a write tool. Failed calls are not cached. A server is used by
+  value or the tool is a write tool. Failed calls are not cached. The plan covers ONLY tools
+  `classify` does NOT handle (search/extract/news keep their `gather` path; a topic is never passed
+  as a URL arg). When the plan is built, each observe board is probed once. Measured 2026-11-08:
+  trendsmcp's X and Google boards for SA returned `count: 0`, while TikTok SA was full. Empty boards
+  are re-planned once, then dropped. `_compact` turns replies into one ranked line. `get_context`
+  arrives cut at 6000 chars (invalid JSON), so titles are pulled by regex. Test: section 5g6 of `verify_creator.py`. A server is used by
   employees only if `scope.employees` is true AND its keys are set: trendsmcp needs `Authorization: Bearer …`.
 - Tavily is the ONLY search/trend provider (user decision): built-in `system/mcps/search`
   (`tavily_search()` helper) and the Trend Detector's single `TavilyCollector` (queries = Saudi/Gulf
