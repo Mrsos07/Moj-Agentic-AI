@@ -11,7 +11,7 @@ from typing import Optional
 
 from app.db.database import get_db
 from app.db.models import User
-from app.auth.security import decode_token
+from app.auth.token_guard import authenticate
 
 security = HTTPBearer(auto_error=False)
 
@@ -26,15 +26,7 @@ async def get_current_user(
     """
     if not credentials:
         return None
-    
-    token = credentials.credentials
-    token_data = decode_token(token)
-    
-    if token_data is None:
-        return None
-    
-    user = db.query(User).filter(User.id == token_data.user_id).first()
-    return user
+    return authenticate(credentials.credentials, db)[0]
 
 
 async def require_current_user(
@@ -51,23 +43,14 @@ async def require_current_user(
             detail="Authentication required"
         )
     
-    token = credentials.credentials
-    token_data = decode_token(token)
-    
-    if token_data is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token"
-        )
-    
-    user = db.query(User).filter(User.id == token_data.user_id).first()
-    
+    # نفس قواعد middleware حرفياً (token_guard): توقيع، انتهاء، إبطال، حساب نشط
+    user, reason = authenticate(credentials.credentials, db)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
+            detail={"revoked": "Token has been revoked", "inactive": "Account is disabled",
+                    "user_not_found": "User not found"}.get(reason, "Invalid or expired token")
         )
-    
     return user
 
 

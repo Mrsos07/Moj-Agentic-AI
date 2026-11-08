@@ -28,6 +28,14 @@ import app.db.database as DB  # noqa: E402
 
 # ── قاعدة مؤقتة: كل SessionLocal في التطبيق هو الكائن نفسه، فإعادة ربطه تكفي ──
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+# ملفات الإبطال وnonce الـcallback في مجلد مؤقت: معرّفات مستخدمي الاختبار قد تطابق مستخدماً حقيقياً
+_auth_dir = tempfile.mkdtemp()
+import app.auth.internal as _INT  # noqa: E402
+import app.auth.token_guard as _TG  # noqa: E402
+
+_TG._PATH = __import__("pathlib").Path(_auth_dir) / "auth_revocations.json"
+_TG._state = None
+_INT._USED_PATH = __import__("os").path.join(_auth_dir, "nonces.json")
 _tmp.close()
 _engine = create_engine(f"sqlite:///{_tmp.name}", connect_args={"check_same_thread": False})
 DB.engine = _engine
@@ -244,10 +252,76 @@ check("نفس session_id لمستخدم آخر ← محادثة مختلفة (ل
 db.close()
 from app.auth.internal import sign, signed_url, verify  # noqa: E402
 
-check("توقيع callback صحيح يُقبل والمعدَّل يُرفض",
-      verify("login", 5, sign("login", 5)) and not verify("login", 6, sign("login", 5))
-      and not verify("schedule", 5, sign("login", 5)))
-check("signed_url يضيف التوقيع", "sig=" in signed_url("http://h/x", "login", 1))
+import time as _t  # noqa: E402
+from urllib.parse import parse_qs, urlsplit  # noqa: E402
+
+_q = {k: v[0] for k, v in parse_qs(urlsplit(signed_url("http://h/x", "login", 5)).query).items()}
+check("signed_url يضيف توقيعاً ومهلة وnonce", {"sig", "exp", "nonce"} <= set(_q), _q)
+check("توقيع لمعرّف/غرض آخر يُرفض", not verify("login", 6, _q["sig"], _q["exp"], _q["nonce"])
+      and not verify("schedule", 5, _q["sig"], _q["exp"], _q["nonce"]))
+check("توقيع callback صحيح يُقبل مرة واحدة", verify("login", 5, _q["sig"], _q["exp"], _q["nonce"]))
+check("إعادة استخدام الرابط نفسه تُرفض (nonce)", not verify("login", 5, _q["sig"], _q["exp"], _q["nonce"]))
+_old = int(_t.time()) - 5
+check("توقيع منتهي المهلة يُرفض", not verify("login", 5, sign("login", 5, _old, "n1"), _old, "n1"))
+check("تعديل exp يكسر التوقيع", not verify("login", 5, sign("login", 5, _old, "n2"), _old + 9999, "n2"))
+check("مفتاح callback منفصل عن سرّ JWT", sign("login", 5, 1, "n") != __import__("hmac").new(
+      __import__("app.auth.security", fromlist=["SECRET_KEY"]).SECRET_KEY.encode(), b"v2:login:5:1:n",
+      "sha256").hexdigest())
+
+print("4c) التحقق الموحّد من التوكن (token_guard)")
+from app.auth import token_guard as TG  # noqa: E402
+from app.auth.security import create_access_token  # noqa: E402
+
+_tok = create_access_token({"sub": str(A), "email": "a@x"})
+check("توكن صالح ← المستخدم", (TG.authenticate(_tok)[0] or object()).__dict__.get("id") == A)
+_r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {_tok}"})
+check("/me (مسار dependencies) يقبل التوكن الصالح", _r.status_code == 200, _r.status_code)
+client.post("/api/auth/logout", headers={"Authorization": f"Bearer {_tok}"})
+check("بعد الخروج: /me (dependencies) يرفض", client.get("/api/auth/me", headers={"Authorization": f"Bearer {_tok}"}).status_code == 401)
+check("بعد الخروج: مسار middleware يرفض", client.get("/api/aeos/employees", headers={"Authorization": f"Bearer {_tok}"}).status_code == 401)
+check("بعد الخروج: الـWebSocket يرفض", TG.authenticate(_tok) == (None, "revoked"))
+check("الإبطال مخزّن بالتجزئة لا بالتوكن", _tok not in TG._PATH.read_text(encoding="utf-8")
+      and TG.digest(_tok) in TG._PATH.read_text(encoding="utf-8"))
+_orig_redis = TG._redis
+TG._redis = lambda: None                      # Redis معطّل
+_tok2 = create_access_token({"sub": str(A), "email": "a@x"})
+_r = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {_tok2}"})
+check("الخروج مع Redis معطّل يُبطل فعلاً", _r.status_code == 200 and TG.authenticate(_tok2)[1] == "revoked")
+TG._redis = _orig_redis
+_tok3 = create_access_token({"sub": str(A), "email": "a@x"})
+db = DB.SessionLocal()
+_u = db.query(M.User).get(A)
+_u.is_active = False
+db.commit()
+check("حساب معطّل ← مرفوض في المسارين", TG.authenticate(_tok3)[1] == "inactive"
+      and client.get("/api/auth/me", headers={"Authorization": f"Bearer {_tok3}"}).status_code == 401)
+_u.is_active = True
+db.commit()
+db.close()
+_t.sleep(1.1)
+TG.revoke_user(A)
+check("إبطال كل جلسات المستخدم (تغيير كلمة المرور/التعطيل)", TG.authenticate(_tok3)[1] == "revoked")
+_t.sleep(1.1)
+check("توكن صادر بعد الإبطال الشامل يعمل", TG.authenticate(create_access_token({"sub": str(A)}))[0] is not None)
+import json as _json  # noqa: E402
+
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
+
+_wt = create_access_token({"sub": str(A), "email": "a@x"})
+_closed = None
+with client.websocket_connect("/ws/chat") as _ws:
+    _ws.send_text(_json.dumps({"type": "auth", "token": _wt}))
+    _ok = _ws.receive_json().get("type") == "auth_ok"
+    TG.revoke_token(_wt)                                  # خروج/إبطال أثناء اتصال قائم
+    _ws.send_text(_json.dumps({"type": "message", "message": "مرحبا"}))
+    _expired = _ws.receive_json().get("type") == "auth_expired"
+    try:
+        _ws.receive_json()
+    except WebSocketDisconnect as _e:
+        _closed = _e.code
+check("الشات: اتصال قائم يُغلق (4401) بعد إبطال توكنه ولا يعالج الرسالة",
+      _ok and _expired and _closed == 4401, (_ok, _expired, _closed))
+HA = {"Authorization": f"Bearer {create_access_token({'sub': str(A), 'email': 'a@x'})}"}
 r = client.post("/api/webhooks/schedule_callback", json={"event_id": "e1", "cookie_label": "a",
                                                           "content": "x", "success": True})
 check("webhook الجدولة بلا توقيع ← 403", r.status_code == 403, r.status_code)
