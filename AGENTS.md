@@ -10,6 +10,29 @@
   `.env`/`data/` instead. Exit code 2 = the three copies disagree — investigate.
 - Do NOT publish half-done or failing work just to "keep it synced".
 
+## Security rules (review 2026-11-08)
+- X session cookies were tracked in Git despite `.gitignore`: 6 JSON files with `auth_token`/`ct0` in
+  `app/x/loginx/CookiesBackup/` and `app/x/loginx2026/cookies/`, plus `debug_post.html`, which held
+  `ct0` in `document.cookie`. They were tracked BEFORE the ignore rule, so the old staged-diff check
+  never saw them. They are now untracked (local copies kept). `publish.ps1` scans the WHOLE tree
+  (`git ls-tree` paths + `git grep` for key/`auth_token`/`ct0` values and cookie-export JSON shape)
+  before every push. Deleting a forbidden file is allowed; adding one is not. The history still has them
+  until the owner approves a rewrite.
+- Auth has ONE gate: `app/auth/token_guard.authenticate(token, db=None)` checks signature+expiry,
+  then revocation, then that the user exists and is active, then that the token was issued after the
+  user's `revoke_user` cutoff. `middleware`, `dependencies`, `ownership.user_from_token` (WebSocket)
+  and `/verify` all call it. Never decode a JWT for auth anywhere else.
+  - Revocations are stored as the sha256 of the token, in Redis AND in `data/auth_revocations.json`.
+    A Redis outage never turns logout into a fake success; if the local write fails, logout returns 503.
+  - `revoke_user` runs on password change, deactivation and deletion.
+  - Tokens carry `jti`: two same-second tokens used to be byte-identical.
+- The chat WebSocket re-authenticates on EVERY message and every 60 s while idle. On failure it sends
+  `auth_expired` and closes with 4401.
+- Internal callbacks (`app/auth/internal.py` v2) use a key domain-separated from the JWT secret
+  (`INTERNAL_CALLBACK_SECRET` overrides it). `exp` and `nonce` are inside the HMAC; a nonce is consumed
+  once, persisted in `data/internal_callback_nonces.json`. Login TTL is 30 min; schedule TTL is
+  run_at + 1 day. Tests: section 4/4c of `verify_isolation.py`, which isolates those files in a temp dir.
+
 ## Environment
 - The working virtualenv is `venv\` (NOT `.venv\`, which is missing most deps).
   Use `.\venv\Scripts\python.exe` for everything.

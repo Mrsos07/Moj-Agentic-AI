@@ -76,6 +76,10 @@ app/x/loginx2026/cookies/
 static/uploads/
 *cookies*.json
 ChromeCookies
+**/cookies/
+**/CookiesBackup/
+**/chrome_profile/
+*storage_state*.json
 # كلمات مرور الحسابات (نصّية) وأزواج ct0,auth_token — أُزيلت من التتبّع 2026-10-22
 acc.csv
 coo.txt
@@ -103,3 +107,7 @@ app/x/xsuite_server.log
 app/x/loginx_server.log
 app/identity/identity_server.log
 app/x/loginx2026/loginx2026_server.log
+
+# صفحات X محفوظة للتشخيص تحمل ct0 في document.cookie
+debug_*.html
+*.har

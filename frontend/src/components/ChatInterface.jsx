@@ -259,7 +259,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       lastInboundRef.current = Date.now()
       const data = JSON.parse(event.data)
       // الـpong إشارة حياة فقط — لا شأن له بمنطق المحادثة
-      if (data?.type === 'pong' || data?.type === 'auth_ok') return
+      if (data?.type === 'pong' || data?.type === 'auth_ok' || data?.type === 'auth_expired') return
       handleWebSocketMessage(data)
     }
     

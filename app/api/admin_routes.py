@@ -176,6 +176,10 @@ async def update_user(
         set_role(user, new_role)
     if request.is_active is not None:
         user.is_active = request.is_active
+        if request.is_active is False:
+            from app.auth.token_guard import revoke_user
+
+            revoke_user(user.id)     # التعطيل يُنهي جلساته القائمة (وتُرفض حتى لو أُعيد تفعيله)
     if request.name is not None:
         user.name = request.name
     
@@ -282,7 +286,10 @@ async def delete_user(
     # وذاكرة منسّقه يتيمة في قاعدة البيانات (app.aeos.memory.lifecycle)
     from app.aeos.memory.lifecycle import purge_user
 
+    from app.auth.token_guard import revoke_user
+
     purge_user(user.id, db)
+    revoke_user(user.id)     # SQLite قد يعيد استخدام المعرّف: توكن قديم لا يصير لمستخدم جديد
     db.delete(user)
     db.commit()
     
