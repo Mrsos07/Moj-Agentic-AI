@@ -6,8 +6,9 @@ import ChatModelPicker from './ChatModelPicker'
 import VoiceProfileView from './VoiceProfileView'
 import MemoryPanel from './MemoryPanel'
 import clonePersona from '../hooks/clonePersona'
+import { PenLine } from 'lucide-react'
 import {
-  MdSmartToy,
+  MdGroups,
   MdClose,
   MdRefresh,
   MdPerson,
@@ -200,8 +201,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
       if (res.data?.ok) {
         onNotify?.(
           enabled
-            ? `✅ تم تفعيل الموظف الذكي للحساب @${label}. سيعمل تلقائياً كل ${interval} دقيقة بين الساعة ${hs}:00 و ${he}:00 — بدون أوامر منك.`
-            : `⏸️ تم إيقاف الموظف الذكي للحساب @${label}.`
+            ? `✅ تم تفعيل الوكيل للحساب @${label}. سيعمل تلقائياً كل ${interval} دقيقة بين الساعة ${hs}:00 و ${he}:00 — بدون أوامر منك.`
+            : `⏸️ تم إيقاف الوكيل للحساب @${label}.`
         )
         await load()
       }
@@ -216,8 +217,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
   const deleteRow = async (label, agent, alsoAccount) => {
     const hasEmployee = !!agent?.employee_id
     const confirmMsg = alsoAccount
-      ? `سيتم حذف الموظف الذكي والحساب @${label} نهائياً (بما في ذلك ملف الكوكيز والسجلّات). هل أنت متأكد؟`
-      : `سيتم حذف الموظف الذكي للحساب @${label} نهائياً (مع سجلّات الدورات). هل أنت متأكد؟`
+      ? `سيتم حذف الوكيل والحساب @${label} نهائياً (بما في ذلك ملف الكوكيز والسجلّات). هل أنت متأكد؟`
+      : `سيتم حذف الوكيل للحساب @${label} نهائياً (مع سجلّات الدورات). هل أنت متأكد؟`
     if (!window.confirm(confirmMsg)) return
 
     setDelBusy(prev => ({ ...prev, [label]: true }))
@@ -234,8 +235,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
       }
       onNotify?.(
         alsoAccount
-          ? `🗑️ تم حذف الموظف الذكي والحساب @${label} نهائياً.`
-          : `🗑️ تم حذف الموظف الذكي للحساب @${label}.`
+          ? `🗑️ تم حذف الوكيل والحساب @${label} نهائياً.`
+          : `🗑️ تم حذف الوكيل للحساب @${label}.`
       )
       await load()
     } catch (e) {
@@ -430,7 +431,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         setP(label, 'donts', (p.donts || []).join('\n'))
         if (Array.isArray(p.interests) && p.interests.length) setP(label, 'interests', p.interests)
         onNotify?.(res.data?.source === 'ai'
-          ? `✨ تم توليد البرسونا بالذكاء الاصطناعي لـ @${label}. راجعها ثم احفظ.`
+          ? `تم توليد هوية @${label}. راجعها ثم احفظ.`
           : `تم إنشاء برسونا من النماذج الجاهزة لـ @${label} (الذكاء الاصطناعي غير متاح).`)
       }
     } catch (e) {
@@ -1012,20 +1013,20 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         onClick={onClose}
       />
       <aside
-        className={`fixed top-0 right-0 h-full w-full sm:w-[440px] bg-card-light dark:bg-sidebar-dark border-l border-border-light dark:border-border-dark shadow-2xl z-50 flex flex-col transition-transform duration-300 ${open ? 'translate-x-0' : 'translate-x-full'}`}
+        className={`moj-glass-strong fixed top-0 right-0 h-full w-full sm:w-[440px] z-50 flex flex-col transition-transform duration-300 ${open ? 'translate-x-0' : 'translate-x-full'}`}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-border-light dark:border-border-dark shrink-0">
           <div className="flex items-center gap-2">
-            <MdSmartToy className="text-primary" size={22} />
-            <h3 className="text-base font-bold text-text-primary-light dark:text-text-primary-dark">الموظفين الذكيين</h3>
+            <MdGroups className="text-primary" size={22} />
+            <h3 className="text-base font-bold text-text-primary-light dark:text-text-primary-dark">الوكلاء</h3>
           </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setWizardOpen(true)}
               className="flex items-center gap-1 text-xs font-bold px-2.5 py-1.5 rounded-lg bg-primary text-white hover:bg-primary/90"
-              title="إنشاء موظف ذكي جديد خطوة بخطوة"
+              title="إنشاء وكيل جديد خطوة بخطوة"
             >
-              <MdAdd size={16} /> موظف جديد
+              <MdAdd size={16} /> وكيل جديد
             </button>
             <button onClick={load} className="size-8 flex items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-card-dark text-text-secondary-light dark:text-text-secondary-dark" title="تحديث">
               <MdRefresh size={20} />
@@ -1038,7 +1039,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
 
         <div className="px-5 py-3 border-b border-border-light dark:border-border-dark bg-gray-50 dark:bg-card-dark/40 shrink-0">
           <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark leading-relaxed">
-            فعّل الحساب ليعمل الموظف الذكي <b>تلقائياً بالجدولة</b> — يفكّر، يخطّط، وينفّذ بنفسه دون أوامر مباشرة.
+            فعّل الحساب ليعمل الوكيل <b>تلقائياً بالجدولة</b> — يفكّر، يخطّط، وينفّذ بنفسه دون أوامر مباشرة.
             يمكن تشغيل عدة موظفين معاً، ويتوقفون خارج ساعات العمل.
           </p>
           <div className="mt-2 text-xs font-medium text-text-secondary-light dark:text-text-secondary-dark">
@@ -1351,7 +1352,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                     <button
                       onClick={() => deleteRow(label, agent, false)}
                       disabled={delBusy[label] || !agent?.employee_id || !!skillBusy[skillKey]}
-                      title="حذف الموظف الذكي فقط (يبقى الحساب/الكوكيز)"
+                      title="حذف الوكيل فقط (يبقى الحساب/الكوكيز)"
                       className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-lg border border-red-300 dark:border-red-500/40 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <MdDelete size={14} /> حذف الموظف
@@ -1359,7 +1360,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                     <button
                       onClick={() => deleteRow(label, agent, true)}
                       disabled={delBusy[label] || !!skillBusy[skillKey]}
-                      title="حذف الموظف الذكي والحساب المرتبط (ملف الكوكيز) نهائياً"
+                      title="حذف الوكيل والحساب المرتبط (ملف الكوكيز) نهائياً"
                       className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <MdDelete size={14} /> حذف الموظف + الحساب
@@ -1507,7 +1508,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                           className="w-full text-xs px-2 py-1.5 rounded-lg border border-border-light dark:border-border-dark bg-transparent text-text-primary-light dark:text-text-primary-dark" />
                         <button type="button" onClick={() => generateAI(label)} disabled={genBusy[label]}
                           className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg border border-primary text-primary hover:bg-primary hover:text-white transition-colors text-xs font-medium disabled:opacity-50">
-                          <MdSmartToy size={16} /> {genBusy[label] ? 'جارِ التوليد...' : 'توليد برسونا بالذكاء الاصطناعي'}
+                          <PenLine size={16} /> {genBusy[label] ? 'جارِ التوليد...' : 'توليد الهوية'}
                         </button>
                       </div>
 

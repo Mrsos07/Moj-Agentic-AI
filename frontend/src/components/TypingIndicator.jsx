@@ -2,8 +2,8 @@ const TypingIndicator = () => {
   return (
     <div className="group flex w-full justify-start gap-4 md:gap-6 py-6 border-b border-transparent rounded-xl px-2 message-enter">
       <div className="shrink-0 flex flex-col items-center">
-        <div className="bg-gradient-to-br from-primary to-blue-600 rounded-full size-10 flex items-center justify-center text-white font-bold">
-          AI
+        <div className="bg-primary rounded-full size-10 flex items-center justify-center text-white font-bold">
+          م
         </div>
       </div>
       <div className="flex flex-col gap-2 w-full min-w-0 items-start text-right">

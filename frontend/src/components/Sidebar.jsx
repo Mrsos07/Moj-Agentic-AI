@@ -1,14 +1,15 @@
 import { useState, useEffect } from 'react'
-import { MdDashboard, MdSettings, MdPerson, MdLogout, MdDeleteOutline } from 'react-icons/md'
-import { BsListUl, BsFileText } from 'react-icons/bs'
-import { FiMessageSquare, FiUser, FiChevronUp } from 'react-icons/fi'
-import { useNavigate } from 'react-router-dom'
+import { LayoutDashboard, Settings, User, LogOut, Trash2, MessageSquare, MessageSquarePlus, ChevronUp, History } from 'lucide-react'
+import GlassIcon from './ui/GlassIcon'
+import { useNavigate, useLocation } from 'react-router-dom'
 import axios from 'axios'
 import logoLight from '../assets/logos/logo-light.png'
 import logoDark from '../assets/logos/logo-dark.png'
 
 const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, onNewChat }) => {
   const navigate = useNavigate()
+  // المعالجة الزجاجية خاصة بشاشة المحادثة فقط؛ بقية المسارات تحتفظ بالمظهر السابق
+  const glass = useLocation().pathname === '/chat'
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [conversations, setConversations] = useState([])
   const [loading, setLoading] = useState(false)
@@ -109,11 +110,11 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
     }
   }
   return (
-    <aside className="hidden md:flex flex-col w-[260px] bg-sidebar-light dark:bg-sidebar-dark h-full shrink-0 transition-all duration-300">
+    <aside className={`hidden md:flex flex-col w-[260px] h-full shrink-0 transition-all duration-300 ${glass ? 'moj-glass border-0 border-e border-e-white/40 dark:border-e-white/10' : 'bg-sidebar-light dark:bg-sidebar-dark'}`}>
       <div className="flex flex-col h-full p-4 gap-4">
         {/* فاصل خفيف في الأعلى */}
         <div className="border-b border-border-light dark:border-border-dark pb-4">
-          <div className="flex justify-center px-3 pt-4">
+          <div className="flex justify-center px-3 py-4">
             <button
               type="button"
               onClick={() => navigate('/')}
@@ -122,7 +123,7 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
             >
               <img 
                 src={darkMode ? logoLight : logoDark} 
-                alt="Mwj AI Logo" 
+                alt="شعار موج" 
                 className="h-14 w-auto object-contain"
                 draggable={false}
               />
@@ -132,15 +133,15 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
 
         <button
           onClick={handleNewChatClick}
-          className="flex w-full items-center gap-3 px-4 py-3 rounded-xl bg-primary hover:bg-navy-light transition-all duration-200 shadow-md ring-1 ring-primary/10 group"
+          className={`flex w-full items-center gap-3 h-11 px-4 rounded-xl text-white transition-colors duration-150 ${glass ? 'moj-primary moj-hover' : 'bg-primary hover:bg-navy-light shadow-md ring-1 ring-primary/10'}`}
         >
-          <MdDashboard className="text-white group-hover:scale-110 transition-transform" size={22} />
-          <span className="text-sm font-semibold text-white">+ محادثة جديدة</span>
+          <GlassIcon size="sm" className="text-white"><MessageSquarePlus size={16} /></GlassIcon>
+          <span className="text-sm font-semibold text-white">محادثة جديدة</span>
         </button>
 
         {/* قسم المحادثات السابقة */}
         <div className="flex flex-col gap-2">
-          <h3 className="text-xs font-semibold text-text-secondary-light dark:text-text-secondary-dark px-3 mt-2">المحادثات السابقة</h3>
+          <h3 className="flex items-center gap-1.5 text-xs font-medium text-text-secondary-light dark:text-text-secondary-dark px-3 mt-2"><History size={14} aria-hidden /> المحادثات السابقة</h3>
           
           {loading ? (
             <div className="flex items-center justify-center py-4">
@@ -151,18 +152,18 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
               {conversations.map((conv) => (
                 <div
                   key={conv.id}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 dark:hover:bg-card-dark transition-colors"
+                  className={`group flex items-center gap-2 h-11 px-2 rounded-xl transition-colors ${glass ? 'hover:bg-white/50 dark:hover:bg-white/5' : 'hover:bg-gray-50 dark:hover:bg-card-dark'}`}
                 >
                   <button
                     onClick={() => handleLoadConversation(conv.id)}
-                    className="flex items-center gap-3 flex-1 min-w-0 text-right group"
+                    className={`flex items-center gap-2.5 flex-1 min-w-0 text-start ${glass ? 'moj-hover rounded-md' : ''}`}
                   >
-                    <FiMessageSquare className="text-text-secondary-light dark:text-text-secondary-dark group-hover:text-primary shrink-0" size={18} />
+                    <MessageSquare className="text-text-secondary-light dark:text-text-secondary-dark group-hover:text-primary shrink-0" size={16} />
                     <div className="flex flex-col min-w-0 flex-1">
                       <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark truncate">
                         {conv.title || 'محادثة بدون عنوان'}
                       </span>
-                      <span className="text-xs text-text-secondary-light dark:text-text-secondary-dark">
+                      <span className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
                         {new Date(conv.updated_at).toLocaleDateString('ar-SA')}
                       </span>
                     </div>
@@ -170,10 +171,11 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
 
                   <button
                     onClick={() => handleDeleteConversation(conv.id)}
-                    className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors shrink-0"
+                    className={`p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 ${glass ? 'moj-hover' : ''}`}
                     title="حذف"
+                    aria-label="حذف المحادثة"
                   >
-                    <MdDeleteOutline className="text-text-secondary-light dark:text-text-secondary-dark" size={18} />
+                    <Trash2 className="text-text-secondary-light dark:text-text-secondary-dark" size={16} />
                   </button>
                 </div>
               ))}
@@ -183,21 +185,21 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto pr-2"></div>
+        <div className="flex-1 overflow-y-auto pe-2"></div>
 
         <div className="mt-auto border-t border-border-light dark:border-border-dark pt-4 flex flex-col gap-1">
           <div className="relative">
             {showUserMenu && (
-              <div className="absolute bottom-full left-0 right-0 mb-2 bg-card-light dark:bg-card-dark rounded-lg shadow-lg border border-border-light dark:border-border-dark overflow-hidden">
+              <div className={`absolute bottom-full inset-x-0 mb-2 rounded-2xl overflow-hidden ${glass ? 'moj-glass-strong' : 'bg-card-light dark:bg-card-dark shadow-lg border border-border-light dark:border-border-dark'}`}>
                 {user?.is_admin && (
                   <button
                     onClick={() => {
                       setShowUserMenu(false)
                       navigate('/admin')
                     }}
-                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-right border-b border-border-light dark:border-border-dark"
+                    className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-start border-b border-border-light dark:border-border-dark ${glass ? 'moj-hover' : ''}`}
                   >
-                    <MdDashboard className="text-purple-600 dark:text-purple-400" size={18} />
+                    <LayoutDashboard className="text-purple-600 dark:text-purple-400" size={18} />
                     <span className="text-sm font-medium text-purple-600 dark:text-purple-400">لوحة التحكم الإدارية</span>
                   </button>
                 )}
@@ -206,18 +208,18 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
                     setShowUserMenu(false)
                     navigate('/profile')
                   }}
-                  className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-right"
+                  className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-start ${glass ? 'moj-hover' : ''}`}
                 >
-                  <MdSettings className="text-text-secondary-light dark:text-text-secondary-dark" size={18} />
+                  <Settings className="text-text-secondary-light dark:text-text-secondary-dark" size={18} />
                   <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">الإعدادات</span>
                 </button>
                 <button
                   onClick={() => {
                     setShowUserMenu(false)
                   }}
-                  className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-right"
+                  className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-start ${glass ? 'moj-hover' : ''}`}
                 >
-                  <MdPerson className="text-text-secondary-light dark:text-text-secondary-dark" size={18} />
+                  <User className="text-text-secondary-light dark:text-text-secondary-dark" size={18} />
                   <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">كاتب المحتوى</span>
                 </button>
                 <button
@@ -225,9 +227,9 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
                     setShowUserMenu(false)
                     handleLogout()
                   }}
-                  className="w-full flex items-center gap-3 px-4 py-3 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-right"
+                  className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-start ${glass ? 'moj-hover' : ''}`}
                 >
-                  <MdLogout className="text-text-secondary-light dark:text-text-secondary-dark group-hover:text-red-600 dark:group-hover:text-red-400" size={18} />
+                  <LogOut className="text-text-secondary-light dark:text-text-secondary-dark group-hover:text-red-600 dark:group-hover:text-red-400" size={18} />
                   <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark group-hover:text-red-600 dark:group-hover:text-red-400">تسجيل الخروج</span>
                 </button>
               </div>
@@ -235,7 +237,7 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
             
             <button
               onClick={() => setShowUserMenu(!showUserMenu)}
-              className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-card-dark transition-colors cursor-pointer"
+              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-card-dark transition-colors cursor-pointer ${glass ? 'moj-hover' : ''}`}
             >
               <div className="bg-primary rounded-full size-9 shrink-0 flex items-center justify-center text-white font-bold text-sm overflow-hidden">
                 {user?.profile_picture ? (
@@ -248,11 +250,10 @@ const Sidebar = ({ darkMode, setDarkMode, user, onLogout, onLoadConversation, on
                 <span className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark truncate">
                   {user?.name || user?.email || 'المستخدم'}
                 </span>
-                <span className="text-xs text-text-secondary-light dark:text-text-secondary-dark truncate">Pro Plan</span>
               </div>
-              <FiChevronUp 
-                className={`text-text-secondary-light dark:text-text-secondary-dark transition-transform ${showUserMenu ? '' : 'rotate-180'}`} 
-                size={16} 
+              <ChevronUp
+                className={`text-text-secondary-light dark:text-text-secondary-dark transition-transform ${showUserMenu ? '' : 'rotate-180'}`}
+                size={16}
               />
             </button>
           </div>

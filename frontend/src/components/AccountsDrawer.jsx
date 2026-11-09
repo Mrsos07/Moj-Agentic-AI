@@ -62,7 +62,7 @@ const AccountsDrawer = ({ open, onClose, pinned, onPin }) => {
 
       {/* Drawer */}
       <aside
-        className={`fixed top-0 right-0 h-full w-full sm:w-[400px] bg-card-light dark:bg-sidebar-dark border-l border-border-light dark:border-border-dark shadow-2xl z-50 flex flex-col transition-transform duration-300 ${
+        className={`moj-glass-strong fixed top-0 right-0 h-full w-full sm:w-[400px] z-50 flex flex-col transition-transform duration-300 ${
           open ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
