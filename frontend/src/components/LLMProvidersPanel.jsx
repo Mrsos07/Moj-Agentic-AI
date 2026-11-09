@@ -11,7 +11,7 @@ const muted = 'text-xs text-text-secondary-light dark:text-text-secondary-dark'
 
 const PURPOSES = [
   ['chat', '💬 نموذج الشات', 'المنسّق العام ومحادثاتك مع الموظفين في الشات'],
-  ['employee', '🤖 نموذج الموظفين', 'دورات الموظفين الآلية: الكتابة والقرار والتقييم'],
+  ['employee', 'نموذج الموظفين', 'دورات الموظفين الآلية: الكتابة والقرار والتقييم'],
 ]
 
 export default function LLMProvidersPanel() {

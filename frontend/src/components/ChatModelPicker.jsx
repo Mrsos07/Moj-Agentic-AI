@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
+import { Brain, ChevronDown, Settings2 } from 'lucide-react'
+import GlassIcon from './ui/GlassIcon'
 import authHeaders from '../authHeaders'
 
 // منتقي نموذج الشات من رأس الشات نفسه:
@@ -97,26 +99,26 @@ export default function ChatModelPicker({ employeeId = null, onChanged = null })
   if (!data || (employeeId && !emp)) return null
   const sel = employeeId ? (emp.selection || {}) : (data.chat || {})
   const defaultLabel = employeeId
-    ? `يتبع نموذج الموظفين العام (${emp.owner_default?.model || 'افتراضي النظام'})`
-    : 'افتراضي النظام (OpenRouter)'
-  const current = employeeId ? (emp.effective?.model || '') : (sel.provider ? sel.model : 'افتراضي النظام')
+    ? `يتبع نموذج الموظفين العام (${emp.owner_default?.model || 'نموذج النظام'})`
+    : 'نموذج النظام (OpenRouter)'
+  const current = employeeId ? (emp.effective?.model || '') : (sel.provider ? sel.model : 'نموذج النظام')
   const currentLabel = sel.provider ? (data.providers.find((p) => p.id === sel.provider)?.label || '')
-    : employeeId ? (emp.source === 'owner' ? 'نموذج الموظفين العام' : 'افتراضي النظام') : 'OpenRouter'
+    : employeeId ? (emp.source === 'owner' ? 'نموذج الموظفين العام' : 'نموذج النظام') : 'OpenRouter'
   const item = 'w-full text-left px-3 py-1.5 rounded-lg text-xs hover:bg-gray-50 dark:hover:bg-background-dark'
   const muted = 'text-[10px] text-text-secondary-light dark:text-text-secondary-dark'
 
   return (
     <div className="relative" ref={ref}>
       <button type="button" onClick={openMenu} disabled={busy}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border-light dark:border-border-dark hover:bg-gray-50 dark:hover:bg-card-dark text-xs text-text-primary-light dark:text-text-primary-dark max-w-[240px]"
-        title={`${employeeId ? 'نموذج هذا الموظف' : 'نموذج الشات'}: ${currentLabel} — ${current}`}>
-        <span>🧠</span>
-        <span className="truncate font-medium" dir="ltr">{current}</span>
+        className="moj-pill moj-hover flex items-center gap-2 h-10 px-3 rounded-xl text-sm font-medium text-text-primary-light dark:text-text-primary-dark max-w-[240px] transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-1"
+        title={`${employeeId ? 'نموذج هذا الوكيل' : 'نموذج النظام'}: ${currentLabel} — ${current}`}>
+        <GlassIcon size="sm"><Brain size={14} /></GlassIcon>
+        <span className="truncate" dir="ltr">{current}</span>
         {employeeId && !sel.provider && <span className="shrink-0 text-[10px] opacity-60">(عام)</span>}
-        <span className="opacity-60">▾</span>
+        <ChevronDown size={14} className="shrink-0 opacity-60" aria-hidden />
       </button>
       {open && (
-        <div className="absolute z-50 mt-2 w-[22rem] max-h-[28rem] flex flex-col rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark shadow-xl text-sm" style={{ insetInlineStart: 0 }}>
+        <div className="moj-glass-strong absolute z-50 mt-2 w-[22rem] max-h-[28rem] flex flex-col rounded-2xl text-sm" style={{ insetInlineStart: 0 }}>
           <div className="p-2 border-b border-border-light dark:border-border-dark">
             <input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} dir="ltr"
               placeholder="ابحث: claude، gemini flash، gpt-4o…"
@@ -189,8 +191,8 @@ export default function ChatModelPicker({ employeeId = null, onChanged = null })
           </div>
           <div className="p-2 border-t border-border-light dark:border-border-dark">
             <button type="button" onClick={() => navigate('/profile#model-provider')}
-              className="w-full px-3 py-2 rounded-lg border border-primary/30 text-primary text-xs hover:bg-primary/5">
-              ⚙️ إدارة مزوّدي النماذج
+              className="moj-hover w-full px-3 py-2 rounded-lg border border-primary/30 text-primary text-xs hover:bg-primary/5 flex items-center justify-center gap-1.5">
+              <Settings2 size={14} aria-hidden /> إدارة مزوّدي النماذج
             </button>
           </div>
         </div>

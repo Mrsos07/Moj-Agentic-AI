@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
 import ChatInterface from './components/ChatInterface'
 import Sidebar from './components/Sidebar'
 import Login from './pages/Login'
@@ -57,17 +57,18 @@ function App() {
   }
 
   const AuthLayout = () => {
+    const isChat = useLocation().pathname === '/chat'
     if (!user) return <Navigate to="/login" replace />
 
     return (
-      <div className="flex h-screen w-full overflow-hidden">
+      <div className={`flex h-screen w-full overflow-hidden ${isChat ? 'moj-chat-bg' : ''}`}>
         <Sidebar
           darkMode={darkMode}
           setDarkMode={setDarkMode}
           user={user}
           onLogout={handleLogout}
         />
-        <div className="w-px bg-border-light dark:bg-border-dark"></div>
+        {!isChat && <div className="w-px bg-border-light dark:bg-border-dark"></div>}
         <div className="flex-1 h-full overflow-y-auto">
           <Outlet />
         </div>

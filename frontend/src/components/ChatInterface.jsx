@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
-import { FiMenu, FiSun, FiMoon } from 'react-icons/fi'
-import { MdManageAccounts, MdPushPin, MdClose, MdSmartToy } from 'react-icons/md'
+import { Menu, Sun, Moon, Users, CircleUserRound, Pin, X, MessageSquare, Brain, Newspaper, TrendingUp, ListTree, Trophy, BarChart3, Lightbulb, FileText, ListChecks, CalendarDays, Play } from 'lucide-react'
+import GlassIcon from './ui/GlassIcon'
 import MessageList from './MessageList'
 import MessageInput from './MessageInput'
 import AccountsDrawer from './AccountsDrawer'
 import AgentsDrawer from './AgentsDrawer'
 import TeamBar from './TeamBar'
 import ChatModelPicker from './ChatModelPicker'
+import TaskActivityPanel from './TaskActivityPanel'
+import { DEMO_TASK, DEMO_EVENTS } from './taskActivityDemo'
 import authHeaders from '../authHeaders'
 import usePinnedAccount from '../hooks/usePinnedAccount'
 import logoLight from '../assets/logos/logo-light.png'
@@ -21,13 +23,13 @@ const coordinatorWelcome = () => ({
   id: Date.now(),
   type: 'assistant',
   content:
-    '👋 أهلاً! أنا **موج — المنسّق العام** لفريقك من الموظفين الأذكياء.\n\n' +
-    'أرى كل موظفيك وأوجّههم نيابةً عنك. جرّب مثلاً:\n\n' +
+    'أهلاً! أنا **موج**، أدير فريق وكلائك على X.\n\n' +
+    'أرى كل وكلائك وأوجّههم نيابةً عنك. جرّب مثلاً:\n\n' +
     '• «وش حالة فريقي اليوم؟»\n' +
-    '• «خل كل الموظفين ينشرون عن اليوم الوطني كل واحد حسب تخصصه»\n' +
+    '• «خل كل الوكلاء ينشرون عن اليوم الوطني كل واحد حسب تخصصه»\n' +
     '• «@اليوزر روح للتايم لاين وردّ على تغريدة تناسب تخصصك»\n' +
     '• «خل عماد يشتغل كل 45 دقيقة وركّز اهتماماته على الاقتصاد»\n\n' +
-    'اذكر موظفاً بـ **@** لتخاطبه مباشرة، أو افتح محادثته الخاصة من شريط الفريق.',
+    'اذكر وكيلاً بـ **@** لتخاطبه مباشرة، أو افتح محادثته من شريط الفريق.',
   timestamp: new Date().toISOString()
 })
 
@@ -55,11 +57,17 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
   const [showSuggestions, setShowSuggestions] = useState(true)
   const [accountsOpen, setAccountsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
+  const [activityDemo, setActivityDemo] = useState(false)
   // وضع "الدردشة مع الموظف الذكي": اسم الحساب المرتبط أو null
   const [employeeChat, setEmployeeChat] = useState(null)
   const { pinned: pinnedAccount, setPinned: setPinnedAccount } = usePinnedAccount()
   const messagesEndRef = useRef(null)
   const inputFocusRef = useRef(null)
+
+  const headerBtn =
+    'moj-pill moj-hover flex items-center gap-2 h-10 px-3 rounded-xl text-sm font-medium transition-colors duration-150 ' +
+    'focus-visible:outline-none focus-visible:ring-2 ' +
+    'focus-visible:ring-primary/60 focus-visible:ring-offset-1'
 
   const notifyChat = (content) => {
     setMessages(prev => [...prev, {
@@ -76,7 +84,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       id: Date.now(),
       type: 'assistant',
       content: label
-        ? `📌 تم تثبيت الحساب @${label}. الطلبات التي لا تحدّد موظفاً ستُوجَّه إليه، ويبقى المنسّق يرى الفريق كله.`
+        ? `📌 تم تثبيت الحساب @${label}. الطلبات التي لا تحدّد وكيلاً ستُوجَّه إليه، ويبقى المنسّق يرى الفريق كله.`
         : '📍 تم إلغاء تثبيت الحساب — المنسّق العام يوجّه الفريق كله.',
       timestamp: new Date().toISOString()
     }])
@@ -185,12 +193,12 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
         id: Date.now(),
         type: 'assistant',
         content:
-          `🤖 **دردشة مع الموظف الذكي @${label}**\n\n` +
-          'أنا موظفك الذكي على هذا الحساب — ناقشني أو وجّهني مباشرةً. يمكنك:\n\n' +
-          '• 🧠 «حلّل واستنتج المواضيع» من الأخبار والترند والتايم لاين وأهم البوستات\n' +
-          '• 📊 معرفة إحصائياتي وأدائي\n' +
-          '• 💡 تحسين سلوكي واقتراحات لتطوير المحتوى\n' +
-          '•  جدولة المحتوى اليومي · 🚀 تشغيل دورة فورية\n\n' +
+          `**دردشة مع الوكيل @${label}**\n\n` +
+          'أنا وكيلك على هذا الحساب — ناقشني أو وجّهني مباشرةً. يمكنك:\n\n' +
+          '• «حلّل واستنتج المواضيع» من الأخبار والترند والتايم لاين وأهم البوستات\n' +
+          '• معرفة إحصائياتي وأدائي\n' +
+          '• تحسين سلوكي واقتراحات لتطوير المحتوى\n' +
+          '• جدولة المحتوى اليومي · تشغيل دورة فورية\n\n' +
           'استخدم الأزرار السريعة بالأسفل، أو اكتب لي أي شيء يخصّ الحساب والمحتوى.',
         timestamp: new Date().toISOString()
       }
@@ -200,7 +208,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
         const token = localStorage.getItem('token')
         const res = await axios.post('/api/conversations/ensure', {
           session_id: sessionId,
-          title: `🤖 الموظف @${label}`,
+          title: `الوكيل @${label}`,
         }, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
 
         const msgs = res.data?.messages || []
@@ -564,64 +572,68 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
   }
 
   return (
-      <main className="flex-1 flex flex-col h-full bg-background-light dark:bg-background-dark relative">
+      <main className="flex-1 flex flex-col h-full bg-transparent relative">
         <div className="flex flex-col">
           {/* Header */}
-          <header className="relative flex items-center justify-between px-6 py-5 min-h-[64px] shrink-0 bg-card-light dark:bg-sidebar-dark z-10">
-            <button
-              onClick={() => setDarkMode(!darkMode)}
-              className="absolute left-6 top-1/2 -translate-y-1/2 flex items-center justify-center rounded-xl size-10 hover:bg-gray-50 dark:hover:bg-card-dark text-text-secondary-light dark:text-text-secondary-dark transition-colors"
-              title="تبديل المظهر"
-            >
-              {darkMode ? <FiSun size={20} /> : <FiMoon size={20} />}
-            </button>
+          <header className="moj-glass rounded-2xl mx-4 mt-3 relative flex items-center justify-between gap-3 px-3 md:px-4 py-2 min-h-[56px] shrink-0 z-10">
             <div className="flex items-center gap-2">
-              <button className="flex items-center justify-center rounded-xl size-10 hover:bg-gray-50 dark:hover:bg-card-dark text-text-secondary-light dark:text-text-secondary-dark transition-colors md:hidden">
-                <FiMenu size={20} />
+              <button
+                className={`${headerBtn} !px-0 size-10 justify-center text-text-secondary-light dark:text-text-secondary-dark md:hidden`}
+                aria-label="القائمة"
+              >
+                <GlassIcon size="sm"><Menu size={16} /></GlassIcon>
               </button>
             </div>
-            <div className="flex items-center gap-2 text-text-primary-light dark:text-text-primary-dark">
-              <span className="hidden md:inline text-sm font-bold">
-                {employeeChat ? `🤖 الموظف @${employeeChat}` : '🧭 المنسّق العام'}
-              </span>
+            <div className="flex items-center gap-2 min-w-0 text-text-primary-light dark:text-text-primary-dark">
+              {employeeChat && (
+                <span className="hidden md:inline text-sm font-bold">
+                  الوكيل <span dir="ltr" className="inline-block">@{employeeChat}</span>
+                </span>
+              )}
               <ChatModelPicker />
               {pinnedAccount && (
                 <div
-                  className="flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full bg-primary/10 text-primary border border-primary/20"
+                  className="moj-pill flex items-center gap-1.5 ps-1.5 pe-2.5 h-8 rounded-xl text-primary"
                   title="الحساب المثبّت — كل الإجراءات تُنفّذ عليه"
                 >
-                  <MdPushPin size={16} />
-                  <span className="text-xs font-bold">@{pinnedAccount}</span>
+                  <Pin size={14} />
+                  <span className="text-xs font-bold" dir="ltr">@{pinnedAccount}</span>
                   <button
                     onClick={() => handlePinAccount(null)}
-                    className="hover:text-red-500 transition-colors"
+                    className="moj-hover size-6 rounded-md inline-flex items-center justify-center hover:text-red-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                     title="إلغاء التثبيت"
+                    aria-label="إلغاء التثبيت"
                   >
-                    <MdClose size={16} />
+                    <X size={14} />
                   </button>
                 </div>
               )}
               <button
                 onClick={() => setAgentsOpen(true)}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl border border-primary/30 bg-primary/5 hover:bg-primary/10 text-primary transition-colors"
-                title="الموظفين الذكيين — فعّل حساباً ليعمل تلقائياً بالجدولة"
+                className={`${headerBtn} text-primary dark:text-white`}
+                title="الوكلاء — فعّل حساباً ليعمل تلقائياً بالجدولة"
               >
-                <MdSmartToy size={20} />
-                <span className="text-sm font-medium hidden sm:inline">الموظفين الذكيين</span>
+                <GlassIcon size="sm"><Users size={16} /></GlassIcon>
+                <span className="hidden sm:inline">الوكلاء</span>
               </button>
               <button
                 onClick={() => setAccountsOpen(true)}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border-light dark:border-border-dark hover:bg-gray-50 dark:hover:bg-card-dark text-text-primary-light dark:text-text-primary-dark transition-colors"
+                className={`${headerBtn} text-text-primary-light dark:text-text-primary-dark`}
                 title="حساباتي — ثبّت حساباً لتنفيذ الإجراءات عليه"
               >
-                <MdManageAccounts size={20} className="text-primary" />
-                <span className="text-sm font-medium hidden sm:inline">حساباتي</span>
+                <GlassIcon size="sm"><CircleUserRound size={16} /></GlassIcon>
+                <span className="hidden sm:inline">حساباتي</span>
+              </button>
+              <button
+                onClick={() => setDarkMode(!darkMode)}
+                className={`${headerBtn} !px-0 size-10 justify-center text-text-secondary-light dark:text-text-secondary-dark shrink-0`}
+                title="تبديل المظهر"
+                aria-label="تبديل المظهر"
+              >
+                <GlassIcon size="sm">{darkMode ? <Sun size={16} /> : <Moon size={16} />}</GlassIcon>
               </button>
             </div>
           </header>
-
-          {/* فاصل أفقي تحت Header - يمتد بعرض كامل */}
-          <div className="h-px bg-border-light dark:bg-border-dark w-full"></div>
         </div>
 
         {/* Messages */}
@@ -632,6 +644,20 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
           showSuggestions={showSuggestions}
           onSuggestionClick={handleSuggestionClick}
         />
+
+        {/* سجل التنفيذ — عرض فقط؛ لا مصدر بيانات بعد، المعاينة التجريبية محلية */}
+        <div className="px-4 md:px-6">
+          <div className="max-w-[900px] mx-auto">
+            <TaskActivityPanel
+              task={activityDemo ? DEMO_TASK : null}
+              events={activityDemo ? DEMO_EVENTS : []}
+              sourceState={activityDemo ? 'ready' : 'unbound'}
+              isDemo={activityDemo}
+              onStartDemo={() => setActivityDemo(true)}
+              onEndDemo={() => setActivityDemo(false)}
+            />
+          </div>
+        </div>
 
         {/* شريط الفريق — الشات الرئيسي هو المنسّق العام لكل الموظفين */}
         {!employeeChat && (
@@ -650,37 +676,37 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
         {employeeChat && (
           <div className="px-4 pt-2">
             <div className="flex items-center gap-2 mb-1.5">
-              <MdSmartToy size={16} className="text-primary" />
-              <span className="text-xs font-bold text-primary">دردشة مع الموظف @{employeeChat}</span>
+              <MessageSquare size={16} className="text-primary" />
+              <span className="text-xs font-bold text-primary">دردشة مع الوكيل <span dir="ltr" className="inline-block">@{employeeChat}</span></span>
               <button
                 onClick={() => window.dispatchEvent(new CustomEvent('mwj:new_chat'))}
                 className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark hover:text-primary transition-colors"
                 title="العودة لشات المنسّق العام"
               >
-                ↩ المنسّق العام
+                العودة للمنسّق
               </button>
             </div>
             <div className="flex items-center gap-2 overflow-x-auto pb-1">
               {[
-                { icon: '🧠', label: 'حلّل واستنتج المواضيع', text: 'بناءً على الأخبار والترند والتايم لاين وأهم البوستات، ما المواضيع المرتبطة باهتمامك؟' },
-                { icon: '�', label: 'اعرض الأخبار', text: 'اعرض الأخبار المتعلقة بتخصصك' },
-                { icon: '📈', label: 'اعرض الترند', text: 'اعرض الترند الذي يراه حسابك' },
-                { icon: '🧵', label: 'التايم لاين', text: 'اعرض التايم لاين' },
-                { icon: '🏆', label: 'أهم البوستات', text: 'اعرض أهم البوستات' },
-                { icon: '�📊', label: 'إحصائياتك', text: 'حالة الموظف' },
-                { icon: '💡', label: 'حسّن سلوكك', text: 'اقترح تحسينات لأدائك' },
-                { icon: '📝', label: 'آخر محتوياتك', text: 'ماذا نشرت مؤخراً؟' },
-                { icon: '🗒️', label: 'راجع المواضيع', text: 'راجع المواضيع المتاحة للنشر' },
-                { icon: '📅', label: 'جدول محتوى يومي', text: 'اضبط للموظف محتوى يومي: 3 تغريدات' },
-                { icon: '🚀', label: 'اشتغل الآن', text: 'شغّل دورة الآن' },
+                { icon: Brain, label: 'حلّل واستنتج المواضيع', text: 'بناءً على الأخبار والترند والتايم لاين وأهم البوستات، ما المواضيع المرتبطة باهتمامك؟' },
+                { icon: Newspaper, label: 'اعرض الأخبار', text: 'اعرض الأخبار المتعلقة بتخصصك' },
+                { icon: TrendingUp, label: 'اعرض الترند', text: 'اعرض الترند الذي يراه حسابك' },
+                { icon: ListTree, label: 'التايم لاين', text: 'اعرض التايم لاين' },
+                { icon: Trophy, label: 'أهم البوستات', text: 'اعرض أهم البوستات' },
+                { icon: BarChart3, label: 'إحصائياتك', text: 'حالة الموظف' },
+                { icon: Lightbulb, label: 'حسّن سلوكك', text: 'اقترح تحسينات لأدائك' },
+                { icon: FileText, label: 'آخر محتوياتك', text: 'ماذا نشرت مؤخراً؟' },
+                { icon: ListChecks, label: 'راجع المواضيع', text: 'راجع المواضيع المتاحة للنشر' },
+                { icon: CalendarDays, label: 'جدول محتوى يومي', text: 'اضبط للموظف محتوى يومي: 3 تغريدات' },
+                { icon: Play, label: 'اشتغل الآن', text: 'شغّل دورة الآن' },
               ].map((qa) => (
                 <button
                   key={qa.label}
                   onClick={() => sendMessageText(qa.text)}
                   disabled={!isConnected}
-                  className="shrink-0 text-xs px-3 py-1.5 rounded-full border border-primary/30 bg-primary/5 hover:bg-primary/10 text-primary font-medium transition-colors disabled:opacity-40"
+                  className="moj-pill moj-hover shrink-0 inline-flex items-center gap-2 h-8 ps-2 pe-3 rounded-xl text-xs font-medium text-text-primary-light dark:text-text-primary-dark focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-40"
                 >
-                  {qa.icon} {qa.label}
+                  <GlassIcon size="sm"><qa.icon size={14} /></GlassIcon> {qa.label}
                 </button>
               ))}
             </div>
