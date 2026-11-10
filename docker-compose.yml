@@ -22,6 +22,9 @@ services:
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped
+    # --watch + تركيب المجلد لا الملف: git pull يستبدل Caddyfile بملف جديد (inode جديد)، وتركيب
+    # ملف منفرد يبقى على القديم في لينكس، وبلا --watch لا يُعاد تحميل الإعداد أصلاً.
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--watch"]
     environment:
       # فارغ أو غير معرَّف ⇒ «:80» (HTTP على IP). قيمة فارغة تصل caddy كما هي وتكسر الإعداد،
       # فالبديل هنا لا في Caddyfile (قيس: «unrecognized global option: encode»).
@@ -31,7 +34,7 @@ services:
       - "${HTTPS_PORT:-443}:443"
       - "${HTTPS_PORT:-443}:443/udp"
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy:/etc/caddy:ro
       - caddy_data:/data                                     # الشهادات (لا تحذفه: حدّ إصدار Let's Encrypt)
       - caddy_config:/config
     depends_on:
