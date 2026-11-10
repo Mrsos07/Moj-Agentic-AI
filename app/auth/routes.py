@@ -124,12 +124,33 @@ class MessageResponse(BaseModel):
     success: bool
 
 
+MIN_PASSWORD_LENGTH = 8
+
+
+def registration_open() -> bool:
+    """التسجيل الذاتي. في الإنتاج يُغلق (ALLOW_REGISTRATION=false): كل من يصل للخادم كان
+    يستطيع إنشاء حساب ويستهلك مفتاح النماذج للنظام؛ المشرف يُنشئ الحسابات بـscripts/create_user.py."""
+    import os
+
+    return os.getenv("ALLOW_REGISTRATION", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
 @router.post("/register", response_model=Token)
 async def register(request: RegisterRequest, db: Session = Depends(get_db)):
     """Register a new user"""
-    
+    if not registration_open():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="التسجيل مغلق — اطلب حساباً من مشرف النظام")
+    if len(request.password or "") < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"كلمة المرور {MIN_PASSWORD_LENGTH} أحرف على الأقل")
+    # الدخول يطابق البريد بأحرف صغيرة؛ بريد مسجَّل بأحرف كبيرة لم يكن يستطيع الدخول أبداً
+    email = str(request.email).strip().lower()
+
     # Check if user already exists
-    existing_user = db.query(User).filter(User.email == request.email).first()
+    from sqlalchemy import func
+
+    existing_user = db.query(User).filter(func.lower(User.email) == email).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -139,7 +160,7 @@ async def register(request: RegisterRequest, db: Session = Depends(get_db)):
     # Create new user
     hashed_password = hash_password(request.password)
     new_user = User(
-        email=request.email,
+        email=email,
         password_hash=hashed_password
     )
     
@@ -175,8 +196,10 @@ async def login(request: LoginRequest, http: Request, db: Session = Depends(get_
             headers={"Retry-After": str(wait)},
         )
     
-    # Find user by email
-    user = db.query(User).filter(User.email == request.email).first()
+    # Find user by email — بلا حساسية لحالة الأحرف (حسابات قديمة سُجّلت بأحرف كبيرة)
+    from sqlalchemy import func
+
+    user = db.query(User).filter(func.lower(User.email) == email).first()
     
     # الرد نفسه لكل الحالات (بريد غير موجود / كلمة مرور خاطئة / حساب معطّل) — لا نكشف أيها
     if not user or not verify_password(request.password, user.password_hash) \

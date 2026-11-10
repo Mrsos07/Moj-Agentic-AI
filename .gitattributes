@@ -1,0 +1,4 @@
+# سكربتات الخادم وإعداد caddy تعمل على لينكس: LF دائماً حتى لو نُسخ المستودع على ويندوز
+# (CRLF يكسر bash: «$'\r': command not found»)
+*.sh text eol=lf
+deploy/* text eol=lf

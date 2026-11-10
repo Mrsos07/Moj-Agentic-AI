@@ -72,7 +72,8 @@ docs/
 # Windows
 QUICK_START.bat
 
-# الدوكر نفسه
+# الدوكر نفسه + إعداد caddy (يُركَّب في حاويته فقط)
 Dockerfile*
 docker-compose*.yml
 .dockerignore
+deploy/

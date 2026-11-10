@@ -144,6 +144,95 @@ check("الـWebSocket لا يقرأ التوكن من الرابط", 'query_par
 fe = Path("frontend/src/components/ChatInterface.jsx").read_text(encoding="utf-8")
 check("الواجهة لا تضع التوكن في رابط السوكت", "ws/chat?token" not in fe and "type: 'auth'" in fe)
 
+print("7) الإنتاج: التسجيل، أول مشرف، عنوان العميل خلف البروكسي، المنافذ")
+from sqlalchemy import create_engine  # noqa: E402
+
+import app.db.database as DB  # noqa: E402
+import app.auth.token_guard as TG  # noqa: E402
+
+_tmpdb = Path(tempfile.mkdtemp()) / "sec.db"
+DB.engine = create_engine(f"sqlite:///{_tmpdb}", connect_args={"check_same_thread": False})
+DB.SessionLocal.configure(bind=DB.engine)
+TG._PATH = _tmpdb.parent / "auth_revocations.json"
+TG._state = None
+from app.db import models as _M  # noqa: E402
+
+DB.Base.metadata.create_all(bind=DB.engine)
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from app.auth.routes import router as _auth_router  # noqa: E402
+
+_app = FastAPI()
+_app.include_router(_auth_router)
+_c = TestClient(_app)
+_saved_reg = os.environ.get("ALLOW_REGISTRATION")
+os.environ["ALLOW_REGISTRATION"] = "false"
+r = _c.post("/api/auth/register", json={"email": "x@example.com", "password": "longenough1"})
+check("ALLOW_REGISTRATION=false ← التسجيل الذاتي 403", r.status_code == 403, r.text)
+os.environ["ALLOW_REGISTRATION"] = "true"
+r = _c.post("/api/auth/register", json={"email": "short@example.com", "password": "1234567"})
+check("كلمة مرور أقصر من 8 تُرفض في الخادم (لا في الواجهة فقط)", r.status_code == 400, r.text)
+r = _c.post("/api/auth/register", json={"email": "Mixed.Case@Example.com", "password": "longenough1"})
+check("التسجيل ينجح ويحفظ البريد بأحرف صغيرة", r.status_code == 200
+      and DB.SessionLocal().query(_M.User).filter_by(email="mixed.case@example.com").count() == 1, r.text)
+r = _c.post("/api/auth/login", json={"email": "MIXED.case@example.com", "password": "longenough1"})
+check("الدخول بلا حساسية لحالة الأحرف", r.status_code == 200, r.text)
+r = _c.post("/api/auth/register", json={"email": "mixed.CASE@example.com", "password": "longenough1"})
+check("البريد نفسه بأحرف مختلفة لا يُسجَّل مرتين", r.status_code == 400, r.text)
+if _saved_reg is None:
+    os.environ.pop("ALLOW_REGISTRATION", None)
+else:
+    os.environ["ALLOW_REGISTRATION"] = _saved_reg
+
+import scripts.create_user as CU  # noqa: E402
+
+os.environ["MOJ_USER_PASSWORD"] = "admin-pass-123"
+rc = CU.main(["--email", "Admin@Example.com", "--role", "admin"])
+u = DB.SessionLocal().query(_M.User).filter_by(email="admin@example.com").first()
+check("create_user ينشئ أول مشرف (role=admin وis_admin)", rc == 0 and u and u.role == "admin" and u.is_admin)
+r = _c.post("/api/auth/login", json={"email": "admin@example.com", "password": "admin-pass-123"})
+check("المشرف المُنشأ يدخل", r.status_code == 200, r.text)
+tok = r.json().get("access_token", "")
+import time as _time  # noqa: E402
+
+check("توكن المشرف صالح قبل إعادة التعيين", TG.authenticate(tok)[0] is not None)
+_time.sleep(2.2)  # للإبطال ثانية تسامح مع ساعة الإصدار
+os.environ["MOJ_USER_PASSWORD"] = "new-admin-pass-456"
+CU.main(["--email", "admin@example.com", "--reset"])
+check("إعادة التعيين تُبطل الجلسات المفتوحة", TG.authenticate(tok) == (None, "revoked"),
+      TG.authenticate(tok))
+os.environ["MOJ_USER_PASSWORD"] = "short"
+try:
+    CU.main(["--email", "weak@example.com"])
+    check("create_user يرفض كلمة مرور قصيرة", False)
+except SystemExit:
+    check("create_user يرفض كلمة مرور قصيرة",
+          DB.SessionLocal().query(_M.User).filter_by(email="weak@example.com").count() == 0)
+os.environ["MOJ_USER_PASSWORD"] = "long-enough-1"
+try:
+    CU.main(["--email", "admin@server.local"])
+    check("create_user يرفض بريداً لا تقبله صفحة الدخول (مشرف لا يستطيع الدخول)", False)
+except SystemExit:
+    check("create_user يرفض بريداً لا تقبله صفحة الدخول (مشرف لا يستطيع الدخول)", True)
+os.environ.pop("MOJ_USER_PASSWORD", None)
+
+import yaml  # noqa: E402
+
+compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))["services"]
+public = {name for name, svc in compose.items()
+          for p in svc.get("ports") or [] if not str(p).startswith("127.0.0.1:")}
+check("المنافذ العامة لـcaddy فقط (الواجهة والخادم الخلفي على 127.0.0.1)", public == {"caddy"}, public)
+check("الخادم الخلفي يثق بعنوان العميل من nginx (لا يرى عنوان nginx لكل المستخدمين)",
+      compose["backend"]["environment"].get("FORWARDED_ALLOW_IPS") == "*")
+ngx = Path("frontend/nginx.conf").read_text(encoding="utf-8")
+check("nginx يرسل عنواناً واحداً محسوماً لا قائمة يضيف إليها العميل",
+      "$proxy_add_x_forwarded_for" not in ngx and "X-Forwarded-For $remote_addr" in ngx
+      and "set_real_ip_from 172.16.0.0/12" in ngx and "real_ip_header X-Forwarded-For" in ngx)
+envx = Path(".env.docker.example").read_text(encoding="utf-8")
+check("قالب الإنتاج: التسجيل مغلق وDEBUG معطّل", "ALLOW_REGISTRATION=false" in envx and "DEBUG=False" in envx)
+check("سكربتات الخادم بنهايات LF (CRLF يكسر bash)",
+      all(b"\r" not in Path(p).read_bytes() for p in ("scripts/backup.sh", "scripts/restore.sh", "deploy/Caddyfile")))
+
 for k, v in saved.items():
     if v is not None:
         os.environ[k] = v

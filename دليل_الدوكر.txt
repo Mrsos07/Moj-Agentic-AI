@@ -1,149 +1,283 @@
 ═══════════════════════════════════════════════════════════════════
-                  دليل تشغيل موج بالدوكر
+            دليل تثبيت وتشغيل نظام موج على خادم الإنتاج (Docker)
 ═══════════════════════════════════════════════════════════════════
 
+النظام يعمل كخمس حاويات تربطها docker-compose.yml:
 
-■ الملفات التي أنشأناها
-═════════════════════════
+   caddy     البوابة العامة الوحيدة (80/443) + شهادة HTTPS تلقائية من Let's Encrypt
+   frontend  الواجهة (Nginx) — تمرّر /api و/ws و/static للخادم الخلفي
+   backend   الخادم الخلفي (FastAPI) ويشغّل بداخله خوادم X (5789) وLoginX (5000) والهوية (5990)
+   neo4j     ذاكرة الموظفين المعرفية (الرسم)
+   redis     ذاكرة الجلسات المؤقتة
 
-   ١. Dockerfile.backend       — صورة الخادم الخلفي
-   ٢. Dockerfile.frontend      — صورة الواجهة
-   ٣. docker-compose.yml       — يربط الخادمين ببعض
-   ٤. .dockerignore            — يمنع نسخ الملفات غير الضرورية
-   ٥. .env.docker.example      — قالب ملف البيئة
-   ٦. frontend/nginx.conf      — إعدادات إنجن إكس للواجهة
-
-
-■ المتطلبات قبل التشغيل
-═════════════════════════
-
-   ١. تثبيت Docker Desktop على جهازك:
-      https://www.docker.com/products/docker-desktop/
-
-   ٢. التأكد من تشغيله (الأيقونة في شريط المهام)
+لا يُنشر للإنترنت إلا 80 و443. الواجهة والخادم الخلفي مربوطان على 127.0.0.1 للتشخيص فقط،
+وNeo4j وRedis داخل شبكة الدوكر فقط.
 
 
-■ خطوات التشغيل
-═════════════════
-
-   الخطوة ١ — أنشئ ملف البيئة:
-
-      انسخ الملف .env.docker.example إلى ملف اسمه .env
-      وضع فيه مفاتيحك الحقيقية:
-
-         • OPENAI_API_KEY      — مفتاح أوبن إيه آي
-         • GEMINI_API_KEY      — مفتاح جيمناي
-         • JWT_SECRET_KEY      — مفتاح عشوائي للجلسات
-         • ENCRYPTION_KEY      — مفتاح فيرنت للتشفير
-
-   الخطوة ٢ — افتح موجه الأوامر في مجلد المشروع وشغّل:
-
-         docker compose up -d --build
-
-      هذا الأمر:
-         • يبني صورة الخادم الخلفي (يأخذ ٥-١٠ دقائق أول مرة)
-         • يبني صورة الواجهة (يأخذ ٢-٣ دقائق)
-         • يشغّل الخادمين في الخلفية
-
-   الخطوة ٣ — افتح المتصفح:
-
-         http://localhost
-
-      هذا هو الرابط الوحيد اللي تحتاجه. كل شي يمر من هنا.
-
-
-■ الأوامر الأساسية
-════════════════════
-
-   عرض السجلات الحية:
-      docker compose logs -f
-
-   عرض سجلات الخادم الخلفي فقط:
-      docker compose logs -f backend
-
-   إيقاف النظام:
-      docker compose down
-
-   إيقاف وحذف البيانات المخزنة (تحذير: يمسح القاعدة):
-      docker compose down -v
-
-   إعادة البناء بعد تعديل الكود:
-      docker compose up -d --build
-
-   الدخول لطرفية الخادم الخلفي:
-      docker compose exec backend bash
-
-
-■ المنافذ المستخدمة
+■ ١. متطلبات الخادم
 ═════════════════════
 
-   80     — الواجهة (الرابط الذي يفتحه المستخدم)
-   8000   — الخادم الخلفي (مكشوف للتطوير)
-   5789   — خادم منصة إكس (مكشوف للتطوير)
-   5000   — خادم تسجيل الدخول الجماعي
-   5990   — خادم توليد الهويات
+   • نظام: Ubuntu Server 22.04 أو 24.04 LTS (معمارية x86_64)
+   • الحد الأدنى: 2 vCPU، ذاكرة 4GB، قرص 30GB
+   • الموصى به:   4 vCPU، ذاكرة 8GB، قرص 60GB SSD
+     (كل موظف ذكي يفتح متصفح Chromium، وNeo4j يحجز حتى ~1.5GB)
+   • نطاق (دومين) — مثل moj.example.com — لتفعيل HTTPS. بدونه يعمل النظام على HTTP فقط
+     (للتجربة؛ لا تُدخل كلمات مرور حقيقية بلا HTTPS)
+   • وصول SSH بمستخدم له صلاحية sudo
 
 
-■ البيانات الدائمة
-═══════════════════
-الدوكر يحفظ هذي الأشياء حتى لو حذفت الحاويات:
+■ ٢. ربط النطاق بالخادم (قبل التشغيل)
+═══════════════════════════════════════
 
-   moj_data           — قاعدة البيانات
-   moj_cookies        — كوكيز حسابات إكس
-   moj_identity_imgs  — الصور المولّدة من جيميناي
-   moj_uploads        — ملفات المستخدمين
+   في لوحة مزوّد النطاق أضف سجل A:
+      الاسم: moj (أو @ للنطاق الرئيسي)     القيمة: عنوان IP العام للخادم
 
-   لمعرفة مكانها على جهازك:
-      docker volume inspect موج_data
+   تحقّق (من جهازك) أن النطاق يشير للخادم قبل المتابعة:
+      ping moj.example.com
 
-
-■ ملاحظات أمنية مهمة
-═══════════════════════
-
-   • لا ترفع ملف .env إلى قِت‌هَب أبداً
-   • مفاتيح أوبن إيه آي وجيمناي تكلّفك مال — اضبط حدود في حساباتك
-   • الكوكيز في الـ volume هي توكِنات دخول حقيقية، تعامل معها
-     كأنها كلمات سر
+   ⚠️ إن كنت تستخدم Cloudflare: اجعل السجل «DNS only» (السحابة الرمادية) أثناء أول تشغيل
+      حتى يُصدر Caddy الشهادة، ثم فعّل البروكسي إن أردت مع وضع SSL = Full (strict).
 
 
-■ المشاكل الشائعة وحلولها
+■ ٣. تجهيز الخادم وتثبيت Docker
+═════════════════════════════════
+
+   اتصل بالخادم:
+      ssh user@SERVER_IP
+
+   حدّث النظام:
+      sudo apt update && sudo apt -y upgrade
+      sudo apt -y install git curl openssl
+
+   ثبّت Docker Engine مع Compose (السكربت الرسمي):
+      curl -fsSL https://get.docker.com | sudo sh
+      sudo usermod -aG docker $USER
+
+   اخرج وادخل مرة أخرى بـ SSH (لتفعيل مجموعة docker)، ثم تحقّق:
+      docker version
+      docker compose version          ← يجب أن يظهر v2 أو أحدث
+
+   الجدار الناري (اسمح بـSSH أولاً حتى لا تُقفل نفسك خارج الخادم):
+      sudo ufw allow OpenSSH
+      sudo ufw allow 80/tcp
+      sudo ufw allow 443/tcp
+      sudo ufw allow 443/udp
+      sudo ufw enable
+
+   تأكّد أن لا شيء آخر يحجز المنفذين 80 و443 (مثل apache2 أو nginx مثبّت على النظام):
+      sudo ss -ltnp | grep -E ':80 |:443 '
+   إن ظهر شيء:  sudo systemctl disable --now apache2 nginx
+
+
+■ ٤. تنزيل المشروع
+════════════════════
+
+      sudo mkdir -p /opt/moj && sudo chown $USER:$USER /opt/moj
+      git clone https://github.com/Mrsos07/Moj-Agentic-AI.git /opt/moj
+      cd /opt/moj
+
+   المستودع خاص؟ استخدم توكن GitHub للقراءة فقط (Fine-grained, Contents: Read) عند طلب
+   كلمة المرور، أو أضف Deploy Key للخادم في إعدادات المستودع.
+
+
+■ ٥. ملف البيئة .env
+══════════════════════
+
+      cp .env.docker.example .env
+      chmod 600 .env
+
+   ولّد المفاتيح السرية (انسخ كل ناتج إلى مكانه في .env):
+
+      openssl rand -hex 32                              ← JWT_SECRET_KEY
+      openssl rand -base64 32 | tr '+/' '-_'            ← ENCRYPTION_KEY
+      openssl rand -hex 16                              ← NEO4J_PASSWORD
+
+   ثم عدّل الملف:
+      nano .env
+
+   القيم الإلزامية:
+      DOMAIN=moj.example.com
+      ALLOWED_ORIGINS=https://moj.example.com
+      JWT_SECRET_KEY=...            (64 حرفاً من الأمر أعلاه)
+      ENCRYPTION_KEY=...            (44 حرفاً تنتهي بـ =)
+      NEO4J_PASSWORD=...
+      OPENROUTER_API_KEY=sk-or-v1-...
+      OPENROUTER_MODEL=openai/gpt-4o-mini     (اسم مؤهَّل بالمزوّد دائماً)
+      ALLOW_REGISTRATION=false                 (الحسابات يُنشئها المشرف — الخطوة ٧)
+
+   اختيارية حسب الحاجة:
+      TAVILY_API_KEY      بحث الأخبار للموظفين (بدونه: أخبار Google RSS)
+      PIXABAY_API_KEY     صور/فيديو مجانية للمنشورات
+      GEMINI_API_KEY      توليد الهويات
+      PROXY_*             بروكسي سكني سعودي لمسارات X (موصى به)
+      YESCAPTCHA_KEY ...  حل الكابتشا عند تسجيل دخول X
+
+   بلا نطاق (تجربة على IP):  DOMAIN=   فارغ،   ALLOWED_ORIGINS=http://SERVER_IP
+
+   ⚠️ تحذيرات مهمة:
+      • ENCRYPTION_KEY لا يُغيَّر بعد التشغيل: مفاتيح المستخدمين المشفّرة به تصبح غير قابلة للفك.
+        احفظ نسخة من .env في مكان آمن خارج الخادم.
+      • الملف UTF-8 فقط (nano يحفظه كذلك). لا تُنشئه بـ PowerShell «>» على ويندوز.
+      • لا ترفع .env إلى GitHub أبداً (مستثنى في .gitignore).
+
+
+■ ٦. البناء والتشغيل
+══════════════════════
+
+      docker compose up -d --build
+
+   أول بناء يستغرق 10–20 دقيقة (صورة الخادم الخلفي ~3.5GB: بايثون + Chromium).
+   تابع الحالة حتى تصبح كل الخدمات healthy (الخادم الخلفي يحتاج ~1–2 دقيقة بعد الإقلاع):
+
+      docker compose ps
+
+   المتوقع:
+      moj-backend-1    ... Up (healthy)
+      moj-caddy-1      ... Up
+      moj-frontend-1   ... Up (healthy)
+      moj-neo4j-1      ... Up (healthy)
+      moj-redis-1      ... Up (healthy)
+
+   سجلات الإقلاع (يجب أن ترى «Application startup complete»):
+      docker compose logs -f backend          (Ctrl+C للخروج من المتابعة)
+
+
+■ ٧. إنشاء حساب المشرف الأول
+══════════════════════════════
+
+      docker compose exec backend python scripts/create_user.py --email you@example.com --role admin
+
+   يطلب كلمة المرور مرتين (8 أحرف على الأقل، لا تظهر أثناء الكتابة).
+   البريد يجب أن يكون بنطاق حقيقي (صفحة الدخول ترفض نطاقات مثل ‎.local).
+
+   حسابات إضافية للمستخدمين:
+      docker compose exec backend python scripts/create_user.py --email user@example.com
+   نسيان كلمة مرور (تُبطل كل جلسات الحساب المفتوحة):
+      docker compose exec backend python scripts/create_user.py --email user@example.com --reset
+   تغيير الدور (user | admin | developer):
+      docker compose exec backend python scripts/create_user.py --email user@example.com --role developer
+
+
+■ ٨. التحقق النهائي
+═════════════════════
+
+      curl -I https://moj.example.com                 ← HTTP/2 200
+      curl https://moj.example.com/health             ← {"status":"healthy",...}
+      curl -I http://moj.example.com                  ← تحويل 308 إلى https
+
+   افتح https://moj.example.com في المتصفح وسجّل الدخول بحساب المشرف.
+   مؤشر الاتصال في الشات يجب أن يكون متصلاً (بلا «جارٍ إعادة الاتصال»).
+
+   ثم من الواجهة:
+      • «حساباتي» ← أضف حساب X (ملف كوكيز JSON أو تسجيل دخول)
+      • «الوكلاء» ← فعّل الحساب كموظف ذكي واضبط شخصيته وجدوله
+      • الإعدادات ← «مزوّد النماذج» إن أراد مستخدم مفتاحه الخاص
+
+
+■ ٩. التشغيل اليومي
+═════════════════════
+
+   (كل الأوامر من داخل /opt/moj)
+
+   الحالة:                     docker compose ps
+   السجلات الحية:              docker compose logs -f backend
+   آخر 200 سطر لخدمة:          docker compose logs --tail 200 caddy
+   إعادة تشغيل الخادم الخلفي:  docker compose restart backend
+   إيقاف النظام:               docker compose down        (البيانات تبقى في الأحجام)
+   تشغيله:                     docker compose up -d
+
+   ⛔ لا تستخدم  docker compose down -v  — يحذف كل البيانات (القاعدة والكوكيز والذاكرة والشهادات).
+   ⛔ لا تشغّل أكثر من نسخة من backend (لا scale): الطابور والذاكرة والمنافذ مصمّمة لعملية واحدة.
+
+   النظام يعود تلقائياً بعد إعادة تشغيل الخادم (restart: unless-stopped، وخدمة Docker مفعّلة).
+   مهمة كانت تعمل لحظة الانقطاع تظهر في «سجل التنفيذ» بالواجهة كمقطوعة مع زر استئناف.
+
+
+■ ١٠. التحديث لإصدار جديد
 ═══════════════════════════
 
-   ◆ "port 80 is already in use"
-     ─ نفّذ: docker compose down ثم أعد المحاولة
-     ─ أو غيّر منفذ الواجهة في docker-compose.yml:
-        "8080:80" بدل "80:80" ثم افتح localhost:8080
+      cd /opt/moj
+      ./scripts/backup.sh                  ← نسخة احتياطية قبل أي تحديث
+      git pull --ff-only
+      docker compose up -d --build
+      docker compose ps                    ← انتظر healthy
+      docker image prune -f                ← حذف الصور القديمة (يوفّر مساحة)
 
-   ◆ "OPENAI_API_KEY not set"
-     ─ تأكد من وجود ملف .env في نفس مجلد docker-compose.yml
-     ─ تأكد إن المفتاح فعلاً موجود وصحيح
-
-   ◆ Playwright يفشل (لا يقدر يفتح المتصفح)
-     ─ الـ Dockerfile.backend يثبت Chromium تلقائياً
-     ─ لو فشل، نفّذ:
-        docker compose exec backend playwright install chromium
-
-   ◆ القاعدة فاضية
-     ─ يصير لو حذفت الـ volume
-     ─ سجّل مستخدم جديد من الواجهة وأعد إضافة حساباتك
-
-   ◆ "no such file: init_database.py"
-     ─ يعني .dockerignore تجاهل الملف
-     ─ تأكد إن init_database.py في جذر المشروع
+   ملاحظة: أدوات MCP التي يضيفها المشرف من لوحة النظام وقت التشغيل تعيش داخل الصورة،
+   فتُفقد عند إعادة البناء — أعد إضافتها بعد التحديث أو احفظها في المستودع.
 
 
-■ النشر على خادم سحابي (اختياري)
-═══════════════════════════════════
-لو تبي تنشر النظام على خادم حقيقي (Linode, DigitalOcean, AWS):
+■ ١١. النسخ الاحتياطي والاستعادة
+══════════════════════════════════
 
-   ١. ثبّت Docker على الخادم
-   ٢. ارفع ملفات المشروع (بدون .env)
-   ٣. أنشئ .env على الخادم بمفاتيحك
-   ٤. شغّل: docker compose up -d --build
-   ٥. اربط دومين بالخادم
-   ٦. أضف شهادة SSL (Let's Encrypt) عبر Caddy أو Traefik
+   نسخة الآن (القاعدة بنسخة متّسقة، ذاكرة الموظفين، الأسرار الداخلية، كوكيز X، الصور، و.env):
+      ./scripts/backup.sh                         ← إلى /opt/moj/backups/moj-<التاريخ>
+      ./scripts/backup.sh /mnt/backups --with-neo4j   ← + ذاكرة الرسم (يوقف neo4j ثوانٍ)
+
+   نسخة يومية تلقائية الساعة 3 فجراً مع حذف ما مضى عليه 14 يوماً:
+      crontab -e
+   وأضف السطر:
+      0 3 * * * cd /opt/moj && ./scripts/backup.sh /opt/moj/backups --with-neo4j >> /opt/moj/backups/backup.log 2>&1 && find /opt/moj/backups -maxdepth 1 -name 'moj-*' -mtime +14 -exec rm -rf {} +
+
+   ⚠️ النسخة تحوي كوكيز جلسات X والأسرار: انقلها لمكان آمن خارج الخادم (مثلاً rsync/S3 مشفّر).
+
+   الاستعادة (تستبدل البيانات الحالية بالكامل، وتطلب تأكيداً):
+      ./scripts/restore.sh ./backups/moj-20261110-030000
+
+   النقل لخادم جديد: نفّذ الخطوات ٣–٦ على الخادم الجديد بنفس .env المحفوظ في النسخة
+   (env.backup)، ثم انسخ مجلد النسخة إليه ونفّذ restore.sh.
 
 
-═══════════════════════════════════════════════════════════════════
-                  تم. نظامك جاهز للنشر بالدوكر.
+■ ١٢. حل المشاكل الشائعة
+══════════════════════════
+
+   ◆ الموقع لا يفتح بـ HTTPS / خطأ شهادة
+     ─ docker compose logs caddy   — ابحث عن سبب فشل الإصدار
+     ─ تأكد أن النطاق يشير لعنوان الخادم وأن 80 و443 مفتوحان (ufw + جدار مزوّد السحابة)
+     ─ Cloudflare: السجل «DNS only» حتى تصدر الشهادة
+     ─ تكرار المحاولات الفاشلة يصطدم بحدّ Let's Encrypt — أصلح السبب ثم: docker compose restart caddy
+
+   ◆ 502 Bad Gateway بعد التشغيل مباشرة
+     ─ الخادم الخلفي ما زال يُقلع (حتى دقيقتين). docker compose ps حتى يصبح healthy.
+
+   ◆ backend يعيد التشغيل باستمرار (Restarting)
+     ─ docker compose logs --tail 100 backend
+     ─ «JWT_SECRET_KEY must be set» أو «Invalid ENCRYPTION_KEY» ← راجع الخطوة ٥
+     ─ «UnicodeDecodeError ... 0xff» ← .env محفوظ UTF-16؛ أعد إنشاءه بـ nano
+
+   ◆ الشات «جارٍ إعادة الاتصال» دائماً / WebSocket يُغلق فوراً
+     ─ ALLOWED_ORIGINS يجب أن يطابق عنوان المتصفح حرفياً (https://النطاق بلا / أخيرة)
+       ثم: docker compose up -d backend
+
+   ◆ «محاولات دخول كثيرة — حاول لاحقاً»
+     ─ 5 محاولات خاطئة لنفس البريد أو 20 من نفس العنوان خلال 15 دقيقة. انتظر، أو
+       docker compose restart backend لتصفير العدّاد، أو أعد تعيين كلمة المرور (الخطوة ٧).
+
+   ◆ «التسجيل مغلق»
+     ─ مقصود في الإنتاج. أنشئ الحساب بـ create_user.py، أو ALLOW_REGISTRATION=true (غير موصى به).
+
+   ◆ الموظف لا ينشر / أخطاء متصفح X
+     ─ docker compose logs backend | grep -iE "x-bridge|captcha|proxy"
+     ─ الكوكيز منتهية: أعد رفعها من «حساباتي». بلا بروكسي سعودي قد تحظر X بعض العمليات.
+
+   ◆ نفاد الذاكرة / بطء
+     ─ free -h  و  docker stats   — قلّل عدد الموظفين النشطين معاً أو كبّر الخادم (٨GB موصى به).
+
+   ◆ امتلاء القرص
+     ─ df -h   و   docker system df   ثم   docker image prune -f   وحذف النسخ الاحتياطية القديمة.
+
+   ◆ تشخيص مباشر من الخادم نفسه (يتجاوز caddy):
+     ─ curl http://127.0.0.1:8000/health        (الخادم الخلفي)
+     ─ curl -I http://127.0.0.1:8080            (الواجهة)
+     ─ docker compose exec backend bash         (طرفية داخل الحاوية)
+
+
+■ ١٣. ملاحظات أمنية
+═════════════════════
+
+   • .env والنسخ الاحتياطية تحوي أسراراً وكوكيز جلسات حقيقية — صلاحيات 600 وخارج GitHub.
+   • التسجيل الذاتي مغلق: كل حساب يستهلك مفتاح النماذج للنظام، فالمشرف وحده يُنشئ الحسابات.
+   • مفاتيح OpenRouter/Gemini/Tavily مدفوعة — اضبط حدّ إنفاق في حساب كل مزوّد.
+   • حدّث النظام دورياً:  sudo apt update && sudo apt -y upgrade   ثم الخطوة ١٠.
+
 ═══════════════════════════════════════════════════════════════════

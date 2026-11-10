@@ -1,0 +1,9 @@
+# البوابة العامة الوحيدة لموج (حاوية caddy).
+# DOMAIN=moj.example.com ⇒ شهادة Let's Encrypt تلقائية وتجديدها، وتحويل HTTP إلى HTTPS.
+# DOMAIN فارغ ⇒ «:80»: HTTP فقط (تجربة على IP بلا نطاق).
+# Caddy يضع X-Forwarded-For بعنوان العميل الحقيقي (ويتجاهل ما يرسله العميل نفسه).
+
+{$DOMAIN::80} {
+	encode zstd gzip
+	reverse_proxy frontend:80
+}
