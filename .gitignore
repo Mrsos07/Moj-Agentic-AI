@@ -108,6 +108,11 @@ app/x/loginx_server.log
 app/identity/identity_server.log
 app/x/loginx2026/loginx2026_server.log
 
-# صفحات X محفوظة للتشخيص تحمل ct0 في document.cookie
-debug_*.html
-*.har
+# حزمة نواه كما وصلت من صاحبها (المصدر المعتمد صار system/mcps/nawah_clone): فيها نصوص حسابات
+# حقيقية في data/clones وحزمتان مجمّعتان بـ 5 MB — لا تُرفع
+MCP Servers nawah/
+# ملفات استنساخ نواه الخاصة بكل موظف + أي .env محلي للحزمة
+system/mcps/nawah_clone/data/
+system/mcps/nawah_clone/.env
+# الاستثناء الوحيد من dist/: الملف المجمّع الذي يشغّله موج فعلاً (بلا node_modules وقت التشغيل)
+!system/mcps/nawah_clone/dist/

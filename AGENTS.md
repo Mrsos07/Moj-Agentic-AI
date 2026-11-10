@@ -716,6 +716,16 @@ defences it forced are still in the code and still required if you set
 - `ECONNRESET` in the vite proxy is the normal signature of a backend restart or a
   page refresh (all sockets reset at once — you will see a burst with identical
   timestamps). It is logged as one quiet line so real errors stay visible.
+- **Never open a DB session with `next(get_db())` outside a FastAPI dependency.** The
+  generator is finalised immediately, so its `finally: db.close()` runs on an EMPTY session;
+  the first query then checks out a fresh connection that only returns to the pool when the
+  cyclic GC collects the Session (it sits in a reference cycle). Measured (2026-10-25): the
+  `/ws/chat` loop did this per message, every chat message pinned one connection, the pool
+  (5+10) filled while all threads were idle (py-spy), and the scheduler died with
+  `QueuePool limit of size 5 overflow 10 reached`. The loop now uses `SessionLocal()` with a
+  per-message `finally: db.close()`. `GET /api/aeos/health` exposes `db_pool`
+  (`checked_out` > 0 on an idle server = a leaked session). Verified live: 5 messages,
+  `checked_out` back to 0 after each.
 
 ## The browser lock is the usual cause of "انتهت المهلة"
 - `browser_lock` (in `app/services/x_bridge.py`) serialises ALL Playwright work.
@@ -768,6 +778,74 @@ defences it forced are still in the code and still required if you set
   the clone as a background job (`background: true` → `GET /persona/clone/jobs/{id}`;
   UI helper `frontend/src/hooks/clonePersona.js`) — a deep clone takes 3-5 min.
   Test: `verify_voice.py` (82 checks).
+
+## Clone sample = 70 original tweets, no replies (owner decision, 2026-11-01)
+- `persona_clone.SAMPLE = {limit: 70, replies_limit: 0}`; `scrape_profile`/`clone_persona` default to
+  `deep=False`, which sends `include_replies=False` to `read_user_profile`: the scraper reads the
+  profile tab only (no `/with_replies`, no history windows) and trims to `limit`. `replies_limit=0`
+  alone is NOT enough — the scraper used to fall back to `want // 2` replies. The API caps `limit`
+  at 70. `nawah_clone._texts` sends tweets only (`MAX_TEXTS = 70`), never replies.
+- Consequence: `voice_profile` has empty reply kinds/policy/exemplars for new clones, so
+  `reply_plan` runs on defaults and the card shows no reply section — intended. `deep=True`
+  still exists for the old behaviour (verify_voice's deep-profile checks use it in-memory).
+
+## Voice fingerprint comes from the NAWAH clone server (since 2026-10-25)
+- Persona cloning still scrapes X with the employee's cookies (`persona_clone.scrape_profile`) and still
+  measures the Arabic reply side itself (reply kinds, reply policy, exemplars, era phrases). What changed is
+  the **LLM style analysis**: `voice_profile.analyze(profile, llm, nawah=…)` asks the NAWAH clone server
+  first (`create_clone` → fingerprint: dialect, register, one_line, style_guide, signature_phrases,
+  never_uses, notes) and `services/nawah_clone.to_analysis()` maps it into the `analysis` shape that
+  `voice_block`/`persona_from_voice` already consume. NAWAH does not produce pillars/values/red_lines —
+  those stay EMPTY on purpose (never invent identity); interests come from the measured topic distribution.
+- The old `_ANALYSIS_SCHEMA` LLM pass is now only an *announced* fallback: on any NAWAH failure the
+  reason lands in `voice_profile.nawah_error` (shown in the card and the chat message), never silently.
+- The server is a fork of `nawah-mcp-servers` under `system/mcps/nawah_clone/` (stdio, `node
+  dist/clone-server.mjs`, registered as `ext_nawah_clone` with `scope` coordinator/employees = false:
+  internal only). Its Gemini SDK layer was replaced by `src/core/llm.ts` — plain OpenAI-compatible
+  chat completions (json_schema → json_object fallback, tool calling, retries) — and Google Search
+  grounding by Tavily. **Edit `src/`, then `npm run build:clone`**: the app runs `dist/`, which is the
+  one `dist/` folder NOT gitignored. Image/video helpers were dropped (unused by the servers).
+- The key/base_url/model are NOT stored for it: `external_mcp.register_env_provider("nawah_clone",
+  nawah_clone.runtime_env)` injects `NAWAH_LLM_*` from `resolve_llm()` (system endpoint, like embeddings)
+  at connect time, blanks `GEMINI_API_KEY`, and the client reconnects if that env changes. Model:
+  `NAWAH_MODEL` (default `google/gemini-3.7-flash`, provider-qualified; an unqualified name is a 404 that
+  the server reports in Arabic). Clone files: `data/nawah/clones/<label>__<handle>.json`, one per
+  (employee account, cloned account) — private, no shared library; `business_rules.voice_profile`
+  remains the source of truth. `fidelity_test` adds `nawah_score` (deterministic `score` tool).
+- The original drop `MCP Servers nawah/` is gitignored (real accounts' posts + 5 MB bundles).
+- Verify: `.\venv\Scripts\python.exe verify_nawah.py` (offline) / `--live` (one real clone, ~10 s).
+
+## «مهمة للفريق» runs on the NAWAH brief server (since 2026-10-25)
+- Second server from the same package: `system/mcps/nawah_brief/` holds only `mcp.json` and a
+  3-line launcher that imports `../nawah_clone/dist/brief-server.mjs` (so it has its own card,
+  scope, settings and test button in the dashboard while sharing code and clone data). Registered
+  as `ext_nawah_brief`, internal scope, tools `brief` + `research`.
+- Flow (`services/nawah_brief.py`): `order_publish` → `NB.prepare(topic, user)` starts ONE
+  background `brief` call per (user, topic) for the whole team (cached 30 min, in-flight calls
+  share one `Event`, so N employees = one call); it returns at once with `status: building`.
+  `dispatch_directed` → `NB.attach` waits for it (≤7 min), injects `for_employee(brief, handle)`
+  into `payload["media_brief"]`, announces the directive to the owner once (`announce_once`) and
+  each employee's angle; on any NAWAH failure it says why and falls back to the old
+  `media_brief` (Tavily + editor LLM). The employee's own writer + quality gate still produce the
+  final post — NAWAH gives research, directive (message, facts, per-employee beliefs/stance/
+  angle/avoid) and a draft in that employee's voice, never the published text.
+- **Every employee gets a seat, cloned or not** (owner decision): `voice_for(cfg)` sends the stored
+  clone id when `voice_profile.nawah.id` exists on disk, otherwise an ad-hoc `persona` (role, bio,
+  interests, tone, dos/donts, voice-profile style guide, + its own published posts from the cycle
+  log and the performance ledger). Server side `src/core/adhoc.ts` turns that into a transient
+  clone: stats measured from ≥3 own posts, else neutral stats and **no score** (never score a text
+  against numbers that were not measured). `brief` also takes `drafts: false` for a directive-only
+  fast path. Pieces/directive are keyed by voice id (`<label>__<handle>` or `persona:<handle>`) and
+  `normalize()` maps them back to the employee handle — the clone's own `handle` is the cloned
+  TARGET, never use it as the employee.
+- Dashboard: both NAWAH cards expose `NAWAH_MODEL`, `NAWAH_FALLBACK_MODEL`, `NEWSDATA_API_KEY` as
+  env settings (`env_keys`); values live in `data/system_mcp_secrets.json`, win over `.env`, and a
+  save triggers rediscovery = restart with the new env. `external_mcp.runtime_env(cfg)` now passes
+  `cfg` to env providers, drops empty stored values (an empty value used to clobber the process
+  env), and `public_view.env_values` shows non-secret settings so the UI can prefill them (a key
+  whose name looks like a secret stays a password field).
+- Verify: `verify_nawah.py` sections 7-8 offline (voices, normalize, cache/in-flight, attach
+  fallback), section 9 `--live` (real brief with one measured persona and one bare persona).
 
 ## Per-employee custom skills: a SPEC, never generated code
 - `app/aeos/skills/custom.py` + `CustomSkillRunner` (registered in

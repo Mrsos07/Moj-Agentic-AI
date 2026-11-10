@@ -620,6 +620,7 @@ class PlaywrightXMCP(IMCPServer):
                     history_windows=p.get("history_windows") or [],
                     history_budget_seconds=float(p.get("history_budget_seconds", 10.0)),
                     history_per_window=int(p.get("history_per_window", 40)),
+                    include_replies=bool(p.get("include_replies", True)),
                 )
                 return MCPResponse.ok(account=label, **profile)
 
@@ -849,8 +850,13 @@ class PlaywrightXMCP(IMCPServer):
                            replies_budget_seconds: float = 0.0,
                            history_windows: Optional[List[List[str]]] = None,
                            history_budget_seconds: float = 10.0,
-                           history_per_window: int = 40) -> Dict[str, Any]:
+                           history_per_window: int = 40,
+                           include_replies: bool = True) -> Dict[str, Any]:
         """Scrape a target user's bio + tweets + replies (for persona cloning).
+
+        ``include_replies=False``: original tweets only — no ``/with_replies`` tab and no
+        history search (persona cloning since 2026-11-01 builds the voice from up to 70
+        originals; ``replies_limit=0`` alone would still read the tab with a default cap).
 
         Reads ``x.com/<handle>`` for original tweets and ``/with_replies`` for
         the reply/discussion style, in ONE browser session. Tweets not authored
@@ -1016,19 +1022,23 @@ class PlaywrightXMCP(IMCPServer):
                 # 2) تبويب الردود: بطاقات مصنّفة بالخلايا (الأصل الحقيقي لكل رد)، بميزانية
                 #    أطول لأن الردود نصف الشخصية. أي خطأ لا يُسقط العملية.
                 tweet_urls = {t["url"] for t in profile.get("tweets", [])}
-                cap = int(replies_limit or max(6, want // 2))
-                try:
-                    found = _collect_cells(f"https://x.com/{handle}/with_replies", cap,
-                                           float(replies_budget_seconds or budget), True, tweet_urls)
-                except Exception as exc:  # noqa: BLE001
-                    logger.info("replies tab failed for @%s: %s", handle, exc)
-                    found = {}
-                profile["replies"] = [v["item"] for v in found.values() if v["kind"] != "originals"]
-                # منشورات أصلية ظهرت في تبويب الردود ولم تظهر في الملف (أقدم) تُضاف للعيّنة
-                profile["tweets"] += [v["item"] for v in found.values() if v["kind"] == "originals"]
+                profile["replies"] = []
+                if include_replies:
+                    cap = int(replies_limit or max(6, want // 2))
+                    try:
+                        found = _collect_cells(f"https://x.com/{handle}/with_replies", cap,
+                                               float(replies_budget_seconds or budget), True, tweet_urls)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.info("replies tab failed for @%s: %s", handle, exc)
+                        found = {}
+                    profile["replies"] = [v["item"] for v in found.values() if v["kind"] != "originals"]
+                    # منشورات أصلية ظهرت في تبويب الردود ولم تظهر في الملف (أقدم) تُضاف للعيّنة
+                    profile["tweets"] += [v["item"] for v in found.values() if v["kind"] == "originals"]
+                else:
+                    profile["tweets"] = profile["tweets"][:want]
                 # 3) فترات أقدم بالبحث: ردود بلا سياق (البحث يخفي الأصل) وتغريدات أصلية
                 known = {t["url"] for t in profile["tweets"]} | {r["url"] for r in profile["replies"]}
-                for since, until in (history_windows or [])[:8]:
+                for since, until in ((history_windows or []) if include_replies else [])[:8]:
                     q = f"from:{handle} since:{since} until:{until}"
                     try:
                         found = _collect_cells(

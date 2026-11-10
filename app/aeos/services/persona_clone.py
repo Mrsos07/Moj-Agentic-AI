@@ -31,12 +31,14 @@ logger = logging.getLogger("aeos.services.persona_clone")
 
 _TONES = ("professional", "casual", "witty", "formal", "friendly")
 
-#: الاستنساخ العميق (الافتراضي): كان 40 تغريدة و30 رداً من آخر أسبوعين — أي «مواضيع
-#: المرحلة» لا الهوية. الآن مجمّع ردود كبير (يُوزَّع زمنياً عند التحليل، ≥100 رد) وفترات
-#: أقدم بالبحث. قيس على @halgawi: 202 تغريدة و451 رداً (380 بسياقها) على سنة كاملة في ~110 ث.
-DEEP = {"limit": 100, "replies_limit": 400, "tab_budget_seconds": 45.0,
-        "replies_budget_seconds": 120.0, "history_budget_seconds": 10.0, "history_per_window": 40}
-#: فترات البحث في التاريخ: (بداية قبل كم يوم، طول الفترة بالأيام)
+#: عيّنة الاستنساخ (قرار المالك 2026-11-01): **70 منشوراً أصلياً فقط** من ملف الحساب — بلا تبويب
+#: الردود وبلا بحث في فترات أقدم. البصمة تُبنى من التغريدات وحدها (نواه create_clone)، والردود
+#: لا تدخل لا في القياس ولا في الأمثلة. (النسخة السابقة «العميقة»: 100 تغريدة + 400 رد + 4 فترات
+#: تاريخية، ~2-4 دقائق سحب؛ الآن سحب تبويب واحد.)
+SAMPLE = {"limit": 70, "replies_limit": 0, "tab_budget_seconds": 45.0}
+#: اسم قديم أبقيناه لمن يستورده
+DEEP = {**SAMPLE, "replies_budget_seconds": 0.0, "history_budget_seconds": 0.0, "history_per_window": 0}
+#: فترات البحث في التاريخ: (بداية قبل كم يوم، طول الفترة بالأيام) — لم تعد تُستعمل افتراضياً
 HISTORY_OFFSETS = ((75, 20), (165, 20), (255, 20), (350, 20))
 
 
@@ -47,23 +49,22 @@ def history_windows(today: Optional[date] = None) -> List[List[str]]:
 
 
 # ─────────────────────────── scraping ───────────────────────────
-def scrape_profile(cookie_label: str, handle: str, limit: int = DEEP["limit"],
-                   replies_limit: int = DEEP["replies_limit"], headless: bool = True,
+def scrape_profile(cookie_label: str, handle: str, limit: int = SAMPLE["limit"],
+                   replies_limit: int = SAMPLE["replies_limit"], headless: bool = True,
                    lock_timeout: float = 45.0,
-                   tab_budget_seconds: float = DEEP["tab_budget_seconds"],
-                   deep: bool = True) -> Dict[str, Any]:
-    """اسحب تغريدات الحساب وردوده (مع سياقها) — وفي الوضع العميق فترات أقدم بالبحث."""
+                   tab_budget_seconds: float = SAMPLE["tab_budget_seconds"],
+                   deep: bool = False) -> Dict[str, Any]:
+    """اسحب منشورات الحساب الأصلية (حتى ``limit``). ``deep=True`` يعيد الوضع القديم (ردود + تاريخ)."""
     from ..mcp.base import MCPRequest
     from ..mcp.servers.playwright_x_mcp import PlaywrightXMCP
 
-    params = {"handle": handle, "limit": limit, "replies_limit": replies_limit,
+    limit = max(5, min(int(limit), SAMPLE["limit"])) if not deep else int(limit)
+    params = {"handle": handle, "limit": limit, "replies_limit": replies_limit if deep else 0,
               "headless": headless, "lock_timeout": lock_timeout,
-              "tab_budget_seconds": tab_budget_seconds}
+              "tab_budget_seconds": tab_budget_seconds, "include_replies": bool(deep)}
     if deep:
-        params.update({"replies_budget_seconds": DEEP["replies_budget_seconds"],
-                       "history_windows": history_windows(),
-                       "history_budget_seconds": DEEP["history_budget_seconds"],
-                       "history_per_window": DEEP["history_per_window"]})
+        params.update({"replies_budget_seconds": 120.0, "history_windows": history_windows(),
+                       "history_budget_seconds": 10.0, "history_per_window": 40})
     res = PlaywrightXMCP().call(MCPRequest(
         employee_id="persona_clone", tool="read_user_profile",
         params=params, context={"cookie_label": cookie_label},
@@ -188,21 +189,38 @@ def fidelity_test(profile: Dict[str, Any], voice: Dict[str, Any],
             temperature=0.8, max_tokens=200) or ""
         if text.strip():
             replies.append(text.strip().strip('"«»'))
-    return {**VP.fidelity(voice, posts, replies),
-            "samples": {"posts": posts, "reply": {"to": parent, "text": replies[0] if replies else ""}}}
+    out = {**VP.fidelity(voice, posts, replies),
+           "samples": {"posts": posts, "reply": {"to": parent, "text": replies[0] if replies else ""}}}
+    # درجة نواه الحتمية للمنشورات المولَّدة مقابل البصمة نفسها (إن بُنيت بنواه)
+    nawah_id = (voice.get("nawah") or {}).get("id")
+    if nawah_id and posts:
+        from . import nawah_clone as NC
+
+        scores = [s for s in (NC.score(nawah_id, p) for p in posts) if s is not None]
+        if scores:
+            out["nawah_score"] = round(sum(scores) / len(scores))
+    return out
 
 
 # ─────────────────────────── entry points ───────────────────────────
 def build_cloned_persona(profile: Dict[str, Any], llm: Any, language: str = "ar",
-                         test: bool = True) -> Dict[str, Any]:
+                         test: bool = True, cookie_label: str = "") -> Dict[str, Any]:
     if not (profile.get("tweets") or profile.get("replies")):
         raise RuntimeError(
             f"لم أجد أي تغريدات لحساب {profile.get('handle', '')} — تحقّق من صحة "
             "اليوزر، أو أن الحساب محمي/فارغ، أو أن كوكيز حسابك انتهت صلاحيتها.")
-    voice = VP.analyze(profile, llm)
+    # البصمة الأسلوبية من خادم نواه (المسار الأساسي)؛ المحلّل القديم احتياط معلَن فقط
+    from . import nawah_clone as NC
+
+    nawah = NC.builder(cookie_label) if cookie_label and NC.enabled() else None
+    voice = VP.analyze(profile, llm, nawah=nawah)
     persona = persona_from_voice(profile, voice, language)
-    result = {"source": "ai" if voice.get("analysis") else "heuristic",
+    result = {"source": voice.get("source") or ("ai" if voice.get("analysis") else "heuristic"),
               "persona": persona, "voice_profile": voice}
+    if voice.get("nawah_error"):
+        result["nawah_error"] = voice["nawah_error"]
+    elif nawah is None and cookie_label:
+        result["nawah_error"] = NC.status()["reason"]
     if test:
         try:
             result["fidelity"] = fidelity_test(profile, voice, persona, llm)
@@ -211,23 +229,22 @@ def build_cloned_persona(profile: Dict[str, Any], llm: Any, language: str = "ar"
     return result
 
 
-def clone_persona(cookie_label: str, handle: str, llm: Any, limit: int = DEEP["limit"],
+def clone_persona(cookie_label: str, handle: str, llm: Any, limit: int = SAMPLE["limit"],
                   language: str = "ar", lock_timeout: float = 45.0,
-                  tab_budget_seconds: float = DEEP["tab_budget_seconds"],
-                  replies_limit: int = DEEP["replies_limit"], test: bool = True,
-                  deep: bool = True,
+                  tab_budget_seconds: float = SAMPLE["tab_budget_seconds"],
+                  replies_limit: int = SAMPLE["replies_limit"], test: bool = True,
+                  deep: bool = False,
                   progress: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """التدفّق الكامل: سحب ← بصمة صوت ← برسونا ← اختبار مطابقة."""
     step = progress or (lambda _msg: None)
-    step(f"سحب تغريدات @{handle} وردوده مع ما ردّ عليه، ومن فترات أقدم (2-4 دقائق)…")
+    step(f"سحب آخر {min(int(limit), SAMPLE['limit'])} منشوراً أصلياً من @{handle} (بلا ردود)…")
     profile = scrape_profile(cookie_label, handle, limit=limit, replies_limit=replies_limit,
                              lock_timeout=lock_timeout, tab_budget_seconds=tab_budget_seconds,
                              deep=deep)
     cov = profile.get("coverage") or {}
-    step(f"سُحب {profile.get('tweet_count', 0)} تغريدة و{profile.get('reply_count', 0)} رداً "
-         f"({cov.get('pairs', 0)} بسياقها) من {cov.get('from', '?')} إلى {cov.get('to', '?')} — "
-         "جارِ تحليل الهوية وأنواع الردود…")
-    result = build_cloned_persona(profile, llm, language=language, test=test)
+    step(f"سُحب {profile.get('tweet_count', 0)} منشوراً أصلياً من {cov.get('from', '?')} إلى "
+         f"{cov.get('to', '?')} — بناء بصمة الصوت عبر نواه ثم اختبار المطابقة…")
+    result = build_cloned_persona(profile, llm, language=language, test=test, cookie_label=cookie_label)
     sample = (result.get("voice_profile") or {}).get("sample", {})
     result["target"] = {
         "handle": profile.get("handle", f"@{handle}"),

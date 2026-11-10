@@ -106,6 +106,12 @@ t._cfg = lambda args: NS(account_username=args["employee"], user_id=1, id="e-" +
 t._dispatch = lambda cfg, payload, caps, label: sent.append((cfg.account_username, payload))
 _real_platform = O._platform
 O._platform = lambda: NS(llm=llm)
+# منذ 2026-10-25 «مهمة للفريق» تمرّ بخادم نواه حين يكون حيّاً (order_publish يطلق توجيهاً في الخلفية
+# ويعيد status=building). هذا القسم يفحص المحرّك الاحتياطي (Tavily + المحرّر) فنعطّل نواه صراحةً.
+from app.aeos.services import nawah_brief as NB  # noqa: E402
+
+_nb_enabled, _nb_peek, _nb_prepare = NB.enabled, NB.peek, NB.prepare
+NB.enabled = lambda: False
 r1 = t.order_publish({"employee": "emp_x", "topic": "تطورات ذوباب اليوم"})
 r2 = t.order_publish({"employee": "emp_y", "topic": "تطورات ذوباب اليوم"})
 check("التكليف يحمل الرسالة الإعلامية ومصادرها", "media_brief" in sent[0][1] and sent[0][1]["media_brief_items"])
@@ -118,6 +124,23 @@ r4 = t.order_publish({"employee": "emp_w", "topic": "موضوع جديد تما�
 core_mcp.tavily_search = fake_tavily
 check("تعذّر البحث ← التكليف لا يُلغى، ويُبلَّغ المالك بالسبب", r4["dispatched"] and "media_brief_error" in r4
       and "media_brief" not in sent[-1][1])
+
+print("3b) المنسّق مع نواه حيّة: التوجيه يُطلق في الخلفية ولا يعلّق الشات")
+prepared = []
+NB.enabled = lambda: True
+NB.peek = lambda topic, uid: None
+NB.prepare = lambda topic, uid, employees=None: (prepared.append(topic), "building")[1]
+r5 = t.order_publish({"employee": "emp_n", "topic": "موضوع لنواه"})
+check("نواه حيّة ← prepare في الخلفية وstatus=building والحمولة موسومة nawah_brief بلا رسالة بعد",
+      prepared == ["موضوع لنواه"] and r5["media_brief"] == {"engine": "nawah", "status": "building"}
+      and sent[-1][1].get("nawah_brief") is True and "media_brief" not in sent[-1][1] and "نواه" in r5["note"])
+ready = {"ok": True, "topic": "موضوع لنواه", "message": "الرسالة", "facts": ["ح1"], "sources": [{"site": "okaz.com.sa"}],
+         "voices": {"emp_n": {"angle": "زاوية الموظف", "draft": "مسودة"}}, "created_at": 0}
+NB.peek = lambda topic, uid: ready
+r6 = t.order_publish({"employee": "emp_n", "topic": "موضوع لنواه"})
+check("توجيه جاهز ← ملخّصه للمالك وزاوية الموظف", r6["media_brief"]["engine"] == "nawah" and r6["media_brief"]["message"] == "الرسالة"
+      and r6["employee_angle"] == "زاوية الموظف" and len(prepared) == 1)
+NB.enabled, NB.peek, NB.prepare = _nb_enabled, _nb_peek, _nb_prepare
 O._platform = _real_platform
 p = {"directed_topic": "تطورات ذوباب اليوم"}
 MB.attach(p, NS(account_username="pinned", user_id=1), llm)

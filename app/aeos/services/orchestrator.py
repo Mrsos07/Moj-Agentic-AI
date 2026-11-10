@@ -534,6 +534,23 @@ class _Tools:
                                "note": "النشر يجري في الخلفية؛ الرابط أو سبب الفشل يصل للشات."}
         if args.get("deep_research", True) is not False:
             from . import media_brief as MB
+            from . import nawah_brief as NB
+
+            if NB.enabled():
+                # نواه: بحث + توجيه لكل الفريق + مسودة بصوت كل موظف — نداء واحد للموضوع يجري في
+                # الخلفية (دقيقة إلى ثلاث)؛ dispatch_directed ينتظره قبل الدورة ويعلنه للمالك
+                payload["nawah_brief"] = True
+                ready = NB.peek(topic, self.user_id)
+                if ready and ready.get("ok"):
+                    out["media_brief"] = NB.owner_summary(ready)
+                    out["employee_angle"] = ((ready.get("voices") or {}).get(cfg.account_username) or {}).get("angle", "")
+                else:
+                    NB.prepare(topic, self.user_id)
+                    out["media_brief"] = {"engine": "nawah", "status": "building"}
+                    out["note"] += (" نواه تعدّ التوجيه الإعلامي الآن (بحث، ثم توجيه لكل الفريق، ثم مسودة "
+                                    "بصوت كل موظف) — ملخّصه يصل إلى الشات خلال دقيقة أو اثنتين قبل النشر.")
+                self._dispatch(cfg, payload, ["publish_content", "publish_thread"], f"نشر منشور عن «{snippet}»")
+                return out
 
             try:
                 brief = MB.build(topic, user_id=self.user_id, llm=getattr(_platform(), "llm", None))
@@ -822,7 +839,7 @@ class _Tools:
 
             platform = _platform()
             try:
-                # استنساخ عميق (الافتراضي): مجمّع ردود كبير موزّع زمنياً + فترات أقدم بالبحث
+                # عيّنة: حتى 70 منشوراً أصلياً (بلا ردود) → بصمة نواه → برسونا
                 res = clone_persona(cfg.account_username, target, platform.llm)
                 fresh = platform.repository.get(cfg.id) or cfg
                 apply_to_employee(fresh, res["persona"], res["voice_profile"], platform.repository)
@@ -830,11 +847,13 @@ class _Tools:
                 a = (res["voice_profile"].get("analysis") or {})
                 cov = t.get("coverage") or {}
                 msg = (f"🧬 **استنسخت هوية @{target} إلى @{cfg.account_username}**\n"
-                       f"العيّنة: {t.get('tweet_count', 0)} تغريدة و{t.get('reply_count', 0)} رداً "
-                       f"({t.get('pairs', 0)} مع سياقها) من {cov.get('from', '?')} إلى {cov.get('to', '?')}، "
-                       f"حُلّل منها {t.get('analyzed_replies', 0)} رداً موزّعة على {cov.get('days', '?')} يوماً."
+                       f"العيّنة: {t.get('tweet_count', 0)} منشوراً أصلياً (بلا ردود) "
+                       f"من {cov.get('from', '?')} إلى {cov.get('to', '?')} على {cov.get('days', '?')} يوماً."
                        + (f"\nالصوت: {a['voice_summary'][:300]}" if a.get("voice_summary") else "")
                        + (f"\nدرجة المطابقة في الاختبار: **{fid['score']}%**" if fid.get("score") is not None else "")
+                       + (f" · درجة نواه: **{fid['nawah_score']}/100**" if fid.get("nawah_score") is not None else "")
+                       + (f"\n⚠️ نواه لم تعمل فبُنيت البصمة بالمحلّل القديم: {res['nawah_error']}"
+                          if res.get("nawah_error") else "")
                        + "\nراجع «بصمة الصوت» في بطاقة الموظف، ويمكنك تعديلها في أي وقت.")
             except Exception as exc:  # noqa: BLE001
                 logger.exception("clone_identity failed")

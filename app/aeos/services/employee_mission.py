@@ -278,7 +278,25 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
     platform = get_platform()
     eid = cfg.id
 
-    # نشر موجّه بلا رسالة إعلامية بعد (أمر الحساب المثبّت/مهمّة نشر): بحث عميق أولاً
+    # نشر موجّه بلا رسالة إعلامية بعد (أمر الحساب المثبّت/مهمّة نشر): بحث عميق أولاً.
+    # نواه أولاً (توجيه لكل الفريق + مسودة بصوت الموظف)، ثم رسالة media_brief القديمة احتياطاً معلَناً.
+    if payload.get("directed_topic") and not payload.get("media_brief"):
+        from . import media_brief as MB
+        from . import nawah_brief as NB
+
+        if payload.get("nawah_brief") or NB.enabled():
+            nb, err = NB.attach(payload, cfg)
+            if nb is not None:
+                if NB.announce_once(nb, getattr(cfg, "user_id", None)):
+                    platform.notify_owner(eid, NB.owner_line(nb), "aeos_cycle_thinking")
+                mine = (nb.get("voices") or {}).get(cfg.account_username) or {}
+                if mine.get("angle"):
+                    platform.notify_owner(eid, f"🎯 زاويتي في هذا التوجيه: {mine['angle']}", "aeos_cycle_thinking")
+            elif err:
+                platform.notify_owner(
+                    eid, f"⚠️ تعذّر توجيه نواه ({err}) — أعدّ رسالة إعلامية بالمسار المعتاد.",
+                    "aeos_cycle_thinking")
+
     if payload.get("directed_topic") and not payload.get("media_brief"):
         from . import media_brief as MB
 

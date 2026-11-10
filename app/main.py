@@ -32,7 +32,7 @@ except Exception:
 from app.services.ai_service import AIService, ai_service
 from app.services.webhook_service import WebhookService
 from app.core.config import settings
-from app.db.database import init_db, get_db
+from app.db.database import init_db, get_db, SessionLocal
 from app.auth.routes import router as auth_router
 from app.api.intent_routes import router as intent_router
 from app.api.admin_routes import router as admin_router
@@ -978,7 +978,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "typing",
                 "status": True
             }, websocket)
-            
+
+            # جلسة قاعدة البيانات لهذه الرسالة فقط، وتُغلق في finally أدناه مهما كان المسار
+            # (continue/return/استثناء). كانت تُفتح بـ next(get_db()) بلا إغلاق: مولّد get_db
+            # يُنهى فوراً فيغلق جلسة فارغة، ثم أول استعلام يسحب اتصالاً جديداً لا يعود إلى
+            # المجمّع إلا حين يجمع GC الدوري كائن الجلسة (حلقة مراجع) — قيس: كل رسالة شات
+            # تحجز اتصالاً، حتى امتلأ المجمّع (5+10) وسقط المجدول بـ QueuePool limit reached.
+            db = None
             try:
                 # معالجة ملفات الكوكيز و CSV
                 if file_upload:
@@ -1111,7 +1117,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 if (not user_message or not str(user_message).strip()) and attachment:
                     try:
-                        db = next(get_db())
+                        db = SessionLocal()
                         conversation = memory_service.get_or_create_conversation(
                             db=db,
                             user_id=user_id,
@@ -1138,8 +1144,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     }, websocket)
                     continue
 
-                # الحصول على جلسة قاعدة البيانات
-                db = next(get_db())
+                # الحصول على جلسة قاعدة البيانات (تُغلق في finally هذه الرسالة)
+                db = SessionLocal()
 
                 # ── المنسّق العام: رسالة للفريق كله (≥2 موظف مذكور أو «كل الموظفين») ──
                 team_mentions = orchestrator.mentioned_employees(user_message, user_id)
@@ -1392,7 +1398,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     "message": f"حدث خطأ: {str(e)}",
                     "timestamp": datetime.now().isoformat()
                 }, websocket)
-    
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:  # noqa: BLE001 - الإغلاق لا يُسقط السوكت أبداً
+                        pass
+
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001 - أي انقطاع آخر (ECONNRESET/إعادة تحميل)

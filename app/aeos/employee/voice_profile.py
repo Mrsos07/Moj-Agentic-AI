@@ -44,7 +44,7 @@ import re
 import statistics
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("aeos.voice_profile")
 
@@ -644,8 +644,14 @@ def normalize_analysis(raw: Dict[str, Any], era: Sequence[str] = ()) -> Dict[str
     }
 
 
-def analyze(profile: Dict[str, Any], llm: Any = None) -> Dict[str, Any]:
-    """ابنِ البصمة كاملة من بروفايل مسحوب. بلا نموذج: قياسات + أمثلة فقط."""
+def analyze(profile: Dict[str, Any], llm: Any = None,
+            nawah: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """ابنِ البصمة كاملة من بروفايل مسحوب. بلا نموذج: قياسات + أمثلة فقط.
+
+    ``nawah``: بانٍ خارجي للبصمة الأسلوبية (خادم نواه، انظر ``services/nawah_clone.py``) يعيد
+    ``{"analysis": ..., "nawah": ...}``. هو المسار الأساسي؛ إن فشل تُسجَّل رسالته في
+    ``nawah_error`` ويُستخدم تحليل النموذج القديم حتى لا يتوقف الاستنساخ — والمالك يرى السبب.
+    """
     tweets_all = profile.get("tweets") or []
     replies_all = profile.get("replies") or []
     # كل القياسات من عيّنة موزّعة زمنياً: دفعة يوم واحد لا تحدّد الشخصية
@@ -679,7 +685,18 @@ def analyze(profile: Dict[str, Any], llm: Any = None) -> Dict[str, Any]:
         logger.exception("topic distribution failed")
         topics = {}
     analysis: Dict[str, Any] = {}
-    if llm is not None and getattr(llm, "available", False):
+    source, nawah_info, nawah_error = "heuristic", {}, ""
+    if nawah is not None:
+        try:
+            built = nawah(profile, stats) or {}
+            if isinstance(built.get("analysis"), dict) and built["analysis"].get("style_guide"):
+                analysis, nawah_info, source = built["analysis"], dict(built.get("nawah") or {}), "nawah"
+            else:
+                nawah_error = "نواه لم تُعد بصمة صالحة"
+        except Exception as exc:  # noqa: BLE001 - يُعرض السبب للمالك بدل إخفائه
+            logger.exception("nawah fingerprint failed")
+            nawah_error = str(exc) or exc.__class__.__name__
+    if not analysis and llm is not None and getattr(llm, "available", False):
         try:
             from ..core.llm import _safe_json
 
@@ -688,12 +705,16 @@ def analyze(profile: Dict[str, Any], llm: Any = None) -> Dict[str, Any]:
                                _analysis_prompt(profile, stats, topics), temperature=0.3,
                                max_tokens=3500)
             analysis = normalize_analysis(_safe_json(raw) if raw else {}, era=spread["era"])
+            source = "llm" if analysis else source
         except Exception:  # noqa: BLE001
             logger.exception("voice analysis LLM call failed")
     pairs = [r for r in replies_all if r.get("in_reply_to")]
     return {
         "version": VERSION,
         "source_handle": profile.get("handle", ""),
+        "source": source,
+        **({"nawah": nawah_info} if nawah_info else {}),
+        **({"nawah_error": nawah_error[:300]} if nawah_error else {}),
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sample": {"tweets": len(tweets_all), "replies": len(replies_all), "pairs": len(pairs),
                    "threads": sum(1 for r in pairs if r["in_reply_to"].get("self")),
@@ -764,6 +785,15 @@ def voice_block(profile: Dict[str, Any], kind: str = "general") -> str:
     if a.get("rhetorical_devices"):
         lines.append("أدواتك البلاغية: " + "، ".join(a["rhetorical_devices"]) + ".")
     lines += _style_rules(st, kind)
+    # بصمة نواه: دليل أسلوب يتبعه كاتب بشري + ما لا يفعله الحساب أبداً (للمنشورات؛ الردود لها خطتها)
+    if a.get("style_guide") and kind != "reply":
+        lines.append("دليل أسلوبك:")
+        lines += [f"  - {g}" for g in a["style_guide"][:4]]
+        notes = a.get("style_notes") or {}
+        if notes:
+            lines.append("ملاحظات أسلوبية: " + " ".join(v for v in notes.values() if v)[:600])
+    if a.get("never_uses"):
+        lines.append("لا تفعل أبداً: " + "؛ ".join(a["never_uses"][:6]) + ".")
     lex = a.get("lexicon") or {}
     if lex.get("signature"):
         lines.append("مفرداتك المميّزة: " + "، ".join(lex["signature"][:10]) + ".")

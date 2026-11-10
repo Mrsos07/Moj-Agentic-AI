@@ -164,16 +164,21 @@ const McpAdmin = ({ canManage, notify }) => {
 
               {canManage && (s.env_keys.length > 0 || s.header_keys.length > 0 || (s.query_keys || []).length > 0) && (
                 <div>
-                  <p className={`text-xs mb-1 ${muted}`}>تحديث المفاتيح (اتركه فارغاً لإبقاء القيمة الحالية):</p>
+                  <p className={`text-xs mb-1 ${muted}`}>تحديث المفاتيح والإعدادات (اتركه فارغاً لإبقاء القيمة الحالية؛ يُعاد الاتصال بالخادم بالقيم الجديدة):</p>
                   <div className="grid md:grid-cols-2 gap-2">
                     {[...s.env_keys.map(k => ['env', k]), ...s.header_keys.map(k => ['headers', k]),
-                      ...(s.query_keys || []).map(k => ['query_secrets', k])].map(([kind, k]) => (
-                      <input key={`${kind}:${k}`} type="password" autoComplete="off" dir="ltr"
-                        placeholder={`${k} (${kind === 'env' ? 'متغيّر بيئة' : kind === 'headers' ? 'ترويسة' : 'معامل رابط'})`}
-                        value={secrets[s.slug]?.[`${kind}:${k}`] || ''}
-                        onChange={(e) => setSecrets(p => ({ ...p, [s.slug]: { ...p[s.slug], [`${kind}:${k}`]: e.target.value } }))}
-                        className={input} />
-                    ))}
+                      ...(s.query_keys || []).map(k => ['query_secrets', k])].map(([kind, k]) => {
+                      // إعداد غير سري (اسم موديل مثلاً): يُعرض نصاً بقيمته الحالية؛ ما يبدو مفتاحاً يبقى مخفياً
+                      const isSecret = kind !== 'env' || /key|token|secret|password|passwd|auth|sig|credential/i.test(k)
+                      const current = !isSecret ? (s.env_values?.[k] || '') : ''
+                      return (
+                        <input key={`${kind}:${k}`} type={isSecret ? 'password' : 'text'} autoComplete="off" dir="ltr"
+                          placeholder={`${k} (${kind === 'env' ? (isSecret ? 'متغيّر بيئة' : 'إعداد') : kind === 'headers' ? 'ترويسة' : 'معامل رابط'})${current ? ` — الحالي: ${current}` : ''}`}
+                          value={secrets[s.slug]?.[`${kind}:${k}`] || ''}
+                          onChange={(e) => setSecrets(p => ({ ...p, [s.slug]: { ...p[s.slug], [`${kind}:${k}`]: e.target.value } }))}
+                          className={input} />
+                      )
+                    })}
                   </div>
                   <button type="button" disabled={busy === s.slug}
                     onClick={() => {
