@@ -11,6 +11,9 @@ cd "$(dirname "$0")/.."
 
 SRC="${1:?حدّد مجلد النسخة: ./scripts/restore.sh ./backups/moj-...}"
 SRC=$(cd "$SRC" && pwd)
+MOUNT="$SRC"
+# Git Bash على ويندوز يحوّل مسارات الحاوية (/backup) لمسارات ويندوز؛ لا أثر على لينكس
+if command -v cygpath >/dev/null 2>&1; then export MSYS_NO_PATHCONV=1; MOUNT=$(cygpath -m "$SRC"); fi
 [ -f "$SRC/backend.tgz" ] || { echo "❌ لا يوجد $SRC/backend.tgz"; exit 1; }
 
 BACKEND=$(docker compose ps -aq backend)
@@ -23,7 +26,7 @@ echo "▶ إيقاف الخادم الخلفي…"
 docker compose stop backend >/dev/null
 
 echo "▶ استعادة أحجام الخادم الخلفي…"
-docker run --rm --volumes-from "$BACKEND" -v "$SRC":/backup:ro alpine:3.20 sh -c '
+docker run --rm --volumes-from "$BACKEND" -v "$MOUNT":/backup:ro alpine:3.20 sh -c '
   set -e
   for d in /app/data /app/app/x/cookies /app/static/uploads /app/app/identity/static/generated; do
     find "$d" -mindepth 1 -delete
@@ -40,7 +43,7 @@ if [ -f "$SRC/neo4j.tgz" ]; then
   NEO4J=$(docker compose ps -aq neo4j)
   echo "▶ استعادة ذاكرة الرسم…"
   docker compose stop neo4j >/dev/null
-  docker run --rm --volumes-from "$NEO4J" -v "$SRC":/backup:ro alpine:3.20 sh -c '
+  docker run --rm --volumes-from "$NEO4J" -v "$MOUNT":/backup:ro alpine:3.20 sh -c '
     set -e; find /data -mindepth 1 -delete; tar xzf /backup/neo4j.tgz -C /'
   docker compose start neo4j >/dev/null
 fi
