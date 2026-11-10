@@ -757,6 +757,43 @@ defences it forced are still in the code and still required if you set
 - `ECONNRESET` in the vite proxy is the normal signature of a backend restart or a
   page refresh (all sockets reset at once — you will see a burst with identical
   timestamps). It is logged as one quiet line so real errors stay visible.
+
+## Checkpoints on disconnect / restart (since 2026-11-10, owner decision: notify + manual resume)
+- Before this, a socket drop mid-task lost the reply on screen. The reply was saved in the conversation,
+  but `send_json` failed on the dead socket and the new socket never got it. A backend restart lost the
+  task entirely, with no notice and no record of what had already happened on X.
+- `app/services/task_checkpoints.py` has two DB tables (`create_all`, no migration):
+  - `task_checkpoints`: one row per chat request (`kind=chat`, id = the browser's `task_id`) and per
+    employee cycle (`cycle_<cycle_id>`). Status is running → succeeded/failed, or interrupted → resumed/cancelled.
+  - `realtime_outbox`: every `assistant_message`/`error` pushed to a user, with a monotonic `seq`
+    (SQLite AUTOINCREMENT), kept 48 h.
+- Chat: the browser sends `task_id` with every message and keeps it in a localStorage outbox until a
+  `task_update` acks it. A resent `task_id` is NOT executed twice (`duplicate: true`). While a task is
+  running, `_CURRENT_TASK` tags replies with `task_id`/`session_id`. If the socket died, the reply goes
+  to the user's OTHER sockets (the one that reconnected) instead of raising.
+- After `auth_ok` the client sends `{"type":"resume","since":<last seq or null>}`. The server replays
+  the outbox after `since` (`replayed: true`, deduped client-side by seq), then sends `tasks_snapshot`.
+  `since: null` = fresh page: snapshot only, because the history is loaded from the conversation.
+- Boot: `mark_interrupted_on_boot()` runs BEFORE `get_platform().start()`. Running it after would mark a
+  cycle that just started as interrupted. `_announce_interrupted` then posts a notice into each
+  task's conversation (cycles via `notify_owner`). Nothing auto-resumes: part of the task may have
+  already run on X.
+- Resume (`resume_task` / `dismiss_task` over WS, buttons in `TaskActivityPanel`) uses `claim_resume`,
+  which is atomic (two clicks or two tabs never run it twice) and checks ownership.
+  - Chat tasks re-run with their original text and context.
+  - Cycles: `AEOSPlatform.resume_cycle` replays the same event with `source="resume:<id>"`. It does NOT
+    use the payload, because the payload is printed into the planning prompt.
+- Cycle checkpoints: `CognitiveCycle` calls `context.checkpoint("phase", …)` after every phase. On
+  success, `ExecutePhase` immediately records `resume_key(capability, target)`. Publishing is ONE key,
+  `publish`, because content is regenerated on resume, so a text match would never dedupe it.
+  - On resume those keys are skipped («نُفّذ قبل انقطاع الدورة السابقة»), and the prior actions are
+    added to today's budgets via `count_success`, because the cut cycle never reached `_persist`.
+  - The task is finished AFTER `_persist`, not before.
+  - If the resume is skipped (paused or busy), the task returns to `interrupted` and the owner is told why.
+- `broadcast_to_user` used to fall back to EVERY open connection when the owner was offline, which pushed
+  one user's employee reports to other users. Removed: the outbox delivers them when the owner reconnects.
+- File uploads (cookies/CSV) are never checkpointed: their content would land in the DB.
+- Test (temp DB, no network/LLM/X): `.\venv\Scripts\python.exe verify_checkpoints.py`.
 - **Never open a DB session with `next(get_db())` outside a FastAPI dependency.** The
   generator is finalised immediately, so its `finally: db.close()` runs on an EMPTY session;
   the first query then checks out a fresh connection that only returns to the pool when the

@@ -320,3 +320,38 @@ class ExecutionLogRecord(Base):
 
     def __repr__(self):
         return f"<ExecutionLog(employee={self.employee_id}, cycle={self.cycle_id}, phase={self.phase})>"
+
+
+class TaskCheckpoint(Base):
+    """نقطة استعادة لمهمة جارية (طلب شات أو دورة موظف) — تبقى بعد انقطاع الاتصال أو
+    إعادة تشغيل الخادم، فتُعرض حالتها ويُستأنف المقطوع منها يدوياً (app/services/task_checkpoints.py)."""
+    __tablename__ = "task_checkpoints"
+
+    id = Column(String(80), primary_key=True)
+    kind = Column(String(20), nullable=False, index=True)          # chat | cycle
+    user_id = Column(Integer, nullable=True, index=True)
+    employee_id = Column(String(64), nullable=True, index=True)
+    session_id = Column(String(255), nullable=True)
+    title = Column(String(500), nullable=True)
+    #: running | succeeded | failed | interrupted | resumed | cancelled
+    status = Column(String(20), nullable=False, default="running", index=True)
+    phase = Column(String(80), nullable=True)
+    request = Column(Text, nullable=True)                           # JSON: ما يلزم لإعادة التشغيل
+    state = Column(Text, nullable=True)                             # JSON: المراحل والأفعال المنفّذة
+    attempts = Column(Integer, default=1)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class RealtimeOutbox(Base):
+    """كل رسالة مهمة دُفعت لسوكت المستخدم، برقم تسلسلي متزايد (``id``): المتصفح يطلب
+    ما بعد آخر رقم رآه عند عودة الاتصال فلا تضيع رسالة وصلت أثناء الانقطاع."""
+    __tablename__ = "realtime_outbox"
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    payload = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

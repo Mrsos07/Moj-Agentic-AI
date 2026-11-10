@@ -55,6 +55,11 @@ from app.aeos.api.routes import router as aeos_router
 from app.auth.ownership import require_user as _require_user
 from app.aeos.bootstrap import get_platform
 from app.aeos.services import orchestrator
+from app.services import task_checkpoints as TC
+from contextvars import ContextVar
+
+#: مهمة الشات الجارية في هذا الاتصال ({"id", "session_id"}) — انظر ConnectionManager.send_message
+_CURRENT_TASK: ContextVar[Optional[Dict[str, Any]]] = ContextVar("current_chat_task", default=None)
 
 app = FastAPI(title="كنق الاتمته - Chatbot API", version="1.0.0")
 
@@ -121,11 +126,26 @@ async def startup_event():
     except Exception as e:
         print(f"Warning: realtime chat bridge failed to register: {str(e)}")
 
+    # قبل تشغيل العمال: كل مهمة ما زالت «جارية» في القاعدة انقطعت بإعادة التشغيل
+    # (بعد التشغيل قد تُعلَّم دورة بدأت للتو خطأً)
+    interrupted = []
+    try:
+        interrupted = TC.mark_interrupted_on_boot()
+        if interrupted:
+            print(f"Checkpoints: {len(interrupted)} task(s) interrupted by the restart — awaiting owner resume")
+    except Exception as e:
+        print(f"Warning: checkpoint recovery failed: {str(e)}")
+
     try:
         get_platform().start()
         print("AEOS (AI Employee OS) started — scheduler + worker pool running")
     except Exception as e:
         print(f"Warning: AEOS platform failed to start: {str(e)}")
+
+    try:
+        _announce_interrupted(interrupted)
+    except Exception as e:
+        print(f"Warning: interrupted-task notices failed: {str(e)}")
 
     # هوية اعتمدها المالك وقطعت إعادة التشغيل تطبيقها ← تُستأنف بالصور المثبّتة نفسها
     try:
@@ -778,9 +798,23 @@ class ConnectionManager:
         self.user_ids[websocket] = _norm_uid(user_id)
 
     async def send_message(self, message: dict, websocket: WebSocket):
-        await websocket.send_json(message)
+        """رسالة لسوكت بعينه. أثناء مهمة شات (``_CURRENT_TASK``) لا ترتبط النتيجة بالسوكت
+        الذي بدأها: تُوسَم بالمهمة وتُحفظ في الصندوق الصادر برقم تسلسلي، وإن مات السوكت
+        في منتصف المهمة تذهب لاتصالات المستخدم الأخرى (الاتصال الذي عاد) بدل أن تضيع."""
+        task = _CURRENT_TASK.get()
+        if task and message.get("type") in TC.REPLAYABLE:
+            message = {"task_id": task["id"], "session_id": task.get("session_id"), **message}
+        uid = self.user_ids.get(websocket)
+        if uid is not None and message.get("type") in TC.REPLAYABLE:
+            message = await asyncio.to_thread(TC.outbox_record, uid, message)
+        try:
+            await websocket.send_json(message)
+        except Exception:  # noqa: BLE001
+            if uid is None or not task:
+                raise
+            await self.send_to_user(uid, message, exclude=websocket)
 
-    async def send_to_user(self, user_id, message: dict) -> int:
+    async def send_to_user(self, user_id, message: dict, exclude: Optional[WebSocket] = None) -> int:
         """يرسل رسالة لكل WebSockets الخاصة بمستخدم. يرجع عدد الرسائل المرسلة."""
         if user_id is None:
             return 0
@@ -790,6 +824,8 @@ class ConnectionManager:
             return 0
         sent = 0
         for ws in list(self.user_websockets.get(uid, [])):
+            if ws is exclude:
+                continue
             try:
                 await ws.send_json(message)
                 sent += 1
@@ -812,11 +848,9 @@ class ConnectionManager:
             ws for ws in conns
             if uid is None or self.user_ids.get(ws) == uid
         ]
-        # Fallback: if no socket has identified as this user yet (e.g. the chat
-        # was opened but the user hasn't sent a message), still deliver to all
-        # open connections so autonomous cycle updates are never silently lost.
-        if not targets and uid is not None:
-            targets = conns
+        # لا بديل «أرسل للجميع» حين يكون المستخدم غير متصل: كان يدفع تقارير موظفي
+        # مستخدم لكل الاتصالات المفتوحة لغيره. الرسالة محفوظة في الصندوق الصادر
+        # (push_from_thread) وتصل صاحبها عند عودة اتصاله.
         for ws in targets:
             try:
                 await ws.send_json(message)
@@ -828,6 +862,7 @@ class ConnectionManager:
         loop = self.loop
         if loop is None:
             return
+        payload = TC.outbox_record(user_id, payload)
         try:
             asyncio.run_coroutine_threadsafe(
                 self.broadcast_to_user(user_id, payload), loop
@@ -862,6 +897,58 @@ async def get_react_app():
         ),
         status_code=503,
     )
+
+def _task_update(view: Optional[Dict[str, Any]], **extra) -> Dict[str, Any]:
+    return {"type": "task_update", "task": TC.iter_payloads([view])[0] if view else None, **extra}
+
+
+def _announce_interrupted(tasks: List[Dict[str, Any]]) -> None:
+    """بعد الإقلاع: أخبر صاحب كل مهمة مقطوعة في محادثتها (محفوظة + في الصندوق الصادر).
+    لا استئناف تلقائي: جزء من المهمة ربما نُفّذ على X قبل الانقطاع، والقرار للمالك."""
+    plat = get_platform()
+    for t in tasks:
+        uid = t.get("user_id")
+        if uid is None:
+            continue
+        if t["kind"] == "cycle":
+            done = t.get("done_actions") or 0
+            plat.notify_owner(
+                t.get("employee_id") or "",
+                f"⚠️ انقطعت دورتي عند مرحلة «{t.get('phase_label') or 'البدء'}» بسبب إعادة تشغيل الخادم."
+                + (f" نجح قبل الانقطاع {done} فعل على X ولن يتكرر عند الاستئناف." if done else "")
+                + " اضغط «استئناف» من سجل التنفيذ لإكمالها، أو «تجاهل».",
+                intent="aeos_cycle_interrupted")
+            continue
+        text = (f"⚠️ انقطع تنفيذ طلبك «{t.get('title') or ''}» بسبب إعادة تشغيل الخادم، وربما نُفّذ "
+                "جزء منه قبل الانقطاع. راجع النتيجة ثم اضغط «استئناف» من سجل التنفيذ إن أردت إعادته.")
+        db = SessionLocal()
+        try:
+            conv = memory_service.get_or_create_conversation(db=db, user_id=uid, session_id=t.get("session_id"))
+            memory_service.add_message(db=db, conversation_id=conv.id, role="assistant", content=text,
+                                       intent="task_interrupted", agent="System")
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: persist interrupted notice failed: {e}")
+        finally:
+            db.close()
+        manager.push_from_thread(uid, {"type": "assistant_message", "message": text, "task_id": t["id"],
+                                       "session_id": t.get("session_id"),
+                                       "timestamp": datetime.now().isoformat()})
+
+
+async def _send_resume(websocket: WebSocket, uid: int, since: Any) -> None:
+    """عودة الاتصال: ما فات من رسائل بعد آخر رقم رآه المتصفح، ثم لقطة المهام (الجارية
+    والمقطوعة وأحدث المنتهية). ``since`` فارغ = صفحة جديدة: لقطة فقط (السجل يُحمَّل من المحادثة)."""
+    try:
+        since = int(since) if since is not None else None
+    except (TypeError, ValueError):
+        since = None
+    latest = await asyncio.to_thread(TC.outbox_latest, uid)
+    if since is not None:
+        for payload in await asyncio.to_thread(TC.outbox_since, uid, since):
+            await websocket.send_json(payload)
+    tasks = await asyncio.to_thread(TC.for_user, uid)
+    await websocket.send_json({"type": "tasks_snapshot", "tasks": TC.iter_payloads(tasks), "seq": latest})
+
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
@@ -948,6 +1035,37 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 continue
 
+            # ── نقاط الاستعادة: لقطة عند عودة الاتصال، واستئناف/تجاهل مهمة مقطوعة ──
+            mtype = message_data.get("type")
+            if mtype == "resume":
+                await _send_resume(websocket, auth_uid, message_data.get("since"))
+                continue
+            resumed_task = None
+            if mtype in ("resume_task", "dismiss_task"):
+                tid = str(message_data.get("task_id") or "")
+                found = await asyncio.to_thread(TC.get, tid)
+                if not found or found.get("user_id") != auth_uid:
+                    await manager.send_message({"type": "error", "message": "المهمة غير موجودة"}, websocket)
+                    continue
+                new_status = (TC.CANCELLED if mtype == "dismiss_task"
+                              else TC.RESUMED if found["kind"] == "cycle" else TC.RUNNING)
+                claimed = await asyncio.to_thread(TC.claim_resume, tid, auth_uid, new_status)
+                if claimed is None:
+                    # ضُغط الزر مرتين أو من تبويب آخر: الحالة الحالية تكفي، ولا تنفيذ ثانٍ
+                    await manager.send_to_user(auth_uid, _task_update(found, duplicate=True))
+                    continue
+                await manager.send_to_user(auth_uid, _task_update(claimed))
+                if mtype == "dismiss_task":
+                    continue
+                if claimed["kind"] == "cycle":
+                    import threading as _threading
+                    _threading.Thread(target=get_platform().resume_cycle, args=(claimed,),
+                                      daemon=True, name=f"resume-{tid[:20]}").start()
+                    continue
+                # طلب شات: يُعاد بنصّه وسياقه الأصليين عبر المسار نفسه أدناه
+                resumed_task = claimed
+                message_data = {**(claimed.get("request") or {}), "task_id": tid}
+
             user_message = message_data.get("message", "")
             session_id = message_data.get("session_id", None)
             # user_id/user_email في الرسالة يُتجاهلان: الهوية من توكن الاتصال فقط
@@ -966,6 +1084,24 @@ async def websocket_endpoint(websocket: WebSocket):
             # «الشات» الذي اختاره المستخدم؛ asyncio.to_thread ينقل السياق للخيوط تلقائياً
             from app.core.llm_provider import LLM_OWNER
             LLM_OWNER.set((_norm_uid(user_id), "chat"))
+
+            # نقطة استعادة للطلب (task_id من المتصفح = مفتاح منع التكرار): رسالة أُعيد
+            # إرسالها بعد انقطاع لا تُنفَّذ مرتين. ملفات الرفع لا تُحفظ (كوكيز/كلمات مرور).
+            chat_task = resumed_task
+            if chat_task is None and not file_upload and (str(user_message or "").strip() or attachment):
+                chat_task, created = await asyncio.to_thread(
+                    TC.begin, TC.clean_id(message_data.get("task_id")), "chat", auth_uid,
+                    title=str(user_message or "مرفق").strip()[:120], session_id=session_id,
+                    request={"message": user_message, "session_id": session_id,
+                             "attachment": attachment, "pinned_account": pinned_account})
+                if not created:
+                    await manager.send_to_user(auth_uid, _task_update(chat_task, duplicate=True))
+                    continue
+            task_token = None
+            task_failed: Optional[str] = None
+            if chat_task is not None:
+                await manager.send_to_user(auth_uid, _task_update(chat_task))
+                task_token = _CURRENT_TASK.set({"id": chat_task["id"], "session_id": session_id})
 
             await manager.send_message({
                 "type": "user_message",
@@ -1389,6 +1525,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     }, websocket)
                     
             except Exception as e:
+                task_failed = str(e)
                 await manager.send_message({
                     "type": "typing",
                     "status": False
@@ -1404,6 +1541,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         db.close()
                     except Exception:  # noqa: BLE001 - الإغلاق لا يُسقط السوكت أبداً
                         pass
+                if chat_task is not None:
+                    _CURRENT_TASK.reset(task_token)
+                    done = await asyncio.to_thread(
+                        TC.finish, chat_task["id"], TC.FAILED if task_failed else TC.SUCCEEDED, task_failed)
+                    # لكل اتصالات المستخدم (ومنها الاتصال الذي عاد) ولا يرمي أبداً
+                    await manager.send_to_user(auth_uid, _task_update(done))
 
     except WebSocketDisconnect:
         pass

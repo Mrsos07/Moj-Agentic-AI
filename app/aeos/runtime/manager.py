@@ -24,6 +24,7 @@ from typing import Any, Dict
 
 from app.db.database import SessionLocal
 from app.db.models import ExecutionLogRecord
+from app.services import task_checkpoints as TC
 
 from ..core.events import Event
 from ..core.exceptions import EmployeeNotFoundError
@@ -276,6 +277,8 @@ class RuntimeManager(IRuntimeManager):
             return {"skipped": True, "reason": f"status={config.status.value}"}
 
         self._reset_daily_counters(config)
+        resume_skip = self._apply_resume(config, event)
+        task_id = TC.cycle_task_id(cycle_id)
 
         # 2) BUILD temporary context
         workspace = self._workspaces.get(employee_id)
@@ -292,6 +295,9 @@ class RuntimeManager(IRuntimeManager):
         # live-progress sink: stream the employee's thinking/observations into the
         # user's chat while the cycle is still running (real-time interaction).
         context.progress_cb = self._make_progress_cb(config)
+        context.checkpoint_cb = self._make_checkpoint_cb(config, task_id)
+        if resume_skip:
+            context.scratch["resume_skip"] = resume_skip
         _account = getattr(config, "account_username", "") or "الموظف الذكي"
         context.emit_progress(
             f"⚙️ **@{_account} بدأ دورة تفكير جديدة الآن...**",
@@ -300,6 +306,8 @@ class RuntimeManager(IRuntimeManager):
 
         # 3) RUN one cognitive cycle
         cycle: CognitiveCycle = self._cycle_factory()
+        # نقطة الاستعادة قبل أي فعل مباشرةً، فإن انقطعت الدورة (إعادة تشغيل) عرف المالك ذلك
+        self._begin_checkpoint(config, event, task_id)
         # كل نداءات LLM في هذه الدورة تذهب لنموذج «الموظفين» الذي اختاره مالكه (إن اختار)
         from app.core.llm_provider import LLM_OWNER
 
@@ -319,10 +327,74 @@ class RuntimeManager(IRuntimeManager):
             self._persist(config, report)
         except Exception:  # noqa: BLE001
             logger.exception("failed to persist cycle for %s", employee_id)
+        # تُغلق نقطة الاستعادة بعد الحفظ لا قبله: انقطاع بينهما يعني أن العدّادات لم تُحفظ،
+        # والاستئناف يعيد احتسابها من الأفعال المسجّلة
+        self._push_task(config, TC.finish(task_id, TC.FAILED if report.get("error") else TC.SUCCEEDED,
+                                          report.get("error")))
 
         # 5) DESTROY runtime
         self._destroy(employee_id)
         return report
+
+    # ---- checkpoints (task_checkpoints) ---------------------------------
+    @staticmethod
+    def resume_source(task_id: str) -> str:
+        return f"resume:{task_id}"
+
+    def _apply_resume(self, config, event: Event) -> list:
+        """دورة تستأنف دورة مقطوعة: الأفعال التي نجحت قبل الانقطاع لا تتكرر، وتُحتسب في
+        ميزانية اليوم (الدورة المقطوعة لم تصل لمرحلة الحفظ)."""
+        source = str(getattr(event, "source", "") or "")
+        if not source.startswith("resume:"):
+            return []
+        prior = TC.get(source[len("resume:"):], with_internals=True)
+        if not prior or prior.get("employee_id") != config.id:
+            return []
+        from ..cognition.phases import count_success
+
+        today = config.runtime_state.flags.get("counters_day")
+        for action in (prior.get("state") or {}).get("actions") or []:
+            if action.get("day") == today:
+                count_success(config, action.get("capability") or "", action.get("skill"))
+        return TC.done_action_keys(prior)
+
+    def _begin_checkpoint(self, config, event: Event, task_id: str) -> None:
+        account = getattr(config, "account_username", "") or ""
+        try:
+            view, _ = TC.begin(
+                task_id, "cycle", getattr(config, "user_id", None), employee_id=config.id,
+                session_id=f"emp_{account}" if account else None,
+                title=f"دورة @{account or config.id}",
+                request={"event_type": event.type.value, "payload": event.payload or {}})
+            self._push_task(config, view)
+        except Exception:  # noqa: BLE001 - الدورة تعمل ولو تعذّر تسجيل نقطة الاستعادة
+            logger.exception("cycle checkpoint begin failed for %s", config.id)
+
+    def _make_checkpoint_cb(self, config, task_id: str):
+        from ..decision.engine import local_now
+
+        def _cb(kind: str, data: Dict[str, Any]) -> None:
+            if kind == "phase":
+                self._push_task(config, TC.phase(task_id, data.get("name", ""), data.get("total", 0)))
+            elif kind == "action" and data.get("key"):
+                info = {k: v for k, v in data.items() if k != "key"}
+                info["day"] = local_now(config).strftime("%Y-%m-%d")
+                TC.record_action(task_id, data["key"], info)
+
+        return _cb
+
+    @staticmethod
+    def _push_task(config, view) -> None:
+        user_id = getattr(config, "user_id", None)
+        if not view or user_id is None:
+            return
+        try:
+            from app.services import realtime_bus
+
+            realtime_bus.publish_chat(user_id, {"type": "task_update",
+                                                "task": TC.iter_payloads([view])[0]})
+        except Exception:  # noqa: BLE001
+            logger.debug("task push skipped", exc_info=True)
 
     # ---- lifecycle helpers ---------------------------------------------
     def _reset_daily_counters(self, config) -> None:

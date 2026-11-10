@@ -90,7 +90,8 @@ def coordinator_overview(user_id: int) -> Dict[str, Any]:
 def purge_user(user_id: int, db=None) -> Dict[str, int]:
     """قبل حذف مستخدم: موظفوه (بكل ذاكرتهم ورسمهم)، محادثاته وملخّصاتها، ذاكرة منسّقه،
     وسجلات حساباته. ملفات الكوكيز تبقى على القرص لكنها تصير بلا مالك (لا يراها إلا المشرف)."""
-    from app.db.models import AgentMemory, Conversation, Message, SocialAccount, XAccount
+    from app.db.models import (AgentMemory, Conversation, Message, RealtimeOutbox, SocialAccount,
+                               TaskCheckpoint, XAccount)
 
     from . import agent_memory as AM
 
@@ -123,6 +124,10 @@ def purge_user(user_id: int, db=None) -> Dict[str, int]:
             SocialAccount.user_id == user_id).delete(synchronize_session=False)
         counts["x_accounts"] = db.query(XAccount).filter(XAccount.user_id == user_id).delete(
             synchronize_session=False)
+        # نصوص طلبات الشات ورسائله المحفوظة للاستئناف تُحذف مع صاحبها
+        for model in (TaskCheckpoint, RealtimeOutbox):
+            counts[model.__tablename__] = db.query(model).filter(model.user_id == user_id).delete(
+                synchronize_session=False)
         if own:
             db.commit()
         return counts

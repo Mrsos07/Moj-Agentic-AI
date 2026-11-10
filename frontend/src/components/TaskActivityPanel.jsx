@@ -1,23 +1,25 @@
 import { useState } from 'react'
 import {
   ListChecks, ChevronDown, Clock, Loader2, CheckCircle2, XCircle, Ban,
-  Info, AlertTriangle, FlaskConical, Square,
+  Info, AlertTriangle, FlaskConical, Square, Play, RotateCcw,
 } from 'lucide-react'
 
 /**
- * @typedef {'queued'|'running'|'succeeded'|'failed'|'cancelled'} TaskStatus
+ * @typedef {'queued'|'running'|'succeeded'|'failed'|'cancelled'|'interrupted'|'resumed'} TaskStatus
  * @typedef {'info'|'success'|'warning'|'error'} EventLevel
  * @typedef {{ id:string, title:string, status:TaskStatus, progress?:number, startedAt?:string, finishedAt?:string }} TaskView
- * @typedef {{ id:string, taskId:string, title:string, detail?:string, timestamp?:string, level?:EventLevel }} TaskEventView
- * @param {{ task?: TaskView|null, events?: TaskEventView[], sourceState?: 'unbound'|'loading'|'ready'|'disconnected'|'error', isDemo?: boolean, defaultOpen?: boolean, onStartDemo?: () => void, onEndDemo?: () => void }} props
+ * @typedef {{ id:string, taskId:string, title:string, detail?:string, timestamp?:string, level?:EventLevel, resumable?:boolean }} TaskEventView
+ * @param {{ task?: TaskView|null, events?: TaskEventView[], sourceState?: 'unbound'|'loading'|'ready'|'disconnected'|'error', isDemo?: boolean, defaultOpen?: boolean, onStartDemo?: () => void, onEndDemo?: () => void, onResume?: (taskId:string) => void, onDismiss?: (taskId:string) => void }} props
  */
 
-const STATUS = {
-  queued:    { label: 'بانتظار التنفيذ', Icon: Clock, cls: 'text-text-secondary-light dark:text-text-secondary-dark' },
-  running:   { label: 'جارٍ التنفيذ',   Icon: Loader2, cls: 'text-primary dark:text-blue-300' },
-  succeeded: { label: 'اكتملت',        Icon: CheckCircle2, cls: 'text-green-600 dark:text-green-400' },
-  failed:    { label: 'تعذّر التنفيذ',  Icon: XCircle, cls: 'text-red-600 dark:text-red-400' },
-  cancelled: { label: 'أُلغيت',        Icon: Ban, cls: 'text-text-secondary-light dark:text-text-secondary-dark' },
+export const STATUS = {
+  queued:      { label: 'بانتظار التنفيذ', Icon: Clock, cls: 'text-text-secondary-light dark:text-text-secondary-dark' },
+  running:     { label: 'جارٍ التنفيذ',   Icon: Loader2, cls: 'text-primary dark:text-blue-300' },
+  succeeded:   { label: 'اكتملت',        Icon: CheckCircle2, cls: 'text-green-600 dark:text-green-400' },
+  failed:      { label: 'تعذّر التنفيذ',  Icon: XCircle, cls: 'text-red-600 dark:text-red-400' },
+  cancelled:   { label: 'أُلغيت',        Icon: Ban, cls: 'text-text-secondary-light dark:text-text-secondary-dark' },
+  interrupted: { label: 'مقطوعة — بانتظار قرارك', Icon: AlertTriangle, cls: 'text-amber-600 dark:text-amber-400' },
+  resumed:     { label: 'استُؤنفت',      Icon: RotateCcw, cls: 'text-text-secondary-light dark:text-text-secondary-dark' },
 }
 
 const LEVEL_ICONS = {
@@ -47,6 +49,8 @@ export default function TaskActivityPanel({
   defaultOpen = true,
   onStartDemo = null,
   onEndDemo = null,
+  onResume = null,
+  onDismiss = null,
 }) {
   const [open, setOpen] = useState(defaultOpen)
 
@@ -145,7 +149,7 @@ export default function TaskActivityPanel({
             </div>
           )}
 
-          {sourceState === 'ready' && (
+          {(sourceState === 'ready' || sourceState === 'disconnected') && (
             <>
               {task && (
                 <div className="mb-3">
@@ -198,6 +202,31 @@ export default function TaskActivityPanel({
                             <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark break-words leading-relaxed">
                               {ev.detail}
                             </p>
+                          )}
+                          {ev.resumable && (onResume || onDismiss) && (
+                            <div className="mt-1.5 flex items-center gap-2">
+                              {onResume && (
+                                <button
+                                  type="button"
+                                  onClick={() => onResume(ev.taskId)}
+                                  disabled={sourceState !== 'ready'}
+                                  className="moj-primary inline-flex items-center gap-1 h-7 px-3 rounded-lg text-xs font-medium text-white disabled:opacity-40"
+                                >
+                                  <Play size={12} aria-hidden />
+                                  استئناف
+                                </button>
+                              )}
+                              {onDismiss && (
+                                <button
+                                  type="button"
+                                  onClick={() => onDismiss(ev.taskId)}
+                                  disabled={sourceState !== 'ready'}
+                                  className="moj-pill moj-hover h-7 px-3 rounded-lg text-xs font-medium text-text-primary-light dark:text-text-primary-dark disabled:opacity-40"
+                                >
+                                  تجاهل
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
                       </li>

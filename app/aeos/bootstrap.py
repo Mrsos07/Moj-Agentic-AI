@@ -191,6 +191,35 @@ class AEOSPlatform:
                       payload=payload or {}, source="api_sync")
         return self._runtime.run_cycle(employee_id, event)
 
+    def resume_cycle(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """أعد تشغيل دورة انقطعت (بطلب المالك): الحدث نفسه (أمر الشات بنصّه إن كان أمراً)،
+        والأفعال التي نجحت قبل الانقطاع تُتخطّى (``resume_skip``). تعذّر البدء (موقوف/مشغول)
+        ⇒ تعود المهمة «مقطوعة» ويُبلَّغ المالك بالسبب بدل الصمت."""
+        from app.services import task_checkpoints as TC
+
+        req = task.get("request") or {}
+        employee_id = task.get("employee_id") or ""
+        try:
+            etype = EventType(req.get("event_type") or "manual")
+        except ValueError:
+            etype = EventType.MANUAL
+        event = Event(etype, employee_id=employee_id, payload=dict(req.get("payload") or {}),
+                      source=RuntimeManager.resume_source(task["id"]))
+        try:
+            report = self._runtime.run_cycle(employee_id, event)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("resume cycle failed for %s", employee_id)
+            report = {"skipped": True, "reason": str(exc)[:200]}
+        if report.get("skipped"):
+            reason = {"cycle_already_running": "الموظف في منتصف دورة أخرى الآن"}.get(
+                report.get("reason"), report.get("reason") or "")
+            view = TC.reopen(task["id"], f"تعذّر الاستئناف: {reason}")
+            RuntimeManager._push_task(self._repo.get(employee_id), view)
+            self.notify_owner(employee_id, f"⚠️ تعذّر استئناف الدورة المقطوعة: {reason}. "
+                                           "يمكنك المحاولة مرة أخرى من سجل التنفيذ.",
+                              intent="aeos_cycle_resume_failed")
+        return report
+
     def notify_owner(self, employee_id: str, text: str,
                      intent: str = "aeos_cycle_progress") -> bool:
         """أبلغ صاحب الحساب في الشات (تخزين + دفع حيّ) من خارج الدورة.

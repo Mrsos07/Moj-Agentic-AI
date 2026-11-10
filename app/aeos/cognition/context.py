@@ -50,6 +50,19 @@ class ExecutionContext:
         except Exception:  # noqa: BLE001 - progress must never break a cycle
             pass
 
+    # optional checkpoint sink (task_checkpoints): ``(kind, data)`` with kind
+    # "phase" (اكتملت مرحلة) or "action" (فعل نجح على X — لا يتكرر عند الاستئناف).
+    checkpoint_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None
+
+    def checkpoint(self, kind: str, **data: Any) -> None:
+        cb = self.checkpoint_cb
+        if cb is None:
+            return
+        try:
+            cb(kind, data)
+        except Exception:  # noqa: BLE001 - نقطة الاستعادة لا تكسر الدورة أبداً
+            pass
+
     # ---- convenience helpers used by phases/skills/capabilities ---------
     def top_goal_description(self) -> str:
         goals = sorted(self.config.goals, key=lambda g: g.priority)

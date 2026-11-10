@@ -176,6 +176,7 @@ class SqlEmployeeRepository(IEmployeeRepository):
         """
         from app.db.models import (
             AgentMemory, EmployeeMemoryRecord, ExecutionJobRecord, ExecutionLogRecord,
+            TaskCheckpoint,
         )
 
         db = self._session_factory()
@@ -183,7 +184,7 @@ class SqlEmployeeRepository(IEmployeeRepository):
             row = db.query(AIEmployee).filter(AIEmployee.id == employee_id).first()
             if not row:
                 return False
-            for model in (ExecutionLogRecord, EmployeeMemoryRecord, ExecutionJobRecord):
+            for model in (ExecutionLogRecord, EmployeeMemoryRecord, ExecutionJobRecord, TaskCheckpoint):
                 db.query(model).filter(model.employee_id == employee_id).delete(
                     synchronize_session=False)
             db.query(AgentMemory).filter(AgentMemory.scope == f"employee:{employee_id}").delete(

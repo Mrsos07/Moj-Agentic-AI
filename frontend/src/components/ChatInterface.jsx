@@ -8,8 +8,7 @@ import AccountsDrawer from './AccountsDrawer'
 import AgentsDrawer from './AgentsDrawer'
 import TeamBar from './TeamBar'
 import ChatModelPicker from './ChatModelPicker'
-import TaskActivityPanel from './TaskActivityPanel'
-import { DEMO_TASK, DEMO_EVENTS } from './taskActivityDemo'
+import TaskActivityPanel, { STATUS as TASK_STATUS } from './TaskActivityPanel'
 import authHeaders from '../authHeaders'
 import usePinnedAccount from '../hooks/usePinnedAccount'
 import logoLight from '../assets/logos/logo-light.png'
@@ -18,6 +17,41 @@ import logoDark from '../assets/logos/logo-dark.png'
 // نتائج أوامر المنسّق تصل في محادثة الموظف (emp_<handle>)؛ نعرضها أيضاً في
 // شات المنسّق خلال هذه المدة بعد الإسناد، وإلا بدا الأمر وكأنه لم يُنفّذ.
 const AWAIT_RESULTS_MS = 30 * 60 * 1000
+
+// صندوق الانتظار: رسائل لم يؤكّد الخادم استلامها (task_update بمعرّفها). تبقى في
+// localStorage فتُرسل عند عودة الاتصال ولو أُعيد تحميل الصفحة؛ الخادم يمنع التكرار بـtask_id.
+const OUTBOX_KEY = 'chat_outbox'
+const loadOutbox = () => {
+  try { return JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]') || [] } catch { return [] }
+}
+const newTaskId = () =>
+  (window.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`)
+    .replace(/[^A-Za-z0-9_-]/g, '')
+
+// مهمة الخادم ← صيغة لوحة سجل التنفيذ
+const toTaskView = (t) => t && ({
+  id: t.id,
+  title: t.title || (t.kind === 'cycle' ? 'دورة موظف' : 'طلب'),
+  status: t.status,
+  progress: typeof t.progress === 'number' ? t.progress : undefined,
+  startedAt: t.started_at,
+  finishedAt: t.finished_at,
+})
+const LEVEL_OF = { running: 'info', succeeded: 'success', failed: 'error', interrupted: 'warning' }
+const toTaskEvent = (t) => ({
+  id: t.id,
+  taskId: t.id,
+  title: t.title || (t.kind === 'cycle' ? 'دورة موظف' : 'طلب'),
+  detail: [
+    TASK_STATUS[t.status]?.label || t.status,
+    t.phase_label && t.status !== 'succeeded' ? `المرحلة: ${t.phase_label}` : null,
+    t.done_actions ? `${t.done_actions} فعل نُفّذ على X` : null,
+    t.error,
+  ].filter(Boolean).join(' · '),
+  timestamp: t.finished_at || t.started_at,
+  level: LEVEL_OF[t.status] || 'info',
+  resumable: t.status === 'interrupted',
+})
 
 const coordinatorWelcome = () => ({
   id: Date.now(),
@@ -54,10 +88,16 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
   const HEARTBEAT_MS = 25000
   const SILENCE_LIMIT_MS = 70000
   const [isConnected, setIsConnected] = useState(false)
+  const [everConnected, setEverConnected] = useState(false)
+  // نقاط الاستعادة: مهام الخادم (جارية/مقطوعة/منتهية) + آخر رقم تسلسلي رأيناه من الرسائل،
+  // يُرسل عند عودة الاتصال ليعيد الخادم ما فات. null = صفحة جديدة (لا إعادة، لقطة فقط)
+  const [tasks, setTasks] = useState([])
+  const lastSeqRef = useRef(null)
+  const seenSeqRef = useRef(new Set())
+  const outboxRef = useRef(loadOutbox())
   const [showSuggestions, setShowSuggestions] = useState(true)
   const [accountsOpen, setAccountsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
-  const [activityDemo, setActivityDemo] = useState(false)
   // وضع "الدردشة مع الموظف الذكي": اسم الحساب المرتبط أو null
   const [employeeChat, setEmployeeChat] = useState(null)
   const { pinned: pinnedAccount, setPinned: setPinnedAccount } = usePinnedAccount()
@@ -258,6 +298,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       websocket.send(JSON.stringify({ type: 'auth', token: localStorage.getItem('token') || '' }))
       console.log('WebSocket connected')
       setIsConnected(true)
+      setEverConnected(true)
       retryRef.current = 0
       lastInboundRef.current = Date.now()
       startHeartbeat()
@@ -267,7 +308,22 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       lastInboundRef.current = Date.now()
       const data = JSON.parse(event.data)
       // الـpong إشارة حياة فقط — لا شأن له بمنطق المحادثة
-      if (data?.type === 'pong' || data?.type === 'auth_ok' || data?.type === 'auth_expired') return
+      if (data?.type === 'pong' || data?.type === 'auth_expired') return
+      if (data?.type === 'auth_ok') {
+        // بعد التوثيق: اطلب ما فات منذ آخر رسالة رأيناها + لقطة المهام، ثم أرسل ما في
+        // صندوق الانتظار (رسائل كُتبت أثناء الانقطاع أو لم يؤكَّد استلامها)
+        setIsTyping(false)
+        websocket.send(JSON.stringify({ type: 'resume', since: lastSeqRef.current }))
+        for (const m of outboxRef.current) websocket.send(JSON.stringify(m))
+        return
+      }
+      if (typeof data?.seq === 'number') {
+        const seen = seenSeqRef.current
+        if (seen.has(data.seq)) return
+        seen.add(data.seq)
+        if (seen.size > 600) seenSeqRef.current = new Set([...seen].slice(-300))
+        lastSeqRef.current = Math.max(lastSeqRef.current ?? 0, data.seq)
+      }
       handleWebSocketMessage(data)
     }
     
@@ -330,8 +386,39 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     }, HEARTBEAT_MS)
   }
 
+  const saveOutbox = (list) => {
+    outboxRef.current = list
+    try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(list)) } catch { /* ممتلئ — يبقى في الذاكرة */ }
+  }
+
+  // الخادم عرف المهمة (سجّلها أو رآها مكررة) ← لا داعي لإعادة إرسالها
+  const ackOutbox = (ids) => {
+    const known = new Set(ids)
+    if (outboxRef.current.some(m => known.has(m.task_id))) {
+      saveOutbox(outboxRef.current.filter(m => !known.has(m.task_id)))
+    }
+  }
+
+  const handleTaskUpdate = (t) => {
+    if (!t) return
+    ackOutbox([t.id])
+    setTasks(prev => [t, ...prev.filter(x => x.id !== t.id)].slice(0, 30))
+    if (t.kind === 'chat' && t.status !== 'running' && t.session_id === localStorage.getItem('session_id')) {
+      setIsTyping(false)
+    }
+  }
+
   const handleWebSocketMessage = (data) => {
-    if (data.type === 'typing') {
+    if (data.type === 'tasks_snapshot') {
+      const list = data.tasks || []
+      lastSeqRef.current = Math.max(lastSeqRef.current ?? 0, data.seq || 0)
+      setTasks(list)
+      ackOutbox(list.map(t => t.id))
+      const open = localStorage.getItem('session_id')
+      setIsTyping(list.some(t => t.kind === 'chat' && t.status === 'running' && t.session_id === open))
+    } else if (data.type === 'task_update') {
+      handleTaskUpdate(data.task)
+    } else if (data.type === 'typing') {
       setIsTyping(data.status)
     } else if (data.type === 'assistant_message') {
       // تجاهل الرسائل الفارغة أو null
@@ -374,9 +461,17 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
   }
 
   // إرسال نص للخادم (يستخدمه صندوق الإدخال وأزرار الإجراءات السريعة للموظف)
+  // كل رسالة تحمل task_id وتدخل صندوق الانتظار حتى يؤكّدها الخادم: إن انقطع الاتصال
+  // قبل وصولها أو أثناء تنفيذها تُعاد عند عودته، ولا تُنفّذ مرتين (الخادم يميّزها بالمعرّف)
+  const queueAndSend = (messageData) => {
+    saveOutbox([...outboxRef.current, messageData].slice(-20))
+    const sock = wsRef.current
+    if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(messageData))
+  }
+
   const sendMessageText = (text) => {
     const content = (text || '').trim()
-    if (!content || !isConnected) return
+    if (!content) return
 
     setMessages(prev => [...prev, {
       id: Date.now(),
@@ -387,25 +482,40 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     setShowSuggestions(false)
     refreshSidebarConversations()
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const messageData = {
-        message: content,
-        user_id: user?.id || null,
-        user_email: user?.email || null,
-        session_id: localStorage.getItem('session_id') || `session_${Date.now()}`,
-        pinned_account: pinnedAccount || null
-      }
-      if (!localStorage.getItem('session_id')) {
-        localStorage.setItem('session_id', messageData.session_id)
-      }
-      ws.send(JSON.stringify(messageData))
+    const messageData = {
+      message: content,
+      task_id: newTaskId(),
+      session_id: localStorage.getItem('session_id') || `session_${Date.now()}`,
+      pinned_account: pinnedAccount || null
     }
+    if (!localStorage.getItem('session_id')) {
+      localStorage.setItem('session_id', messageData.session_id)
+    }
+    queueAndSend(messageData)
   }
 
   const handleSendMessage = () => {
-    if (!inputValue.trim() || !isConnected) return
+    if (!inputValue.trim()) return
     sendMessageText(inputValue)
     setInputValue('')
+  }
+
+  const resumeTask = (taskId) => {
+    const sock = wsRef.current
+    if (!sock || sock.readyState !== WebSocket.OPEN) {
+      notifyChat('⚠️ لا يوجد اتصال بالخادم حالياً — حاول الاستئناف بعد عودة الاتصال.')
+      return
+    }
+    const t = tasks.find(x => x.id === taskId)
+    notifyChat(`▶️ جارٍ استئناف: **${t?.title || 'المهمة'}**`)
+    sock.send(JSON.stringify({ type: 'resume_task', task_id: taskId }))
+  }
+
+  const dismissTask = (taskId) => {
+    const sock = wsRef.current
+    if (sock && sock.readyState === WebSocket.OPEN) {
+      sock.send(JSON.stringify({ type: 'dismiss_task', task_id: taskId }))
+    }
   }
 
   const uploadAttachment = async (file) => {
@@ -435,8 +545,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
     const messageData = {
       message: '',
       attachment,
-      user_id: user?.id || null,
-      user_email: user?.email || null,
+      task_id: newTaskId(),
       session_id: localStorage.getItem('session_id') || `session_${Date.now()}`,
       pinned_account: pinnedAccount || null
     }
@@ -457,7 +566,7 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
 
     refreshSidebarConversations()
 
-    ws.send(JSON.stringify(messageData))
+    queueAndSend(messageData)
   }
 
   // رفع ملف كوكيز (JSON) أو ملف CSV لإضافة/تسجيل حسابات عبر الشات
@@ -645,16 +754,19 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
           onSuggestionClick={handleSuggestionClick}
         />
 
-        {/* سجل التنفيذ — عرض فقط؛ لا مصدر بيانات بعد، المعاينة التجريبية محلية */}
+        {/* سجل التنفيذ — مهام الخادم الحيّة: الجارية والمقطوعة (استئناف/تجاهل) وأحدث المنتهية */}
         <div className="px-4 md:px-6">
           <div className="max-w-[900px] mx-auto">
             <TaskActivityPanel
-              task={activityDemo ? DEMO_TASK : null}
-              events={activityDemo ? DEMO_EVENTS : []}
-              sourceState={activityDemo ? 'ready' : 'unbound'}
-              isDemo={activityDemo}
-              onStartDemo={() => setActivityDemo(true)}
-              onEndDemo={() => setActivityDemo(false)}
+              task={toTaskView(
+                tasks.find(t => t.status === 'running')
+                || tasks.find(t => t.status === 'interrupted')
+                || tasks[0]
+              )}
+              events={tasks.map(toTaskEvent)}
+              sourceState={!everConnected ? 'loading' : isConnected ? 'ready' : 'disconnected'}
+              onResume={resumeTask}
+              onDismiss={dismissTask}
             />
           </div>
         </div>

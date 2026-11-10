@@ -96,16 +96,18 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
           </div>
         )}
         {!isConnected && (
-          <p className="text-xs text-amber-700 dark:text-amber-300 mb-2">جارٍ إعادة الاتصال بالخادم…</p>
+          <p className="text-xs text-amber-700 dark:text-amber-300 mb-2">
+            جارٍ إعادة الاتصال بالخادم… رسائلك تُحفظ وتُرسل تلقائياً عند عودته.
+          </p>
         )}
         <div className="moj-glass-input relative flex items-end gap-1 w-full p-2 ps-2 pe-2 rounded-[22px] focus-within:ring-2 focus-within:ring-primary/30 transition-colors duration-150">
           <button
             onClick={handleSendMessage}
-            disabled={!inputValue.trim() || !isConnected}
-            title={!isConnected ? 'لا يوجد اتصال بالخادم' : !inputValue.trim() ? 'اكتب رسالة أولاً' : 'إرسال'}
+            disabled={!inputValue.trim()}
+            title={!inputValue.trim() ? 'اكتب رسالة أولاً' : !isConnected ? 'تُرسل عند عودة الاتصال' : 'إرسال'}
             aria-label="إرسال"
             className={`moj-hover size-10 mb-0.5 rounded-xl transition-colors duration-150 shrink-0 flex items-center justify-center ${
-              inputValue.trim() && isConnected
+              inputValue.trim()
                 ? 'moj-primary text-white'
                 : 'bg-black/5 dark:bg-white/10 text-text-secondary-light dark:text-text-secondary-dark cursor-not-allowed'
             }`}

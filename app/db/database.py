@@ -34,7 +34,7 @@ def init_db():
         User, XAccount, SocialAccount, Conversation, Message, ScheduleEvent,
         TelegramIntegration,
         AIEmployee, EmployeeMemoryRecord, ExecutionJobRecord, ExecutionLogRecord,
-        AgentMemory,
+        AgentMemory, TaskCheckpoint, RealtimeOutbox,
     )
     Base.metadata.create_all(bind=engine)
     print("Database tables created successfully")

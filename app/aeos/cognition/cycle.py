@@ -35,6 +35,7 @@ class CognitiveCycle:
                                     payload={"cycle_id": context.cycle_id}))
 
         phase_timings: Dict[str, int] = {}
+        checkpoint = getattr(context, "checkpoint", None)
         for phase in self._phases:
             p_start = time.time()
             try:
@@ -44,6 +45,8 @@ class CognitiveCycle:
                 context.scratch.setdefault("phase_errors", []).append(phase.name)
             finally:
                 phase_timings[phase.name] = int((time.time() - p_start) * 1000)
+                if callable(checkpoint):
+                    checkpoint("phase", name=phase.name, total=len(self._phases))
                 if self._bus:
                     self._bus.publish(Event(EventType.PHASE_COMPLETED, employee_id=eid,
                                             payload={"phase": phase.name}))

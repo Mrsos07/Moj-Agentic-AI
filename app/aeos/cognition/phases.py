@@ -21,7 +21,7 @@ import logging
 import re
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..capabilities.base import CapabilityRequest
 from ..decision.engine import ENGAGEMENT_BUDGETS, PUBLISHING_CAPABILITIES
@@ -1081,6 +1081,32 @@ class PersonaGuardPhase(ICognitivePhase):
         return rejected
 
 
+def resume_key(capability: str, target: str) -> str:
+    """مفتاح فعل على X يمنع تكراره عند استئناف دورة مقطوعة. النشر مفتاحه واحد لأن
+    المحتوى يُولَّد من جديد عند الاستئناف فلا يطابق نصُّه نصَّ المنشور الأول."""
+    if capability in PUBLISHING_CAPABILITIES:
+        return "publish"
+    if capability == "wait":
+        return ""
+    return f"{capability}:{target}" if target else capability
+
+
+def count_success(config, capability: str, skill_id: Optional[str] = None) -> None:
+    """استهلاك الميزانيات اليومية لفعل نجح (posts_today + ميزانيات التفاعل + حصة المهارة).
+    يُستدعى أيضاً عند الاستئناف لأفعال نجحت قبل الانقطاع: الدورة المقطوعة لم تصل للحفظ."""
+    if skill_id:
+        from ..skills.custom import note_run
+        note_run(config, str(skill_id))
+    c = config.runtime_state.counters
+    if capability in PUBLISHING_CAPABILITIES:
+        c["posts_today"] = c.get("posts_today", 0) + 1
+        if capability == "publish_thread":
+            c["threads_today"] = c.get("threads_today", 0) + 1
+    elif capability in ENGAGEMENT_BUDGETS:
+        key = ENGAGEMENT_BUDGETS[capability][0]
+        c[key] = c.get(key, 0) + 1
+
+
 class ExecutePhase(ICognitivePhase):
     """Execute the chosen actions through the capability layer."""
 
@@ -1111,12 +1137,20 @@ class ExecutePhase(ICognitivePhase):
             _announce_execution_plan(context, plan)
         results = []
         policy = WeightedUtilityDecisionEngine()
+        done_before = set(context.scratch.get("resume_skip") or ())
         for decision, entry in zip(decisions, plan):
             action = decision.action
             outcome = {"action_id": entry["action_id"], "capability": action.capability,
                        "target": entry["target"], "arm": entry["arm"]}
+            key = resume_key(action.capability, entry["target"])
             context.scratch["active_action"] = deepcopy(entry)
             try:
+                if key and key in done_before:
+                    reason = "نُفّذ قبل انقطاع الدورة السابقة — لن أكرّره"
+                    results.append({**outcome, "success": False, "status": "skipped", "error": reason})
+                    context.emit_progress(f"تخطّيت {action.capability}: {reason}.",
+                                          intent="aeos_cycle_action_result")
+                    continue
                 skill_skip = ""
                 skill_id = (action.params or {}).get("_skill")
                 if skill_id:
@@ -1150,17 +1184,12 @@ class ExecutePhase(ICognitivePhase):
                 if result.success:
                     # حصة المهارة المخصّصة تُستهلك عند التنفيذ لا عند الاقتراح
                     skill_id = (action.params or {}).get("_skill")
-                    if skill_id:
-                        from ..skills.custom import note_run
-                        note_run(context.config, str(skill_id))
-                    c = context.config.runtime_state.counters
-                    if action.capability in PUBLISHING_CAPABILITIES:
-                        c["posts_today"] = c.get("posts_today", 0) + 1
-                        if action.capability == "publish_thread":
-                            c["threads_today"] = c.get("threads_today", 0) + 1
-                    elif action.capability in ENGAGEMENT_BUDGETS:
-                        key = ENGAGEMENT_BUDGETS[action.capability][0]
-                        c[key] = c.get(key, 0) + 1
+                    count_success(context.config, action.capability, skill_id)
+                    if key:
+                        out = result.output if isinstance(result.output, dict) else {}
+                        context.checkpoint("action", key=key, capability=action.capability,
+                                           target=entry["target"], skill=skill_id,
+                                           url=str(out.get("tweet_url") or out.get("url") or "")[:300])
             except Exception as exc:  # noqa: BLE001
                 logger.exception("capability execution failed")
                 results.append({
