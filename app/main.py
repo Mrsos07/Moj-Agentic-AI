@@ -981,7 +981,11 @@ async def websocket_endpoint(websocket: WebSocket):
             pass
         manager.disconnect(websocket)
         return
-    await manager.send_message({"type": "auth_ok"}, websocket)
+    try:
+        await manager.send_message({"type": "auth_ok"}, websocket)
+    except Exception:  # noqa: BLE001 - أُغلق قبل التوثيق (تحديث الصفحة): لا traceback في السجل
+        manager.disconnect(websocket)
+        return
     auth_uid = auth_user.id
     manager.set_user(websocket, auth_uid)
     manager.register_user(auth_uid, websocket)
