@@ -17,6 +17,7 @@ from app.auth.security import (
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from app.auth.dependencies import require_current_user
+from app.auth.token_guard import authenticate, digest, revoke_token, revoke_user
 from app.auth.roles import permissions_of, role_of
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
@@ -195,7 +196,8 @@ async def login(request: LoginRequest, http: Request, db: Session = Depends(get_
     
     # Store session in Redis (optional - won't block if Redis is unavailable)
     try:
-        RedisClient.set_session(access_token[:32], user.id)
+        # مفتاح بتجزئة التوكن: أول 32 حرفاً من JWT هي الترويسة نفسها لكل التوكنات (تصادم)
+        RedisClient.set_session(digest(access_token)[:32], user.id)
     except Exception:
         # Redis is optional, continue without it
         pass
@@ -222,23 +224,7 @@ async def verify_token(
 ):
     """التحقق من Token - Verify if JWT token is valid"""
     
-    token = credentials.credentials
-    
-    # Check if token is blacklisted (optional - skip if Redis unavailable)
-    try:
-        if RedisClient.is_blacklisted(token):
-            return VerifyResponse(valid=False)
-    except Exception:
-        # Redis is optional, continue without it
-        pass
-    
-    # Decode token
-    token_data = decode_token(token)
-    if token_data is None:
-        return VerifyResponse(valid=False)
-    
-    # Get user from database
-    user = db.query(User).filter(User.id == token_data.user_id).first()
+    user, _ = authenticate(credentials.credentials, db)
     if user is None:
         return VerifyResponse(valid=False)
     
@@ -260,13 +246,14 @@ async def logout(
     """تسجيل خروج - Logout user and invalidate token"""
     
     token = credentials.credentials
-    
-    # Add token to blacklist (optional - skip if Redis unavailable)
+    data = decode_token(token)
+    # الإبطال يُحفظ بتجزئة التوكن محلياً (دائم) + Redis إن وُجد؛ فشل الحفظ = خطأ لا «نجح»
+    if not revoke_token(token, exp=data.exp if data else None):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Logout could not be recorded; try again")
     try:
-        RedisClient.add_to_blacklist(token)
-        RedisClient.delete_session(token[:32])
-    except Exception:
-        # Redis is optional, continue without it
+        RedisClient.delete_session(digest(token)[:32])
+    except Exception:  # noqa: BLE001 - كاش الجلسة اختياري
         pass
     
     return MessageResponse(
@@ -304,6 +291,7 @@ async def change_password(
     
     current_user.password_hash = hash_password(request.new_password)
     db.commit()
+    revoke_user(current_user.id)        # كل الجلسات القائمة (ومنها المسروقة) تنتهي فوراً
     
     return MessageResponse(
         message="Password changed successfully",

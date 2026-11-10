@@ -276,6 +276,126 @@ check("تغيّر مفتاح التشفير ← المفاتيح القديمة 
 UL._vault = _real_vault
 UL.invalidate(A)
 
+print("6b) OpenRouter من الشات: قائمته نفسها، وعلى رصيد النظام للمدير/المطوّر فقط")
+FAKE_OR = [
+    {"id": "anthropic/claude-sonnet-4.5", "name": "Anthropic: Claude Sonnet 4.5", "context": 1000000,
+     "price_in": 3.0, "price_out": 15.0, "free": False},
+    {"id": "google/gemini-2.5-flash", "name": "Google: Gemini 2.5 Flash", "context": 1048576,
+     "price_in": 0.3, "price_out": 2.5, "free": False},
+    {"id": "openai/gpt-4o-mini", "name": "OpenAI: GPT-4o-mini", "context": 128000,
+     "price_in": 0.15, "price_out": 0.6, "free": False},
+]
+_real_catalog = CAT.openrouter_catalog
+CAT.openrouter_catalog = lambda force=False: FAKE_OR
+C, HC = _user("dev@t.local")
+db = DB.SessionLocal()
+from app.auth.roles import set_role  # noqa: E402
+
+set_role(db.query(M.User).get(C), "developer")
+db.commit()
+db.close()
+UL.invalidate(C)
+UL.invalidate(B)
+try:
+    if SYSTEM.provider == "openrouter":
+        vb = client.get("/api/llm/providers", headers=HB).json()
+        orb = next(p for p in vb["providers"] if p["id"] == "openrouter")
+        check("مستخدم عادي بلا مفتاح: لا رصيد نظام ولا OpenRouter", not vb["system_models"] and not orb["connected"])
+        check("ولا يرى قائمة OpenRouter (400)", client.get("/api/llm/openrouter/models", headers=HB).status_code == 400)
+        r = client.put("/api/llm/selection/chat", headers=HB, json={"provider": "openrouter",
+                                                                     "model": "anthropic/claude-sonnet-4.5"})
+        check("ولا يختار نموذجاً على رصيد النظام (400)", r.status_code == 400, r.text[:120])
+
+        vc = client.get("/api/llm/providers", headers=HC).json()
+        orc = next(p for p in vc["providers"] if p["id"] == "openrouter")
+        check("المطوّر: OpenRouter متاح على رصيد النظام بلا مفتاح", vc["system_models"] and orc["connected"]
+              and orc["via_system"] and not orc["has_key"])
+        lst = client.get("/api/llm/openrouter/models", headers=HC).json()
+        check("القائمة الغنية: اسم وسعر وسياق", lst["via_system"] and lst["models"][0]["price_out"] == 15.0
+              and lst["models"][0]["context"] == 1000000)
+        r = client.put("/api/llm/selection/chat", headers=HC, json={"provider": "openrouter",
+                                                                     "model": "anthropic/claude-sonnet-4.5"})
+        check("يختار نموذجاً من القائمة", r.status_code == 200 and r.json()["model"] == "anthropic/claude-sonnet-4.5")
+        r = client.put("/api/llm/selection/chat", headers=HC, json={"provider": "openrouter", "model": "made/up-model"})
+        check("نموذج خارج القائمة (أو بلا أدوات) ← 400", r.status_code == 400, r.text[:120])
+        ep = resolve_llm(user_id=C, purpose="chat")
+        check("الشات يذهب للنموذج المختار بمفتاح النظام وعنوانه",
+              ep.model == "anthropic/claude-sonnet-4.5" and ep.api_key == SYSTEM.api_key
+              and ep.base_url == SYSTEM.base_url and ep.provider == "openrouter", (ep.model, ep.provider))
+        check("الموظفون يبقون على إعداد النظام (اختيار مستقل)",
+              resolve_llm(user_id=C, purpose="employee").model == SYSTEM.model)
+
+        from app.aeos.services.orchestrator import TOOLS, _Tools  # noqa: E402
+
+        check("أداة المنسّق chat_model مسجّلة", any(t["function"]["name"] == "chat_model" for t in TOOLS))
+        tools = _Tools(C)
+        found = tools.chat_model({"action": "search", "query": "gemini flash"})
+        check("من الشات: بحث «gemini flash» يجد النموذج", found["count"] == 1
+              and found["models"][0]["id"] == "google/gemini-2.5-flash", found)
+        res = tools.chat_model({"action": "set", "model": "google/gemini-2.5-flash"})
+        check("من الشات: set يغيّر نموذج الشات", res["ok"] and resolve_llm(user_id=C).model == "google/gemini-2.5-flash")
+        try:
+            tools.chat_model({"action": "set", "model": "gemini"})
+            ok = False
+        except LookupError:
+            ok = True
+        check("من الشات: اسم غير كامل لا يُحفظ (يجب search أولاً)", ok)
+        check("من الشات: current", tools.chat_model({"action": "current"})["model"] == "google/gemini-2.5-flash")
+        tools.chat_model({"action": "reset"})
+        check("من الشات: reset ← افتراضي النظام", resolve_llm(user_id=C).model == SYSTEM.model)
+        try:
+            _Tools(B).chat_model({"action": "search", "query": "claude"})
+            ok = False
+        except ValueError:
+            ok = True
+        check("أداة الشات تحترم الصلاحية (مستخدم عادي بلا مفتاح)", ok)
+        print("6c) نموذج لكل موظف من بطاقته")
+        from app.aeos.employee.repository import SqlEmployeeRepository  # noqa: E402
+        from verify_creator import make_config  # noqa: E402
+
+        repo = SqlEmployeeRepository()
+        emp1, emp2 = make_config(), make_config()
+        emp1.id, emp1.user_id, emp1.account_username, emp1.cookie_label = "emp-one", C, "emp_one", "emp_one"
+        emp2.id, emp2.user_id, emp2.account_username, emp2.cookie_label = "emp-two", C, "emp_two", "emp_two"
+        repo.save(emp1)
+        repo.save(emp2)
+        v = client.get("/api/aeos/employees/emp-one/llm", headers=HC).json()
+        check("بلا اختيار: الموظف يتبع العام ← النظام", v["source"] == "system" and not v["selection"]["provider"], v)
+        r = client.put("/api/aeos/employees/emp-one/llm", headers=HC,
+                       json={"provider": "openrouter", "model": "anthropic/claude-sonnet-4.5"})
+        check("المالك يختار نموذجاً لهذا الموظف من بطاقته", r.status_code == 200 and r.json()["source"] == "employee"
+              and r.json()["effective"]["model"] == "anthropic/claude-sonnet-4.5", r.text[:160])
+        saved = repo.get("emp-one")
+        check("يُحفظ في business_rules.llm (بلا ترحيل) ولا يمسح بقية القواعد",
+              saved.business_rules.get("llm", {}).get("model") == "anthropic/claude-sonnet-4.5"
+              and saved.business_rules.get("daily_post_target") == 2, saved.business_rules.get("llm"))
+        client.put("/api/llm/selection/employee", headers=HC, json={"provider": "openrouter", "model": "openai/gpt-4o-mini"})
+        sel1 = (saved.business_rules or {}).get("llm")
+        sel2 = (repo.get("emp-two").business_rules or {}).get("llm")
+        check("داخل الدورة: الموظف المختار بنموذجه هو", UL.endpoint_for(C, "employee", sel1).model == "anthropic/claude-sonnet-4.5")
+        check("وزميله بلا اختيار يتبع نموذج الموظفين العام",
+              UL.endpoint_for(C, "employee", sel2).model == "openai/gpt-4o-mini")
+        tok = LLM_OWNER.set((C, "employee", sel1))
+        picked = LLMMOD.RoutedLLMProvider(_Default())._pick()
+        LLM_OWNER.reset(tok)
+        check("RoutedLLMProvider يوجّه نداءات الدورة لنموذج الموظف (LLM_OWNER بثلاثة عناصر)",
+              getattr(picked, "_model", "") == "anthropic/claude-sonnet-4.5", getattr(picked, "_model", picked))
+        r = client.put("/api/aeos/employees/emp-one/llm", headers=HC, json={"provider": "openrouter", "model": "made/up"})
+        check("نموذج خارج القائمة ← 400", r.status_code == 400)
+        check("موظف مستخدم آخر ← 404", client.get("/api/aeos/employees/emp-one/llm", headers=HB).status_code == 404)
+        r = client.put("/api/aeos/employees/emp-one/llm", headers=HC, json={"provider": "", "model": ""})
+        check("«يتبع العام» يزيل الاختيار الخاص", r.json()["source"] == "owner"
+              and "llm" not in repo.get("emp-one").business_rules, r.json())
+        res = _Tools(C).chat_model({"action": "set", "employee": "emp_two", "model": "google/gemini-2.5-flash"})
+        check("من الشات: «خلّ @emp_two يستخدم Gemini» ← لهذا الموظف وحده",
+              res["ok"] and repo.get("emp-two").business_rules["llm"]["model"] == "google/gemini-2.5-flash"
+              and "llm" not in repo.get("emp-one").business_rules)
+        client.put("/api/llm/selection/employee", headers=HC, json={"provider": "", "model": ""})
+    else:
+        print("  ⚠️ النظام ليس على OpenRouter — تخطّيت فحوص رصيد النظام")
+finally:
+    CAT.openrouter_catalog = _real_catalog
+
 if "--live" in sys.argv:
     print("7) فحص حي (مفاتيح .env، بلا حفظ في القاعدة الحقيقية)")
     from dotenv import dotenv_values

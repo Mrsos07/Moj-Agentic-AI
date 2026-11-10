@@ -81,13 +81,15 @@ class ScheduleCallbackInput(BaseModel):
 async def schedule_callback(
     payload: ScheduleCallbackInput,
     sig: str = "",
+    exp: str = "",
+    nonce: str = "",
     db: Session = Depends(get_db),
 ):
     """
     Webhook يستقبل نتيجة نشر تغريدة مجدولة من سيرفر app/x.
     يحدّث الـ ScheduleEvent المحلي ويرسل إشعاراً في محادثة المستخدم.
     """
-    if not verify("schedule", payload.event_id, sig):
+    if not verify("schedule", payload.event_id, sig, exp, nonce):
         raise HTTPException(status_code=403, detail="invalid callback signature")
     event = db.query(ScheduleEvent).filter(
         ScheduleEvent.schedule_event_id == payload.event_id

@@ -11,7 +11,7 @@ import {
   MdChecklist,
   MdRocketLaunch,
   MdCheckCircle,
-  MdSmartToy,
+  MdGroups,
   MdUploadFile,
   MdKey,
   MdBadge,
@@ -27,7 +27,7 @@ import {
 
 const STEPS = [
   { id: 1, title: 'الحساب', icon: MdPerson },
-  { id: 2, title: 'الشخصية', icon: MdAutoAwesome },
+  { id: 2, title: 'الهوية', icon: MdAutoAwesome },
   { id: 3, title: 'القواعد والجدولة', icon: MdChecklist },
   { id: 4, title: 'مراجعة وتفعيل', icon: MdRocketLaunch },
 ]
@@ -273,10 +273,10 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
       }, { headers: authHeaders(), timeout: 60000 })
       applyPersona(res.data?.persona)
       onNotify?.(res.data?.source === 'ai'
-        ? '✨ تم توليد الشخصية بالذكاء الاصطناعي — راجعها وعدّلها.'
-        : 'تم بناء الشخصية من النماذج الجاهزة (الذكاء الاصطناعي غير متاح).')
+        ? 'تم توليد الهوية — راجعها وعدّلها.'
+        : 'تم بناء الهوية من النماذج الجاهزة (الذكاء الاصطناعي غير متاح).')
     } catch {
-      onNotify?.('❌ تعذّر توليد الشخصية.')
+      onNotify?.('❌ تعذّر توليد الهوية.')
     } finally {
       setBusy('')
     }
@@ -361,7 +361,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
       }, { headers: authHeaders() })
       if (res.data?.ok) {
         onNotify?.(
-          `🎉 تم إنشاء الموظف الذكي @${form.account} وتفعيله!\n` +
+          `🎉 تم إنشاء الوكيل @${form.account} وتفعيله!\n` +
           `👤 ${persona.display_name} — ${persona.role}\n` +
           `🎯 الاهتمامات: ${form.interests.join('، ') || '—'}\n` +
           `⏰ يعمل كل ${form.interval_minutes} دقيقة بين ${form.active_hours_start}:00 و${form.active_hours_end}:00.\n` +
@@ -414,8 +414,8 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
           {/* رأس المعالج */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-border-light dark:border-border-dark shrink-0">
             <div className="flex items-center gap-2">
-              <MdSmartToy className="text-primary" size={22} />
-              <h3 className="text-base font-bold text-text-primary-light dark:text-text-primary-dark">إنشاء موظف ذكي جديد</h3>
+              <MdGroups className="text-primary" size={22} />
+              <h3 className="text-base font-bold text-text-primary-light dark:text-text-primary-dark">إنشاء وكيل جديد</h3>
             </div>
             <button onClick={onClose} className="size-8 flex items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-card-dark text-text-secondary-light dark:text-text-secondary-dark">
               <MdClose size={20} />
@@ -592,7 +592,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
                   </div>
                 </div>
 
-                {/* طرق بناء الشخصية */}
+                {/* طرق بناء الهوية */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <div className="rounded-xl border border-border-light dark:border-border-dark p-3 space-y-2">
                     <p className="text-[11px] font-bold text-text-primary-light dark:text-text-primary-dark">📋 نموذج جاهز</p>
@@ -608,7 +608,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
                     </select>
                   </div>
                   <div className="rounded-xl border border-border-light dark:border-border-dark p-3 space-y-2">
-                    <p className="text-[11px] font-bold text-text-primary-light dark:text-text-primary-dark">✨ توليد بالذكاء الاصطناعي</p>
+                    <p className="text-[11px] font-bold text-text-primary-light dark:text-text-primary-dark">توليد الهوية</p>
                     <input
                       value={form.brief}
                       onChange={e => set('brief', e.target.value)}
@@ -617,7 +617,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
                     />
                     <button onClick={generateAI} disabled={busy === 'generate'}
                       className="w-full text-xs px-2 py-1.5 rounded-lg bg-primary text-white hover:bg-primary/90 disabled:opacity-50">
-                      {busy === 'generate' ? 'جارِ التوليد…' : 'ولّد الشخصية'}
+                      {busy === 'generate' ? 'جارِ التوليد…' : 'ولّد الهوية'}
                     </button>
                   </div>
                   <div className="rounded-xl border border-border-light dark:border-border-dark p-3 space-y-2">
@@ -808,7 +808,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
                       className="size-4 accent-primary" />
                     <span className="flex items-center gap-1.5 text-xs font-bold text-text-primary-light dark:text-text-primary-dark">
                       <MdBadge size={16} className="text-primary" />
-                      حدّث هوية الحساب على X لتطابق الشخصية (الاسم + النبذة + الصور)
+                      حدّث حساب X ليطابق هذه الهوية (الاسم + النبذة + الصور)
                     </span>
                   </label>
                   {form.sync_profile && (
@@ -845,7 +845,7 @@ const EmployeeWizard = ({ open, onClose, onNotify, onCreated }) => {
                 <p className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark leading-relaxed">
                   عند التفعيل سيبدأ الموظف أول دورة: يقرأ التايم لاين والترندات والهاشتاقات وأهم البوستات،
                   يتفاعل ضمن تخصصه فقط، ويوافيك بكل دورة في الشات. يمكنك توجيهه لاحقاً («انشر عن …»)
-                  أو تعديل كل شيء من درج الموظفين الذكيين.
+                  أو تعديل كل شيء من درج الوكلاء.
                 </p>
               </div>
             )}

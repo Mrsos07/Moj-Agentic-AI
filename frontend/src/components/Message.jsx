@@ -1,4 +1,5 @@
 import { FiCopy, FiRefreshCw, FiThumbsUp, FiThumbsDown } from 'react-icons/fi'
+import { User } from 'lucide-react'
 
 const Message = ({ message }) => {
   const formatTime = (timestamp) => {
@@ -24,7 +25,8 @@ const Message = ({ message }) => {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/\n/g, '<br>')
-    
+      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong class="font-semibold">$1</strong>')
+
     formatted = formatted.replace(codeBlockRegex, (match, lang, code) => {
       return `
         <div class="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 my-2" dir="rtl" style="text-align:right;">
@@ -83,18 +85,18 @@ const Message = ({ message }) => {
 
   if (message.type === 'user') {
     return (
-      <div className="group flex w-full justify-start gap-4 md:gap-6 py-6 border-b border-transparent hover:bg-gray-50/50 dark:hover:bg-gray-800/30 rounded-xl px-2 transition-colors message-enter">
+      <div className="group flex w-full justify-start gap-3 md:gap-4 py-5 border-b border-transparent rounded-xl px-2 message-enter">
         <div className="shrink-0 flex flex-col items-center">
-          <div className="bg-primary rounded-full size-10 flex items-center justify-center text-white font-bold">
-            U
+          <div className="bg-primary rounded-full size-10 flex items-center justify-center text-white">
+            <User size={18} aria-hidden />
           </div>
         </div>
         <div className="flex flex-col gap-2 w-full max-w-[80%] items-start text-right">
           <div className="flex items-center gap-2 justify-start self-start w-full">
             <span className="text-sm font-semibold text-gray-900 dark:text-white">أنت</span>
-            <span className="text-xs text-gray-400">{formatTime(message.timestamp)}</span>
+            <span className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">{formatTime(message.timestamp)}</span>
           </div>
-          <div className="bg-primary/10 dark:bg-primary/20 text-gray-900 dark:text-gray-100 px-5 py-3.5 rounded-2xl rounded-tr-sm text-base leading-relaxed text-right self-start w-fit max-w-full">
+          <div className="bg-primary/10 dark:bg-primary/20 text-gray-900 dark:text-gray-100 px-5 py-3.5 rounded-2xl rounded-tr-sm text-[15px] leading-7 text-right self-start w-fit max-w-full">
             {message.content}
             {renderAttachment()}
           </div>
@@ -104,10 +106,10 @@ const Message = ({ message }) => {
   }
 
   return (
-    <div className="group flex w-full justify-start gap-4 md:gap-6 py-6 border-b border-transparent hover:bg-gray-50/50 dark:hover:bg-gray-800/30 rounded-xl px-2 transition-colors message-enter">
+    <div className="group flex w-full justify-start gap-3 md:gap-4 py-5 border-b border-transparent rounded-xl px-2 message-enter">
       <div className="shrink-0 flex flex-col items-center">
-        <div className="bg-gradient-to-br from-primary to-blue-600 rounded-full size-10 flex items-center justify-center text-white font-bold">
-          AI
+        <div className="bg-primary rounded-full size-10 flex items-center justify-center text-white font-bold">
+          م
         </div>
       </div>
       <div className="flex flex-col gap-3 w-full min-w-0 items-start text-right max-w-[80%]">
@@ -115,10 +117,10 @@ const Message = ({ message }) => {
           <span className="text-sm font-semibold text-gray-900 dark:text-white">
             {message.type === 'error' ? 'خطأ' : 'موج'}
           </span>
-          <span className="text-xs text-gray-400">{formatTime(message.timestamp)}</span>
+          <span className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">{formatTime(message.timestamp)}</span>
         </div>
-        <div 
-          className="text-base leading-relaxed text-gray-800 dark:text-gray-200 font-normal space-y-4 text-right self-start w-full"
+        <div
+          className="text-[15px] leading-7 text-gray-800 dark:text-gray-200 font-normal space-y-4 text-right self-start w-full [&_strong]:text-text-primary-light dark:[&_strong]:text-text-primary-dark [&_strong]:font-semibold"
           dangerouslySetInnerHTML={{ __html: formatMessage(message.content) }}
         />
         {renderAttachment()}

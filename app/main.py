@@ -127,6 +127,15 @@ async def startup_event():
     except Exception as e:
         print(f"Warning: AEOS platform failed to start: {str(e)}")
 
+    # هوية اعتمدها المالك وقطعت إعادة التشغيل تطبيقها ← تُستأنف بالصور المثبّتة نفسها
+    try:
+        from app.aeos.services import identity_service
+        resumed = identity_service.resume_pending()
+        if resumed:
+            print(f"Identity: resumed {resumed} interrupted approved identity apply(s)")
+    except Exception as e:
+        print(f"Warning: identity resume failed: {str(e)}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -870,10 +879,12 @@ async def websocket_endpoint(websocket: WebSocket):
     # التوكن في **أول رسالة** لا في الرابط: الرابط يُكتب في سجل الخادم وسجلات البروكسي
     # كاملاً (قيس: «WebSocket /ws/chat?token=eyJ…» في كل اتصال) — من يقرأ السجل يدخل الحساب.
     auth_user = None
+    ws_token = ""
     try:
         first = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=15))
         if isinstance(first, dict) and first.get("type") == "auth":
-            auth_user = await asyncio.to_thread(user_from_token, str(first.get("token") or ""))
+            ws_token = str(first.get("token") or "")
+            auth_user = await asyncio.to_thread(user_from_token, ws_token)
     except Exception:  # noqa: BLE001 - مهلة/JSON تالف/انقطاع = غير موثَّق
         auth_user = None
     if auth_user is None:
@@ -887,9 +898,36 @@ async def websocket_endpoint(websocket: WebSocket):
     auth_uid = auth_user.id
     manager.set_user(websocket, auth_uid)
     manager.register_user(auth_uid, websocket)
+
+    # الجلسة تُراجَع طوال عمر الاتصال لا عند فتحه فقط: انتهاء JWT أو إبطاله (خروج/تغيير كلمة
+    # المرور) أو تعطيل الحساب يغلق السوكت — مع كل رسالة، وكل دقيقة حتى لو كان الاتصال خاملاً
+    # (الموظفون يدفعون تقاريرهم لسوكت المستخدم).
+    async def _session_valid() -> bool:
+        user = await asyncio.to_thread(user_from_token, ws_token)
+        return user is not None and user.id == auth_uid
+
+    async def _close_expired() -> None:
+        try:
+            await manager.send_message({"type": "auth_expired",
+                                        "message": "انتهت الجلسة — سجّل الدخول من جديد"}, websocket)
+            await websocket.close(code=4401, reason="session expired")
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _session_watchdog() -> None:
+        while True:
+            await asyncio.sleep(60)
+            if not await _session_valid():
+                await _close_expired()
+                return
+
+    watchdog = asyncio.create_task(_session_watchdog())
     try:
         while True:
             data = await websocket.receive_text()
+            if not await _session_valid():
+                await _close_expired()
+                break
             try:
                 message_data = json.loads(data)
             except Exception:
@@ -1372,6 +1410,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as exc:  # noqa: BLE001 - أي انقطاع آخر (ECONNRESET/إعادة تحميل)
         print(f"WebSocket closed unexpectedly: {exc}")
     finally:
+        watchdog.cancel()
         # تنظيف مضمون للاتصال في كل الحالات لمنع تسرّب الاتصالات في active_connections
         manager.disconnect(websocket)
 
@@ -1476,7 +1515,8 @@ async def health_check():
 # ليس مكشوفًا للعموم — يقبل اتصال محلي فقط (127.0.0.1).
 # ────────────────────────────────────────────────────────────────────────────
 @app.post("/api/internal/login-callback", include_in_schema=False)
-async def login_callback(payload: Dict[str, Any], request: Request, sig: str = ""):
+async def login_callback(payload: Dict[str, Any], request: Request, sig: str = "",
+                         exp: str = "", nonce: str = ""):
     # «محلي فقط» لا يكفي: طلبات المتصفح عبر بروكسي Vite تصل من 127.0.0.1 أيضاً.
     # الحَكَم توقيع الرابط الذي أعطيناه لـloginx (app.auth.internal).
     from app.auth.internal import verify
@@ -1485,7 +1525,7 @@ async def login_callback(payload: Dict[str, Any], request: Request, sig: str = "
     if client_host not in ("127.0.0.1", "localhost", "::1"):
         raise HTTPException(status_code=403, detail="callback مسموح محلياً فقط")
     user_id = payload.get("user_id")
-    if not verify("login", user_id, sig):
+    if not verify("login", user_id, sig, exp, nonce):
         raise HTTPException(status_code=403, detail="invalid callback signature")
     if not user_id:
         return {"ok": True, "note": "no user_id, nothing to notify"}

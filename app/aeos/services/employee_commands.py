@@ -149,7 +149,7 @@ def handle(intent: str, entities: Dict[str, Any], raw_text: str,
             return _handle_teach(platform, cfg, entities, raw_text)
         if intent == "employee_apply_identity":
             from . import identity_service
-            return identity_service.request_apply_identity(cfg, user_id, entities)
+            return identity_service.apply_from_chat(cfg, user_id, entities)
         if intent in _SHOW_INTENT_TO_KIND:
             from . import employee_data
             return employee_data.request_data(_SHOW_INTENT_TO_KIND[intent], cfg, user_id)

@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import EmployeeWizard from './EmployeeWizard'
 import ToolsPanel from './ToolsPanel'
+import ChatModelPicker from './ChatModelPicker'
 import VoiceProfileView from './VoiceProfileView'
 import MemoryPanel from './MemoryPanel'
 import clonePersona from '../hooks/clonePersona'
+import { PenLine } from 'lucide-react'
 import {
-  MdSmartToy,
+  MdGroups,
   MdClose,
   MdRefresh,
   MdPerson,
@@ -112,6 +114,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
   const [identBusy, setIdentBusy] = useState({})     // label -> 'preview' | 'apply' | 'field:<field>'
   const [identPreview, setIdentPreview] = useState({}) // label -> {name, bio, avatar_url, banner_url}
   const [identEdit, setIdentEdit] = useState({})       // label -> {field, prompt} (تعديل عنصر منفرد)
+  const [xpBusy, setXpBusy] = useState({})             // label -> bool (قراءة هوية الحساب من X)
   const [skillPrompt, setSkillPrompt] = useState({})   // label -> نص برومبت المهارة
   const [skillDraft, setSkillDraft] = useState({})     // label -> {skill, summary} (معاينة قبل التفعيل)
   const [skillBusy, setSkillBusy] = useState({})       // label -> 'gen' | 'save' | 'id:<skill>'
@@ -198,8 +201,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
       if (res.data?.ok) {
         onNotify?.(
           enabled
-            ? `✅ تم تفعيل الموظف الذكي للحساب @${label}. سيعمل تلقائياً كل ${interval} دقيقة بين الساعة ${hs}:00 و ${he}:00 — بدون أوامر منك.`
-            : `⏸️ تم إيقاف الموظف الذكي للحساب @${label}.`
+            ? `✅ تم تفعيل الوكيل للحساب @${label}. سيعمل تلقائياً كل ${interval} دقيقة بين الساعة ${hs}:00 و ${he}:00 — بدون أوامر منك.`
+            : `⏸️ تم إيقاف الوكيل للحساب @${label}.`
         )
         await load()
       }
@@ -214,8 +217,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
   const deleteRow = async (label, agent, alsoAccount) => {
     const hasEmployee = !!agent?.employee_id
     const confirmMsg = alsoAccount
-      ? `سيتم حذف الموظف الذكي والحساب @${label} نهائياً (بما في ذلك ملف الكوكيز والسجلّات). هل أنت متأكد؟`
-      : `سيتم حذف الموظف الذكي للحساب @${label} نهائياً (مع سجلّات الدورات). هل أنت متأكد؟`
+      ? `سيتم حذف الوكيل والحساب @${label} نهائياً (بما في ذلك ملف الكوكيز والسجلّات). هل أنت متأكد؟`
+      : `سيتم حذف الوكيل للحساب @${label} نهائياً (مع سجلّات الدورات). هل أنت متأكد؟`
     if (!window.confirm(confirmMsg)) return
 
     setDelBusy(prev => ({ ...prev, [label]: true }))
@@ -232,8 +235,8 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
       }
       onNotify?.(
         alsoAccount
-          ? `🗑️ تم حذف الموظف الذكي والحساب @${label} نهائياً.`
-          : `🗑️ تم حذف الموظف الذكي للحساب @${label}.`
+          ? `🗑️ تم حذف الوكيل والحساب @${label} نهائياً.`
+          : `🗑️ تم حذف الوكيل للحساب @${label}.`
       )
       await load()
     } catch (e) {
@@ -428,7 +431,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         setP(label, 'donts', (p.donts || []).join('\n'))
         if (Array.isArray(p.interests) && p.interests.length) setP(label, 'interests', p.interests)
         onNotify?.(res.data?.source === 'ai'
-          ? `✨ تم توليد البرسونا بالذكاء الاصطناعي لـ @${label}. راجعها ثم احفظ.`
+          ? `تم توليد هوية @${label}. راجعها ثم احفظ.`
           : `تم إنشاء برسونا من النماذج الجاهزة لـ @${label} (الذكاء الاصطناعي غير متاح).`)
       }
     } catch (e) {
@@ -667,11 +670,47 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 15000 })
       onNotify?.(res.data?.message || `🪩 جارِ تطبيق الهوية على @${label}… ستصلك النتيجة في الشات.`)
       setIdentPreview(prev => ({ ...prev, [label]: null }))
+      watchXProfile(label, empId, row?.agent?.x_profile?.fetched_at || null)
     } catch (e) {
       onNotify?.(`❌ تعذّر تطبيق الهوية على @${label}: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
     } finally {
       setIdentBusy(prev => ({ ...prev, [label]: null }))
     }
+  }
+
+  // ── هوية الحساب كما تظهر على X (اسم/نبذة/صورة/هيدر) معروضة في البطاقة ──
+  const refreshXProfile = async (label) => {
+    const empId = rowsRef.current.find(r => r.label === label)?.agent?.employee_id
+    if (!empId) return
+    setXpBusy(prev => ({ ...prev, [label]: true }))
+    try {
+      const token = localStorage.getItem('token')
+      // قراءة حيّة بالمتصفح (~15-30ث)، والخادم يفشل سريعاً إن كان المتصفح محجوزاً بدورة
+      const res = await axios.post(`/api/aeos/employees/${empId}/x-profile/refresh`, {},
+        { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 120000 })
+      if (res.data?.x_profile) updateField(label, 'x_profile', res.data.x_profile)
+    } catch (e) {
+      onNotify?.(`❌ تعذّر جلب هوية @${label} من X: ${e?.response?.data?.detail || 'خطأ غير متوقع'}`)
+    } finally {
+      setXpBusy(prev => ({ ...prev, [label]: false }))
+    }
+  }
+
+  // بعد اعتماد هوية: الخادم يقرأ الحساب من X عند اكتمال التطبيق — نلتقط اللقطة الجديدة
+  const watchXProfile = (label, empId, since) => {
+    let tries = 0
+    const tick = async () => {
+      if (++tries > 16 || rowsRef.current.find(r => r.label === label)?.agent?.employee_id !== empId) return
+      try {
+        const token = localStorage.getItem('token')
+        const res = await axios.get(`/api/aeos/employees/${empId}/x-profile`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 8000 })
+        const xp = res.data?.x_profile
+        if (xp && xp.fetched_at !== since) { updateField(label, 'x_profile', xp); return }
+      } catch { /* نعيد المحاولة في الدورة التالية */ }
+      setTimeout(tick, 15000)
+    }
+    setTimeout(tick, 15000)
   }
 
   // ── تعديل عنصر واحد من الهوية (صورة/هيدر/اسم/بايو) ببرومبت اختياري ──
@@ -973,20 +1012,20 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         onClick={onClose}
       />
       <aside
-        className={`fixed top-0 right-0 h-full w-full sm:w-[440px] bg-card-light dark:bg-sidebar-dark border-l border-border-light dark:border-border-dark shadow-2xl z-50 flex flex-col transition-transform duration-300 ${open ? 'translate-x-0' : 'translate-x-full'}`}
+        className={`moj-glass-strong fixed top-0 right-0 h-full w-full sm:w-[440px] z-50 flex flex-col transition-transform duration-300 ${open ? 'translate-x-0' : 'translate-x-full'}`}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-border-light dark:border-border-dark shrink-0">
           <div className="flex items-center gap-2">
-            <MdSmartToy className="text-primary" size={22} />
-            <h3 className="text-base font-bold text-text-primary-light dark:text-text-primary-dark">الموظفين الذكيين</h3>
+            <MdGroups className="text-primary" size={22} />
+            <h3 className="text-base font-bold text-text-primary-light dark:text-text-primary-dark">الوكلاء</h3>
           </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setWizardOpen(true)}
               className="flex items-center gap-1 text-xs font-bold px-2.5 py-1.5 rounded-lg bg-primary text-white hover:bg-primary/90"
-              title="إنشاء موظف ذكي جديد خطوة بخطوة"
+              title="إنشاء وكيل جديد خطوة بخطوة"
             >
-              <MdAdd size={16} /> موظف جديد
+              <MdAdd size={16} /> وكيل جديد
             </button>
             <button onClick={load} className="size-8 flex items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-card-dark text-text-secondary-light dark:text-text-secondary-dark" title="تحديث">
               <MdRefresh size={20} />
@@ -999,7 +1038,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
 
         <div className="px-5 py-3 border-b border-border-light dark:border-border-dark bg-gray-50 dark:bg-card-dark/40 shrink-0">
           <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark leading-relaxed">
-            فعّل الحساب ليعمل الموظف الذكي <b>تلقائياً بالجدولة</b> — يفكّر، يخطّط، وينفّذ بنفسه دون أوامر مباشرة.
+            فعّل الحساب ليعمل الوكيل <b>تلقائياً بالجدولة</b> — يفكّر، يخطّط، وينفّذ بنفسه دون أوامر مباشرة.
             يمكن تشغيل عدة موظفين معاً، ويتوقفون خارج ساعات العمل.
           </p>
           <div className="mt-2 text-xs font-medium text-text-secondary-light dark:text-text-secondary-dark">
@@ -1033,15 +1072,36 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
               const draft = skillDraft[skillKey]?.employee_id === employeeId ? skillDraft[skillKey] : null
               const skillsDisabled = !employeeId || !!skillBusy[skillKey] || !!savingP[label] || !!delBusy[label] || !!busy[label]
               const skillInputId = `employee-skill-${encodeURIComponent(label)}-${encodeURIComponent(employeeId || 'none')}`
+              const xp = agent?.x_profile || null  // هوية الحساب كما قُرئت من X
               return (
                 <div key={label} className="rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark p-4">
+                  {/* هوية الحساب كما تظهر على X: الهيدر والصورة الحقيقيان */}
+                  {xp && (
+                    <div className="-mx-4 -mt-4 mb-8 relative">
+                      <div className="h-20 rounded-t-xl overflow-hidden bg-gradient-to-l from-primary/40 to-primary/10">
+                        {xp.banner_url && <img src={xp.banner_url} alt="header" className="w-full h-full object-cover" />}
+                      </div>
+                      <div className="absolute -bottom-7 right-4 size-14 rounded-full border-4 border-card-light dark:border-card-dark bg-primary/10 overflow-hidden flex items-center justify-center">
+                        {xp.avatar_url
+                          ? <img src={xp.avatar_url} alt="avatar" className="w-full h-full object-cover" />
+                          : <MdPerson className="text-primary" size={24} />}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3 min-w-0">
-                      <div className="size-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                        <MdPerson className="text-primary" size={20} />
-                      </div>
+                      {!xp && (
+                        <div className="size-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                          <MdPerson className="text-primary" size={20} />
+                        </div>
+                      )}
                       <div className="min-w-0">
-                        <p className="text-sm font-bold text-text-primary-light dark:text-text-primary-dark truncate">@{label}</p>
+                        {xp?.name && (
+                          <p className="text-sm font-bold text-text-primary-light dark:text-text-primary-dark truncate">{xp.name}</p>
+                        )}
+                        <p className={xp?.name
+                          ? 'text-[11px] text-text-secondary-light dark:text-text-secondary-dark truncate'
+                          : 'text-sm font-bold text-text-primary-light dark:text-text-primary-dark truncate'}>@{label}</p>
                         <p className={`text-xs ${enabled ? (within ? 'text-green-600 dark:text-green-400' : 'text-amber-500') : 'text-text-secondary-light dark:text-text-secondary-dark'}`}>
                           {enabled ? (within ? 'نشط ويعمل' : 'نشط (خارج ساعات العمل)') : 'متوقف'}
                         </p>
@@ -1058,6 +1118,30 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                       <div className="w-11 h-6 bg-gray-200 dark:bg-gray-700 rounded-full peer peer-checked:bg-primary after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5 rtl:peer-checked:after:-translate-x-5" />
                     </label>
                   </div>
+
+                  {xp?.bio && (
+                    <p className="mt-2 text-xs text-text-primary-light dark:text-text-primary-dark leading-relaxed line-clamp-3 whitespace-pre-line">
+                      {xp.bio}
+                    </p>
+                  )}
+                  {employeeId && (
+                    <div className="flex items-center justify-between gap-2 mt-1.5 text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
+                      <span className="truncate">
+                        {xp ? `الهوية كما على X · آخر مزامنة ${fmtTime(xp.fetched_at)}` : 'لم تُقرأ هوية الحساب من X بعد'}
+                      </span>
+                      <button
+                        onClick={() => refreshXProfile(label)}
+                        disabled={!!xpBusy[label]}
+                        title="اقرأ الاسم والنبذة والصورة والهيدر من حساب X الآن واعرضها في البطاقة"
+                        className="flex items-center gap-1 shrink-0 hover:text-primary disabled:opacity-50"
+                      >
+                        {xpBusy[label]
+                          ? <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                          : <MdRefresh size={13} />}
+                        {xp ? 'تحديث من X' : 'اعرض هويته من X'}
+                      </button>
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-3 gap-2 mt-3">
                     <div>
@@ -1267,7 +1351,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                     <button
                       onClick={() => deleteRow(label, agent, false)}
                       disabled={delBusy[label] || !agent?.employee_id || !!skillBusy[skillKey]}
-                      title="حذف الموظف الذكي فقط (يبقى الحساب/الكوكيز)"
+                      title="حذف الوكيل فقط (يبقى الحساب/الكوكيز)"
                       className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-lg border border-red-300 dark:border-red-500/40 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <MdDelete size={14} /> حذف الموظف
@@ -1275,7 +1359,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                     <button
                       onClick={() => deleteRow(label, agent, true)}
                       disabled={delBusy[label] || !!skillBusy[skillKey]}
-                      title="حذف الموظف الذكي والحساب المرتبط (ملف الكوكيز) نهائياً"
+                      title="حذف الوكيل والحساب المرتبط (ملف الكوكيز) نهائياً"
                       className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <MdDelete size={14} /> حذف الموظف + الحساب
@@ -1423,7 +1507,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                           className="w-full text-xs px-2 py-1.5 rounded-lg border border-border-light dark:border-border-dark bg-transparent text-text-primary-light dark:text-text-primary-dark" />
                         <button type="button" onClick={() => generateAI(label)} disabled={genBusy[label]}
                           className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg border border-primary text-primary hover:bg-primary hover:text-white transition-colors text-xs font-medium disabled:opacity-50">
-                          <MdSmartToy size={16} /> {genBusy[label] ? 'جارِ التوليد...' : 'توليد برسونا بالذكاء الاصطناعي'}
+                          <PenLine size={16} /> {genBusy[label] ? 'جارِ التوليد...' : 'توليد الهوية'}
                         </button>
                       </div>
 
@@ -1653,6 +1737,14 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                         '🧠 ذاكرة الموظف',
                         'ما قلته له أو عنه في الشات من تفضيلات وتعليمات دائمة، ودروس تقييم دوراته. يلتزم بها في كل دورة ودردشة. تُحفظ فوراً.',
                         <MemoryPanel employeeId={agent.employee_id} />
+                      )}
+
+                      {/* ── نموذج الذكاء الاصطناعي لهذا الموظف وحده (يُحفظ فوراً) ── */}
+                      {agent?.employee_id && settingsGroup(
+                        '🧠 نموذج الذكاء الاصطناعي',
+                        'النموذج الذي يكتب ويقرّر به هذا الموظف في دوراته. «يتبع العام» = نموذج الموظفين من الإعدادات. يُحفظ فوراً ويسري من دورته التالية.',
+                        <ChatModelPicker employeeId={agent.employee_id}
+                          onChanged={(m) => onNotify?.(m ? `🧠 @${label} صار يعمل بـ ${m} من دورته التالية` : `🧠 @${label} يتبع نموذج الموظفين العام`)} />
                       )}
 
                       {/* ── الأدوات: بحث الويب + خوادم MCP خارجية (تُحفظ فوراً) ── */}

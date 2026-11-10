@@ -6,6 +6,7 @@ PUT    /api/llm/providers/{provider}/key   حفظ/حذف المفتاح (مشف�
 GET    /api/llm/providers/{provider}/models  نماذج الدردشة المتاحة بمفتاح المستخدم
 POST   /api/llm/providers/{provider}/test  نداء صغير فعلي يكشف المفتاح الخاطئ ونفاد الرصيد
 PUT    /api/llm/selection/{purpose}        chat | employee — provider فارغ ⇒ إعداد النظام
+GET    /api/llm/openrouter/models          قائمة OpenRouter نفسها (اسم/سعر/سياق، الداعمة للأدوات)
 """
 from typing import Any, Dict
 
@@ -58,6 +59,11 @@ def get_models(provider: str, user: User = Depends(require_user)) -> Dict[str, A
 @router.post("/providers/{provider}/test")
 def post_test(provider: str, body: TestIn, user: User = Depends(require_user)) -> Dict[str, Any]:
     return {"ok": True, **_err(lambda: UL.test(user.id, provider, body.model))}
+
+
+@router.get("/openrouter/models")
+def get_openrouter_models(user: User = Depends(require_user)) -> Dict[str, Any]:
+    return {"ok": True, **_err(lambda: UL.openrouter_models(user.id))}
 
 
 @router.put("/selection/{purpose}")

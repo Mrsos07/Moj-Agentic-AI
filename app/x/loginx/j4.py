@@ -17,18 +17,21 @@ except ImportError:
 
 
 def _find_ldconsole() -> str:
-    """يحدّد مسار ldconsole.exe بلا ترميز صلب لحرف القرص.
+    """يحدّد مسار ldconsole.exe بلا ترميز صلب لحرف القرص أو رقم الإصدار.
 
     كان المسار مكتوباً صراحةً في الكود، فيختلف بين أجهزة المساهمين (D: عند
     أحدهم و C: عند آخر) ويُنتج تعارض دمج في كل مزامنة، ويكسر تسجيل الدخول عند
     من لا يطابق مساره. الأولوية: متغيّر البيئة ثم أول مسار موجود فعلاً.
+    الإصدارات: LDPlayer 14/9/5/3 (14 هو ما يُثبّته الموقع الآن).
     """
     env = (os.getenv("LDPLAYER_CONSOLE") or "").strip('" ')
     if env and os.path.exists(env):
         return env
     candidates = [
-        rf"{d}:\LDPlayer\LDPlayer9\ldconsole.exe" for d in ("C", "D", "E")
+        rf"{d}:\LDPlayer\LDPlayer{v}\ldconsole.exe"
+        for d in ("C", "D", "E") for v in ("14", "9", "5", "3")
     ] + [
+        r"C:\Program Files\LDPlayer\LDPlayer14\ldconsole.exe",
         r"C:\Program Files\LDPlayer\LDPlayer9\ldconsole.exe",
         r"C:\ChangZhi\LDPlayer9\ldconsole.exe",
     ]
@@ -801,6 +804,212 @@ class LDPlayerChromeAutomation:
         """فحص سريع هل العنصر موجود."""
         return self.d(**kwargs).exists(timeout=timeout)
 
+    # ---------------- PROXY (تدوير IP على المحاكي) ---------------- #
+
+    def _adb_shell(self, *cmd):
+        if not self.adb_path:
+            return ""
+        target = ["-s", self.device_serial] if self.device_serial else []
+        try:
+            r = subprocess.run([self.adb_path, *target, "shell", *cmd],
+                               capture_output=True, text=True, timeout=15)
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    def set_android_proxy(self, host: str, port: int, clear: bool = False) -> bool:
+        """بروكسي أندرويد العام عبر ADB — **بلا مصادقة فقط**.
+
+        إعداد أندرويد لا يحمل حقول username/password، لذلك مسار المحاكي يحتاج
+        مزوّداً يقبل تفويض IP (whitelist) أو مرحّل محلي بلا مصادقة. بروكسي
+        المستخدم/كلمة المرور يُترك لبصمة المتصفح على الحاسوب.
+        """
+        if clear:
+            self._adb_shell("settings", "put", "global", "http_proxy", ":0")
+            self.log("أُزيل بروكسي أندرويد", "INFO")
+            return True
+        if not host or not port:
+            self.log("host/port مطلوبان لضبط بروكسي المحاكي", "ERROR")
+            return False
+        out = self._adb_shell("settings", "put", "global", "http_proxy", f"{host}:{port}")
+        current = self._adb_shell("settings", "get", "global", "http_proxy")
+        ok = f"{host}:{port}" in (current or "")
+        self.log(f"بروكسي أندرويد: {host}:{port} ({'مفعّل' if ok else 'فشل'})",
+                 "SUCCESS" if ok else "ERROR")
+        return ok
+
+    # ---------------- CAPTCHA (Arkose / صورة) ---------------- #
+
+    _CAPTCHA_HINTS = (
+        "Verify you are human", "verify you are human", "Confirm you are human",
+        "Are you a robot", "I'm not a robot", "Whoa there", "unusual activity",
+        "تحقق من أنك", "لست روبوتاً", "نشاط غير معتاد",
+    )
+
+    @staticmethod
+    def _captcha_module():
+        """تحميل الحلّال المشترك ``app/core/captcha_solver.py`` بالمسار.
+
+        loginx يعمل بـcwd=app/x/loginx فلا يستطيع استيراد حزمة ``app``.
+        """
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        name = "moj_captcha_solver"
+        mod = sys.modules.get(name)
+        if mod is not None:
+            return mod
+        core = None
+        for parent in Path(__file__).resolve().parents:
+            for cand in (parent / "core" / "captcha_solver.py",
+                         parent / "app" / "core" / "captcha_solver.py"):
+                if cand.exists():
+                    core = cand
+                    break
+            if core:
+                break
+        if core is None:
+            return None
+        spec = importlib.util.spec_from_file_location(name, core)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _captcha_present(self):
+        """هل ظهرت شاشة تحقق بشري على المحاكي؟"""
+        if not self.d:
+            return False
+        for hint in self._CAPTCHA_HINTS:
+            try:
+                if self.u2_exists(textContains=hint, timeout=0.25):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _challenge_question(self):
+        """سؤال لغز Arkose من شجرة إمكانية الوصول (Chrome يعرض نص الإطار)."""
+        try:
+            xml = self.d.dump_hierarchy()
+        except Exception:
+            return ""
+        import xml.etree.ElementTree as ET
+
+        try:
+            root = ET.fromstring(xml)
+        except Exception:
+            return ""
+        for node in root.iter():
+            text = (node.get("text") or "").strip()
+            if len(text) >= 12 and ("?" in text or text.split(" ")[0].lower() in
+                                    ("pick", "select", "choose", "find", "use", "click")):
+                return text
+        return ""
+
+    def _bounds_for_text(self, text):
+        try:
+            el = self.d(textContains=text)
+            if el.exists(timeout=0.5):
+                bounds = el.info.get("bounds") or {}
+                if bounds.get("right", 0) > bounds.get("left", 0):
+                    return bounds
+        except Exception:
+            pass
+        return {}
+
+    def solve_captcha(self, max_rounds=4):
+        """حل كابتشا المحاكي بالتصنيف الصوري: المزوّد يحدد البلاطة ونحن ننقرها.
+
+        لا يوجد حقن JS على المحاكي، فمسار التوكن لا يعمل هنا؛ النقر على البلاطة
+        هو ما يفعله الإنسان نفسه.
+        """
+        mod = self._captcha_module()
+        if mod is None:
+            self.log("⚠️ لم أجد app/core/captcha_solver.py — لا حل آلي للكابتشا", "ERROR")
+            return False
+        if not mod.is_enabled():
+            self.log("⚠️ كابتشا ظاهرة ولا مفتاح مزوّد في .env — أضف YESCAPTCHA_KEY "
+                     "(أو TWOCAPTCHA_KEY/CAPMONSTER_KEY/ANTICAPTCHA_KEY)", "ERROR")
+            return False
+        solver = mod.get_solver()
+        if solver is None:
+            return False
+
+        question = self._challenge_question()
+        if not question:
+            self.log("⚠️ كابتشا بلا سؤال مقروء — نوع غير مدعوم على المحاكي", "ERROR")
+            return False
+        if "arrow" in question.lower():
+            # لغز الأسهم: التصنيف يعطي «أي صورة» لا «أي بلاطة»؛ ننقر شبكة فيكون
+            # النقر خطأً (عيّنة المزوّد الحقيقية q62 رجعت objects=[1]).
+            self.log("⚠️ لغز Arkose من نوع الأسهم — لا ننقر شبكة (تخطٍّ آمن)", "ERROR")
+            return False
+
+        try:
+            cols = max(1, int(os.getenv("CAPTCHA_ARKOSE_COLS", "3")))
+            rows = max(1, int(os.getenv("CAPTCHA_ARKOSE_ROWS", "2")))
+        except ValueError:
+            cols, rows = 3, 2
+
+        import io
+
+        for attempt in range(1, max_rounds + 1):
+            try:
+                img = self.d.screenshot()
+            except Exception as e:
+                self.log(f"⚠️ تعذّر تصوير الشاشة: {e}", "ERROR")
+                return False
+            width, height = img.size
+
+            # المنطقة أسفل سؤال اللغز: الشاشة كلها لو الحدود غير متاحة
+            bounds = self._bounds_for_text(question)
+            left = int(bounds.get("left") or int(width * 0.05))
+            right = int(bounds.get("right") or int(width * 0.95))
+            top = int(bounds.get("bottom") or int(height * 0.35))
+            bottom = int(height * 0.90)
+            if right - left < 100 or bottom - top < 100:
+                self.log("⚠️ حدود لغز الكابتشا غير معقولة — إلغاء الحل", "ERROR")
+                return False
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            try:
+                picks = solver.classify_funcaptcha(buf.getvalue(), question)
+            except Exception as e:
+                self.log(f"⚠️ تصنيف الكابتشا فشل: {e}", "ERROR")
+                return False
+
+            index = picks[0]
+            if index < 0 or index >= cols * rows:
+                self.log(f"⚠️ بلاطة خارج الشبكة ({index}) — إلغاء", "ERROR")
+                return False
+            col, row = index % cols, index // cols
+            tile_w = (right - left) / cols
+            tile_h = (bottom - top) / rows
+            x = int(left + col * tile_w + tile_w / 2)
+            y = int(top + row * tile_h + tile_h / 2)
+            self.log(f"كابتشا: البلاطة {index + 1}/{cols * rows} "
+                     f"(«{question[:50]}»)", "CLICK")
+            try:
+                self.d.click(x, y)
+            except Exception as e:
+                self.log(f"⚠️ فشل النقر على البلاطة: {e}", "ERROR")
+                return False
+            time.sleep(1.2)
+
+            for label in ("Verify", "Next", "Submit", "Continue",
+                          "تحقق", "التالي", "متابعة"):
+                if self.u2_click(textContains=label, timeout=1.5):
+                    break
+            time.sleep(2.5)
+            if not self._captcha_present():
+                self.log("حُلّت كابتشا المحاكي", "SUCCESS")
+                return True
+            self.log(f"↻ جولة {attempt}/{max_rounds}: اللغز ما زال ظاهراً", "PROGRESS")
+        return False
+
     # ---------------- ROBUST WEB FIELD INPUT ---------------- #
 
     def _type_via_adb(self, text):
@@ -1451,11 +1660,23 @@ class LDPlayerChromeAutomation:
         self.log("تم الضغط على زر تسجيل الدخول، انتظار تحميل الحساب...", "TASK")
 
         # ننتظر حتى تختفي صفحة Login أو يظهر خطأ (أقصى 30 ثانية)
+        captcha_attempted = False
         for _ in range(30):
             if self.u2_exists(textContains="Wrong password", timeout=0.5) or \
                self.u2_exists(textContains="كلمة المرور غير صحيحة", timeout=0.3):
                 self.log("كلمة المرور خاطئة!", "ERROR")
                 return False
+            # كابتشا «Verify you are human»: اختفاء زر Log in هنا ليس نجاحاً
+            if self._captcha_present():
+                if not captcha_attempted:
+                    captcha_attempted = True
+                    self.log("🧩 X طلب تحققاً بشرياً (كابتشا) — محاولة حل آلي…", "TASK")
+                    if self.solve_captcha():
+                        self.log("✅ حُلّت الكابتشا — نكمل تسجيل الدخول", "SUCCESS")
+                    else:
+                        self.log("⛔ لم تُحل الكابتشا آلياً — الدخول لن يكتمل", "ERROR")
+                time.sleep(1)
+                continue
             # إذا اختفى زر Log in يعني الصفحة تغيرت = نجاح
             if not self.u2_exists(text="Log in", timeout=0.5):
                 break

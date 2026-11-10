@@ -101,12 +101,12 @@ const Register = ({ onRegister }) => {
           <div className="flex justify-center mb-6">
             <img 
               src={darkMode ? logoLight : logoDark} 
-              alt="Mwj AI Logo" 
+              alt="شعار موج" 
               className="h-20 w-auto object-contain"
             />
           </div>
           <h1 className="text-3xl font-bold text-text-primary-light dark:text-text-primary-dark mb-3 flex items-center justify-center gap-2">
-            انضم إلى Mwj AI
+            انضم إلى موج
           </h1>
           <p className="text-text-secondary-light dark:text-text-secondary-dark text-base">
             ابدأ رحلتك في إدارة وسائل التواصل الاجتماعي

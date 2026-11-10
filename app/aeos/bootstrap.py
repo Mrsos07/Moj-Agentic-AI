@@ -413,16 +413,13 @@ class AEOSPlatform:
             self._repo.set_next_wake(saved.id, saved.scheduler.next_wake_at)
 
         # هوية الحساب من البرسونا — عند الإنشاء الأول فقط، في الخلفية:
-        # اسم معروض + نبذة (LLM) + صورة شخصية مولّدة تعكس التخصص، فيظهر
-        # الحساب بهوية متسقة مع شخصية الموظف من أول لحظة.
+        # اسم معروض + نبذة (LLM). لا صورة: الصورة والهيدر يعاينهما المالك
+        # ويعتمدهما أولاً (identity_service) — لا يُرفع شيء بصري لم يره.
         if newly_created and enabled:
             try:
                 from .services.identity import apply_persona_identity_async
 
-                apply_persona_identity_async(
-                    saved, llm=self._llm,
-                    mcp=self.container.resolve(MCPRegistry), repo=self._repo,
-                )
+                apply_persona_identity_async(saved, llm=self._llm, repo=self._repo)
             except Exception:  # noqa: BLE001
                 logger.exception("identity apply scheduling failed for %s", saved.id)
 
@@ -430,6 +427,7 @@ class AEOSPlatform:
 
     def _agent_view(self, cfg) -> Dict[str, Any]:
         from .scheduler.timewindow import is_within_active_hours
+        from .services import identity_store
 
         return {
             "employee_id": cfg.id,
@@ -451,6 +449,8 @@ class AEOSPlatform:
             "installed_skills": list(cfg.installed_skills or []),
             "mcp_servers": list(cfg.mcp_servers or []),
             "business_rules": dict(cfg.business_rules or {}),
+            # هوية الحساب كما قُرئت من X (اسم/نبذة/صورة/هيدر) — تعرضها بطاقة الموظف
+            "x_profile": identity_store.load_x_profile(cfg.id),
         }
 
     def get_agent_by_account(self, platform: str, account_username: str) -> Optional[Dict[str, Any]]:
@@ -492,6 +492,13 @@ class AEOSPlatform:
             employee_mcp.purge(employee_id, self.container.resolve(MCPRegistry))
         except Exception:  # noqa: BLE001
             logger.exception("purging employee MCP servers failed")
+        # هويته المعتمدة/المعلّقة تُحذف معه حتى لا يستأنفها الإقلاع التالي
+        try:
+            from .services import identity_store
+
+            identity_store.purge(employee_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("purging employee identity store failed")
         return bool(self._repo.delete(employee_id))
 
     def delete_agent(self, platform: str, account_username: str) -> bool:

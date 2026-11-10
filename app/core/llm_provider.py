@@ -25,8 +25,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-#: مالك النداءات الجارية في هذا الخيط/السياق: (user_id, purpose). تضبطه دورة الموظف
-#: (purpose="employee") فيوجّه ``RoutedLLMProvider`` كل نداءات الدورة لنموذج مالكه.
+#: مالك النداءات الجارية في هذا الخيط/السياق: (user_id, purpose[, employee_selection]). تضبطه دورة
+#: الموظف (purpose="employee" + ``business_rules.llm`` للموظف إن وُجد) فيوجّه ``RoutedLLMProvider``
+#: كل نداءات الدورة لنموذج الموظف نفسه، وإلا نموذج «الموظفين» العام لمالكه.
 LLM_OWNER: contextvars.ContextVar = contextvars.ContextVar("llm_owner", default=None)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

@@ -181,16 +181,11 @@ def create_employee(body: EmployeeIn, current_user: User = Depends(get_current_u
     )
     saved = platform.repository.save(cfg)
 
-    # هوية الحساب من البرسونا عند الإنشاء (اسم + نبذة + صورة) — في الخلفية
+    # هوية الحساب من البرسونا عند الإنشاء (اسم + نبذة، بلا صورة) — في الخلفية
     try:
-        from ..mcp.registry import MCPRegistry
         from ..services.identity import apply_persona_identity_async
 
-        apply_persona_identity_async(
-            saved, llm=platform.llm,
-            mcp=platform.container.resolve(MCPRegistry),
-            repo=platform.repository,
-        )
+        apply_persona_identity_async(saved, llm=platform.llm, repo=platform.repository)
     except Exception:  # noqa: BLE001
         logger.exception("identity apply scheduling failed for %s", saved.id)
 
@@ -416,13 +411,43 @@ def identity_field(employee_id: str, body: IdentityFieldIn,
 def identity_apply(employee_id: str, body: IdentityApplyIn,
                    current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """يطبّق الهوية على حساب X في الخلفية (متصفح + كوكيز الحساب) ويعيد
-    إقراراً فورياً؛ النتيجة النهائية تُدفع لشات المستخدم عند الاكتمال."""
-    from ..services import identity_service
+    إقراراً فورياً؛ النتيجة النهائية تُدفع لشات المستخدم عند الاكتمال.
+    صور المعاينة تُثبَّت لحظة الاعتماد — إن لم تعد متاحة يُرفض الطلب برسالة
+    واضحة بدل تطبيق صورة غير التي يراها المالك."""
+    from ..services import identity_service, identity_store
 
     cfg = _employee_or_404(employee_id, current_user)
     # النتيجة تُدفع لشات المستخدم الموثَّق — لا لرقم يرسله المتصفح
-    ack = identity_service.request_apply_identity(cfg, current_user.id, identity=body.identity)
+    try:
+        ack = identity_service.request_apply_identity(cfg, current_user.id, identity=body.identity)
+    except identity_store.IdentityError as exc:
+        raise HTTPException(400, str(exc))
     return {"ok": True, "message": ack}
+
+
+@router.get("/employees/{employee_id}/x-profile")
+def x_profile(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """هوية الحساب كما قُرئت من X آخر مرة (اسم/نبذة/صورة/هيدر) — لبطاقة الموظف، بلا متصفح."""
+    from ..services import identity_store
+
+    cfg = _employee_or_404(employee_id, current_user)
+    return {"ok": True, "x_profile": identity_store.load_x_profile(cfg.id)}
+
+
+@router.post("/employees/{employee_id}/x-profile/refresh")
+def x_profile_refresh(employee_id: str,
+                      current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """يقرأ هوية الحساب من X الآن ويحدّث البطاقة (~15-30ث). طلب تفاعلي: يفشل سريعاً
+    برسالة واضحة إن كان المتصفح محجوزاً بدورة موظف."""
+    from ..services import identity_service
+
+    cfg = _employee_or_404(employee_id, current_user)
+    try:
+        snap = identity_service.refresh_x_profile(cfg, lock_timeout=25.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("x profile refresh failed for %s: %s", employee_id, exc)
+        raise HTTPException(502, str(exc))
+    return {"ok": True, "x_profile": snap}
 
 
 @router.get("/stats")
@@ -756,6 +781,38 @@ def _save_skill(cfg, spec):
     saved = CS.save_spec(cfg, clean)
     get_platform().repository.save(cfg)
     return saved
+
+
+class EmployeeLLMIn(BaseModel):
+    provider: str = ""
+    model: str = ""
+
+
+@router.get("/employees/{employee_id}/llm")
+def get_employee_llm(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """نموذج هذا الموظف: اختياره الخاص، ونموذج الموظفين العام لمالكه، وما يعمل به فعلاً."""
+    from app.services import user_llm as UL
+
+    cfg = _employee_or_404(employee_id, current_user)
+    return {"ok": True, "employee_id": cfg.id, **UL.employee_view(cfg.user_id or current_user.id, cfg)}
+
+
+@router.put("/employees/{employee_id}/llm")
+def put_employee_llm(employee_id: str, body: EmployeeLLMIn,
+                     current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """اختيار نموذج خاص لهذا الموظف (provider فارغ ⇒ يتبع نموذج الموظفين العام). يسري من دورته التالية.
+
+    يُتحقق بمفاتيح **مالك الموظف** وصلاحيته (رصيد النظام للمدير/المطوّر فقط)."""
+    from app.services import user_llm as UL
+
+    cfg = _employee_or_404(employee_id, current_user)
+    owner = cfg.user_id or current_user.id
+    try:
+        UL.set_employee_selection(owner, cfg, body.provider, body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    get_platform().repository.save(cfg)
+    return {"ok": True, "employee_id": cfg.id, **UL.employee_view(owner, cfg)}
 
 
 @router.get("/employees/{employee_id}/skills")

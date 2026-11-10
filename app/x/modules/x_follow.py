@@ -1,7 +1,10 @@
-import os
-from playwright.sync_api import sync_playwright
-
 from .x_unfollow import unfollow_user  # noqa: F401 - المسار القديم لإلغاء المتابعة
+from .x_captcha import guard as _captcha_guard
+from .x_captcha import goto as _goto
+from .x_captcha import launch_browser as _launch_browser
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import sync_playwright
+from .sync_bridge import sync_safe
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -19,21 +22,18 @@ def _visible(page, selector: str, timeout_ms: int) -> bool:
         return False
 
 
+@sync_safe
 def follow_user(storage_state_path: str, profile_url: str, headless: bool, wait_after_ms: int = 3000) -> str:
     """Follow a profile. Returns ``"done"`` (verified: header button became ``-unfollow``)
     or ``"already"`` (was already followed)."""
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-
     with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(channel=chrome_channel, headless=headless)
-        except Exception:
-            browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        browser = _launch_browser(p, headless=headless)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
-            page.goto(profile_url, wait_until="domcontentloaded")
+            _goto(page, profile_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             follow_sel = f'{_HEADER} [data-testid$="-follow"]'
             unfollow_sel = f'{_HEADER} [data-testid$="-unfollow"]'
             if not _visible(page, follow_sel, 20_000):

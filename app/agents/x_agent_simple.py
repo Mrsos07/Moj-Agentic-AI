@@ -765,8 +765,15 @@ class XAgent:
                 webhook_base = (context or {}).get("webhook_base") or "http://127.0.0.1:3000"
                 from app.auth.internal import signed_url
 
+                # صالح حتى موعد النشر + يوم (التوقيع v2 بمهلة ومرة واحدة)
+                try:
+                    from datetime import datetime as _dt
+
+                    ttl = max(3600, int((run_at_for_bridge - _dt.now()).total_seconds()) + 86400)
+                except Exception:  # noqa: BLE001
+                    ttl = None
                 callback_url = signed_url(f"{webhook_base}/api/webhooks/schedule_callback",
-                                          "schedule", event.schedule_event_id)
+                                          "schedule", event.schedule_event_id, ttl=ttl)
 
                 bridge_result = x_bridge.schedule_post(
                     event_id=event.schedule_event_id,

@@ -611,6 +611,16 @@ def check_no_false_success_on_status_page() -> None:
     check("ويفشل صريحاً إن لم يتأكّد الإرسال",
           "لم يتم تأكيد نشر الاقتباس" in src)
 
+    # الرد: محرّر المودال وزرّه لا المحرّر المضمّن خلف القناع (mask intercepts pointer events)
+    src = inspect.getsource(x_actions.reply_to_tweet)
+    check("الرد يكتب وينشر ويتأكّد داخل نطاق محرّر واحد",
+          "_open_reply_composer" in src and "_click_reply_publish(scope)" in src
+          and "scope=scope" in src and "_click_first_visible(page, publish" not in src)
+    check("الرد لا يفقد النص إن فشل fill (كان Ctrl+A بلا كتابة)",
+          "tb.type(reply_text" in src)
+    check("نطاق الرد هو المودال الحاوي للمحرّر",
+          "div[role='dialog']:has(" in inspect.getsource(x_actions._reply_scope))
+
     # كل إجراء يغيّر حالة على X يجب أن يتحقّق من أثره لا أن يفترضه
     for fn, marker in (
         (x_actions.like_tweet, "unlike"),
@@ -622,6 +632,257 @@ def check_no_false_success_on_status_page() -> None:
         body = inspect.getsource(fn)
         check(f"{fn.__name__} يتحقّق من نجاحه فعلياً",
               marker in body and "raise" in body, marker)
+
+
+def check_x_error_screen_recovery() -> None:
+    """شاشة X «Something went wrong… Try again» (failedScript=vendor عبر البروكسي) تُشفى بالضغط.
+
+    قيس 2026-10-26: دورة كاملة بلا فعل لأن كل قراءات X انتظرت 45 ث شاشة لا تتغير أبداً."""
+    from app.aeos.mcp.servers import playwright_x_mcp as PX
+    mod = sys.modules[type(PX.PlaywrightXMCP()).__module__]
+
+    class _Loc:
+        def __init__(self, page, kind):
+            self.page, self.kind = page, kind
+
+        @property
+        def first(self):
+            return self
+
+        def wait_for(self, state="visible", timeout=0):
+            if not self.page.content_ok:
+                raise TimeoutError("Locator.wait_for: Timeout")
+
+        def count(self):
+            return 1 if (self.kind == "btn" and not self.page.content_ok) else 0
+
+        def is_visible(self):
+            return self.count() > 0
+
+        def click(self, timeout=0):
+            self.page.clicks += 1
+            if self.page.clicks >= self.page.heal_after:
+                self.page.content_ok = True
+
+    class _Page:
+        url = "https://x.com/home?failedScript=vendor"
+
+        def __init__(self, heal_after):
+            self.content_ok, self.clicks, self.heal_after = False, 0, heal_after
+
+        def locator(self, sel):
+            return _Loc(self, "cards")
+
+        def get_by_role(self, role, name=None):
+            return _Loc(self, "btn")
+
+    page = _Page(heal_after=2)
+    mod._wait_cards(page, 'article[data-testid="tweet"]', 20_000)
+    check("شاشة خطأ X تُشفى بـ«Try again» (ضغطتان) بدل انتظار المهلة", page.content_ok and page.clicks == 2)
+    page = _Page(heal_after=99)
+    try:
+        mod._wait_cards(page, 'article[data-testid="tweet"]', 1_500, retries=3)
+        ok = False
+    except TimeoutError as exc:
+        ok = "Something went wrong" in str(exc) and page.clicks == 3
+    check("وإن لم تُشفَ: فشل واضح بسببه بعد 3 محاولات (لا ضغط بلا حد)", ok)
+
+
+def check_reply_modal_race() -> None:
+    """مودال الرد: القناع يغطي الصفحة فوراً والمودال ارتفاعه 0 حتى يُحمَّل محتواه (قيس 2026-10-28
+    عبر البروكسي). كان النطاق يُعاد «الصفحة» فيُنقر المحرّر المضمّن خلف القناع ← Timeout 30 ث."""
+    from app.x.modules import x_actions as XA
+
+    class _L:
+        def __init__(self, page, sel, inside=None):
+            self.page, self.sel, self.inside = page, sel, inside
+
+        first = property(lambda self: self)
+        last = property(lambda self: self)
+
+        def locator(self, sel):
+            return _L(self.page, sel, inside=self.sel)
+
+        def _present(self):
+            st = self.page.st
+            if self.sel == "#layers [data-testid='mask']":
+                return st["mask"]
+            if self.sel.startswith("div[role='dialog']"):
+                return st["dialog_tb"]
+            if self.sel == XA._REPLY_TB:
+                return st["dialog_tb"] if self.inside else (st["dialog_tb"] or st["inline_tb"])
+            return False
+
+        def count(self):
+            return 1 if self._present() else 0
+
+        def is_visible(self):
+            if self.sel.startswith("div[role='dialog']"):
+                return False                     # ارتفاع 0 أثناء التحميل
+            return self._present()
+
+    class _P:
+        def __init__(self, **st):
+            self.st = st
+
+        def locator(self, sel):
+            return _L(self, sel)
+
+    p = _P(mask=True, dialog_tb=True, inline_tb=True)
+    scope = XA._reply_scope(p)
+    check("مودال ارتفاعه 0 لكن محرّره موجود ← النطاق هو المودال لا الصفحة",
+          scope is not p and getattr(scope, "sel", "").startswith("div[role='dialog']"))
+    p = _P(mask=True, dialog_tb=False, inline_tb=True)
+    check("قناع مودال بلا محرّر بعد ← لا يُختار المحرّر المضمّن خلف القناع",
+          XA._reply_scope(p) is p and XA._modal_layer_open(p))
+    p = _P(mask=False, dialog_tb=False, inline_tb=True)
+    check("بلا مودال ← المحرّر المضمّن تحت التغريدة (سلوك صحيح)",
+          XA._reply_scope(p) is p and not XA._modal_layer_open(p))
+
+
+def check_reply_fits_x_limit() -> None:
+    """الرد لا يتجاوز حد X: رد من 3 نقاط تجاوز 280 فعطّل X زر «ردّ» (قيس 2026-10-28، العدّاد ‎-13)."""
+    from app.aeos.capabilities import handlers as H
+    from app.aeos.capabilities.base import CapabilityRequest
+    from app.aeos.mcp.base import MCPResponse
+    from app.x.modules import x_actions as XA
+    from app.x.modules.x_text import fit, weighted_len
+
+    failed = ("1) الزيارة هنا ليست بروتوكولاً فقط؛ هي رسالة جاهزية على الحد الجنوبي، حيث تُقاس الوقائع لا "
+              "الشعارات.\n2) هذا هو الفارق بين دولةٍ تُثبت حضورها بالميدان، وبين ميليشيا تعيش على التضليل "
+              "والاختباء.\n3) طبعاً، من يفهم الرسائل العسكرية يدرك لماذا يُستفز خصوم الأمن كلما ظهرت "
+              "القيادة بين المرابطين.")
+    check("عدّ X: العربية حرف، الإيموجي حرفان، الرابط 23",
+          weighted_len("مرحبا") == 5 and weighted_len("👍") == 2
+          and weighted_len("https://example.com/a/very/long/path") == 23)
+    short = fit(failed, 270)
+    check("القصّ عند نهاية جملة تامة (لا نص مبتور) وضمن الحد",
+          weighted_len(short) <= 270 and short.endswith(".") and "3)" not in short, short[-40:])
+
+    class _MCP:
+        def __init__(self):
+            self.sent = []
+
+        def call(self, req):
+            if req.tool == "generate":
+                return MCPResponse.ok(text=failed)
+            self.sent.append(dict(req.params))
+            return MCPResponse.ok()
+
+    ctx = make_context(make_config(unslop=False), with_signals=False)
+    ctx.mcp = _MCP()
+    orig = H._record_interaction
+    H._record_interaction = lambda *a, **k: None
+    try:
+        res = H.ReplyToUserCapability().execute(CapabilityRequest(
+            name="reply_to_user", params={"tweet_url": "https://x.com/a/status/1",
+                                          "original_text": "زيارة رئيس الأركان للحد الجنوبي"}), ctx)
+    finally:
+        H._record_interaction = orig
+    sent = (ctx.mcp.sent or [{}])[0].get("reply_text", "")
+    check("رد مولَّد أطول من الحد ← يُرسَل مقصوصاً ضمن 270", res.success and 0 < weighted_len(sent) <= 270,
+          f"{weighted_len(sent)}")
+    try:
+        XA.reply_to_tweet("x.json", "https://x.com/a/status/1", failed + " " + failed, headless=True)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("طبقة النشر تفشل فوراً بسبب واضح إن وصلها نص فوق الحد (لا انتظار دقيقتين)",
+          "أطول من حد X" in msg, msg)
+
+
+def check_handle_change_followed() -> None:
+    """المالك غيّر يوزر الحساب على X (nxjrjrjdj ← nxjrjrjdj2): الهوية والأداء يُقرآن من اليوزر الحالي."""
+    import tempfile
+
+    from app.aeos.mcp.servers import playwright_x_mcp as PX
+    from app.aeos.services import identity_store as IS
+
+    mod = sys.modules[type(PX.PlaywrightXMCP()).__module__]
+
+    class _Link:
+        first = property(lambda self: self)
+
+        def wait_for(self, state="attached", timeout=0):
+            pass
+
+        def get_attribute(self, name):
+            return "/nxjrjrjdj2"
+
+    class _Page:
+        def locator(self, sel):
+            return _Link()
+
+    check("اليوزر الحالي يُقرأ من رابط «الملف الشخصي» في قائمة X", mod._own_handle(_Page()) == "nxjrjrjdj2")
+    orig = IS._dir
+    tmp = tempfile.mkdtemp()
+    IS._dir = lambda eid: __import__("pathlib").Path(tmp) / eid
+    try:
+        snap = IS.save_x_profile("e1", "nxjrjrjdj", {"name": "صقر", "handle": "nxjrjrjdj2"}, "live")
+    finally:
+        IS._dir = orig
+    check("البطاقة تحفظ اليوزر الحالي وتسجّل القديم", snap["handle"] == "nxjrjrjdj2"
+          and snap.get("handle_changed_from") == "nxjrjrjdj", str(snap))
+
+
+def check_mcp_usage_plan() -> None:
+    """خطة استخدام خادم MCP: لا وسائط مخترعة ولا أدوات كتابة، والردود تُختصر لسطر مقروء."""
+    import json
+
+    from app.aeos.employee import tool_use as T
+
+    c = {"slug": "trendsmcp", "tools": [
+        {"name": "trends___get_top_trends", "inputSchema": {"properties": {"type": {}, "country": {}},
+                                                            "required": ["type"]}},
+        {"name": "trends___get_growth", "inputSchema": {"properties": {"keyword": {}, "source": {}},
+                                                        "required": ["keyword", "source"]}},
+        {"name": "delete_all", "inputSchema": {"properties": {}}}]}
+    plan = T._valid_plan(c, {"tools": [
+        {"tool": "trends___get_top_trends", "phase": "observe", "args": {"type": "TikTok", "hack": 1}},
+        {"tool": "trends___get_growth", "phase": "observe", "args": {}},
+        {"tool": "trends___get_growth", "phase": "research", "topic_arg": "keyword", "args": {"source": "x"}},
+        {"tool": "delete_all", "phase": "observe", "args": {}}]})
+    check("الخطة تُسقط الوسائط المخترعة", plan and plan[0]["args"] == {"type": "TikTok"}, str(plan))
+    check("الخطة تُسقط أداة ينقصها وسيط مطلوب وأدوات الكتابة",
+          [(p["tool"], p["phase"]) for p in plan] == [("trends___get_top_trends", "observe"),
+                                                      ("trends___get_growth", "research")], str(plan))
+    check("خطة فاسدة من النموذج ← لا شيء", T._valid_plan(c, "garbage") == [])
+    wrap = lambda b: json.dumps({"statusCode": 200, "body": json.dumps(b)})  # noqa: E731
+    check("لوحة فارغة ← لا إشارة", T._compact(wrap({"count": 0, "data": []})) == "")
+    check("لوحة ترند ← سطر مرتّب", T._compact(wrap({"data": [[1, "ترند"], [2, "الرياض"]]})) == "1) ترند، 2) الرياض")
+    cut = wrap({"sources": [{"source": "YouTube", "items": [{"title": "تطورات الحوثي اليوم"},
+                                                            {"title": "عنوان يُقطع في منتصفه"}]}]})[:-30]
+    check("رد مقطوع ← العناوين", T._compact(cut) == "تطورات الحوثي اليوم", T._compact(cut))
+
+
+def check_specialty_trends_drive_cycle() -> None:
+    """ترندات التخصص (أدوات MCP): بحث X يبحث بها، وتصير مرشّح منشور حتى بلا تطابق كلمات."""
+    from app.aeos.capabilities.base import CapabilityRequest
+    from app.aeos.capabilities.handlers import BrowseSpecialtyNewsCapability
+    from app.aeos.mcp.base import MCPResponse
+    from app.aeos.skills.builtin import _grounded_candidates
+
+    cfg = make_config()
+    cfg.persona.interests = ["politics"]
+    ctx = make_context(cfg, with_signals=False)
+    seen = {}
+
+    class _MCP:
+        def call(self, req):
+            seen.update(req.params)
+            return MCPResponse.ok(tweets=[{"text": "اعتراض مسيّرة حوثية جديدة اليوم", "url": "https://x.com/a/status/1"}])
+
+    ctx.mcp = _MCP()
+    ctx.scratch["specialty_trends"] = [{"topic": "اليمن والحوثيون", "x_query": "مسيّرة حوثية", "why": "تصعيد",
+                                        "headlines": ["اعتراض وتدمير طائرة مسيرة أطلقها الحوثيون باتجاه مكة المكرمة"]}]
+    ctx.scratch["trend_x_queries"] = ["مسيّرة حوثية"]
+    BrowseSpecialtyNewsCapability().execute(CapabilityRequest(name="browse_specialty_news", params={}), ctx)
+    check("بحث X يبحث بموضوع ترند التخصص أولاً", '"مسيّرة حوثية"' in seen.get("query", ""), seen.get("query"))
+    check("تغريدات موضوع الترند تمر فلتر الصلة", len(ctx.scratch.get("specialty_news") or []) == 1)
+    cands = _grounded_candidates(ctx)
+    st = next((c for c in cands if c["source"] == "specialty_trend"), None)
+    check("موضوع ترند التخصص مرشّح منشور مع تغريدات X عنه",
+          st is not None and "اعتراض مسيّرة حوثية" in st["summary"], str(st)[:200])
 
 
 def check_emotion_comes_from_graph_memory() -> None:
@@ -1185,6 +1446,17 @@ def main() -> int:
     check_browser_slot()
     print("\n=== 5g) لا نجاح كاذب في الاقتباس ===")
     check_no_false_success_on_status_page()
+    print("\n=== 5g2) شاشة خطأ X تُشفى تلقائياً ===")
+    check_x_error_screen_recovery()
+    print("\n=== 5g3) سباق مودال الرد (القناع قبل المودال) ===")
+    check_reply_modal_race()
+    print("\n=== 5g4) الرد ضمن حد X ===")
+    check_reply_fits_x_limit()
+    print("\n=== 5g5) تغيّر يوزر الحساب على X ===")
+    check_handle_change_followed()
+    print("\n=== 5g6) خطة استخدام خوادم MCP ===")
+    check_mcp_usage_plan()
+    check_specialty_trends_drive_cycle()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")

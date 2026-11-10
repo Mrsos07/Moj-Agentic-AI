@@ -143,6 +143,29 @@ def raw(slug: str) -> str:
     return (SKILLS_DIR / sk["slug"] / FILE).read_text(encoding="utf-8") if sk else ""
 
 
+_RESOURCE_EXT = {".md", ".markdown", ".txt", ".json", ".yaml", ".yml"}
+_MAX_RESOURCE = 60_000
+
+
+def read_resource(slug: str, rel: str) -> str:
+    """ملف نصي مرجعي داخل مجلد المهارة (SKILL.md يحيل إليه: references/…). لا خروج من المجلد
+    ولا كود: المنسّق يقرأ المعرفة لا السكربتات، وطول محدود حتى لا يُغرق سياقه."""
+    base = (SKILLS_DIR / slug).resolve()
+    rel = (rel or "").strip().replace("\\", "/").split("#", 1)[0].lstrip("/")
+    path = (base / rel).resolve()
+    if base not in path.parents or not path.is_file():
+        raise LookupError(f"ملف غير موجود في المهارة {slug}: {rel}")
+    if path.suffix.lower() not in _RESOURCE_EXT:
+        raise ValueError("يُقرأ من المهارة ملفات نصية مرجعية فقط (md/txt/json/yaml)")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return text if len(text) <= _MAX_RESOURCE else text[:_MAX_RESOURCE] + "\n…(مقتطع)"
+
+
+def is_enabled(slug: str) -> bool:
+    """تفعيل مهارة نظام من اللوحة — قراءة حالة فقط بلا تحليل كل SKILL.md (يُستدعى عند كل كتابة)."""
+    return bool(_meta(slug).get("enabled", True))
+
+
 def coordinator_skills() -> List[Dict[str, Any]]:
     return [s for s in list_skills(enabled_only=True)
             if not s.get("error") and s.get("kind", "coordinator") == "coordinator"]

@@ -158,7 +158,6 @@ const LandingPage = ({ darkMode, setDarkMode, user, onLogout }) => {
                     <span className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark truncate">
                       {user?.name || user?.email}
                     </span>
-                    <span className="text-xs text-text-secondary-light dark:text-text-secondary-dark truncate">Pro Plan</span>
                   </div>
                   <ChevronDown className="text-text-secondary-light dark:text-text-secondary-dark transition-transform" size={16} />
                 </button>

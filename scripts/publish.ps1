@@ -37,11 +37,18 @@ if ($LASTEXITCODE -ne 0) { Fail "تعذّر الاتصال بـ GitHub (git fetc
 
 git add -A
 $staged = @(git diff --cached --name-only)
+# مسارات ممنوعة: جلسات X (كوكيز/ملفات تعريف المتصفح)، الأسرار، قواعد البيانات
+$forbiddenRe = '(^|/)\.env($|\.(?!.*example$))|^data/|cookie|debug_.*\.html$|\.har$|chrome_profile|storage_state|\.db$|\.sqlite3?$|__pycache__|\.pyc$|system_mcp_secrets|internal_secrets'
+# مفاتيح المزوّدين + قيم جلسات X (auth_token 40 hex، ct0 ≥32 hex) بأي صيغة (JSON/نص)
+$secretRe = 'tmcp_live_[A-Za-z0-9]{8}|tvly-(dev-)?[A-Za-z0-9-]{16}|sk-or-v1-[A-Za-z0-9]{20}|sk-(proj-)?[A-Za-z0-9_-]{32}|ghp_[A-Za-z0-9]{30}|github_pat_[A-Za-z0-9_]{30}|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|auth_token[^0-9a-f\r\n]{0,40}[0-9a-f]{40}|ct0[^0-9a-f\r\n]{0,40}[0-9a-f]{32,}'
+# شكل ملف تصدير كوكيز X (القيمة في السطر التالي) — لغير ملفات الكود (الكود يبنيه من متغيرات)
+$cookieExportRe = '"name"\s*:\s*"(auth_token|ct0|twid|kdt)"'
 if ($staged.Count) {
-    $forbidden = $staged | Where-Object { $_ -match '(^|/)\.env($|\.)|^data/|cookies|\.db$|__pycache__|\.pyc$|system_mcp_secrets|internal_secrets' }
+    # الحذف من المستودع (إخراج ملف ممنوع من التتبّع) مسموح؛ الإضافة/التعديل لا
+    $forbidden = @(git diff --cached --name-only --diff-filter=d) | Where-Object { $_ -match $forbiddenRe }
     if ($forbidden) { git reset -q; Fail "ملفات ممنوعة في التغييرات — لم يُنشر شيء:`n  $($forbidden -join "`n  ")" }
-    $secretRe = 'tmcp_live_[A-Za-z0-9]{8}|tvly-(dev-)?[A-Za-z0-9-]{16}|sk-or-v1-[A-Za-z0-9]{20}|sk-(proj-)?[A-Za-z0-9_-]{32}|ghp_[A-Za-z0-9]{30}|github_pat_[A-Za-z0-9_]{30}|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY'
-    $hits = git diff --cached -U0 | Select-String -Pattern $secretRe | Where-Object { $_.Line -like '+*' }
+    $hits = @(git diff --cached -U0 | Select-String -Pattern $secretRe | Where-Object { $_.Line -like '+*' }) +
+            @(git diff --cached -U0 -- . ':(exclude)*.py' | Select-String -Pattern $cookieExportRe | Where-Object { $_.Line -like '+*' })
     if ($hits) { git reset -q; Fail "نمط مفتاح سري في الفروق — لم يُنشر شيء (السطور: $($hits.Count)). انقل القيمة إلى .env أو data/." }
 
     if (-not $Message) { $Message = "تحديث: " + (($staged | ForEach-Object { Split-Path $_ -Leaf } | Select-Object -First 6) -join "، ") }
@@ -59,6 +66,12 @@ git merge-base --is-ancestor origin/main main
 if ($LASTEXITCODE -ne 0) { Fail "GitHub فيه commits ليست هنا — اسحبها أولاً (git pull --ff-only). لا force push." }
 $ahead = [int](git rev-list --count origin/main..main)
 if ($ahead -gt 0) {
+    # فحص الشجرة كاملة قبل الرفع: ملف ممنوع تُتبّع قبل قاعدة .gitignore لا يظهر في الفروق
+    # (هكذا رُفعت كوكيز X: app/x/loginx2026/cookies و loginx/CookiesBackup)
+    $treeBad = @(git ls-tree -r --name-only main) | Where-Object { $_ -match $forbiddenRe -and $_ -notmatch '\.(py|html|md)$' }
+    if ($treeBad) { Fail "ملفات ممنوعة متتبّعة في main — لم يُرفع شيء:`n  $($treeBad -join "`n  ")`nأخرجها: git rm -r --cached <path>" }
+    $treeHits = @(git grep -I -l -E $secretRe main -- . 2>$null) + @(git grep -I -l -E $cookieExportRe main -- . ':(exclude)*.py' 2>$null)
+    if ($treeHits) { Fail "نمط مفتاح/جلسة في ملفات متتبّعة — لم يُرفع شيء:`n  $($treeHits -join "`n  ")" }
     git push -q origin main
     if ($LASTEXITCODE -ne 0) { Fail "فشل الرفع إلى GitHub" }
     Write-Host "✅ رُفع إلى GitHub ($ahead commit)" -ForegroundColor Green
