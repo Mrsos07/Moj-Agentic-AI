@@ -77,3 +77,6 @@ Dockerfile*
 docker-compose*.yml
 .dockerignore
 deploy/
+
+# النسخ الاحتياطية (كوكيز X وأسرار) — لا تُنسخ للصورة أبداً
+backups/
