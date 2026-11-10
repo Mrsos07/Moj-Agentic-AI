@@ -57,7 +57,18 @@
   (post + thread), BEFORE `_maybe_generate_image`:
   1. The LLM writes English literal-scene queries and picks image/video, plus things to avoid.
   2. Pixabay search: horizontal, safesearch; video ≤ 60 s and ≤ 40 MB, otherwise it falls back to an image.
-  3. The LLM picks a match by tags, or 0 (no misleading stock).
+  3. Selection (hardened after a live test on 2026-11-09):
+     - The news post «اعتراض مسيّرة حوثية» first got a «ufo, intercept, science fiction» image,
+       because the tag `intercept` matched. An opinion post got a chalkboard. «oil prices chart» returned forex graphs.
+     - Now `_FAKE_TAGS` drops fantasy/concept/illustration tags deterministically. The LLM scores
+       candidates 0-10, and only scores ≥ 7 survive.
+     - Then `_vision_ok` (system model, `detail: low`) LOOKS at the preview of the best two. If vision
+       is unavailable, a pick needs a score ≥ 8.
+     - The plan prompt says: skip unless the post is about something physical, and query the object
+       itself, never a chart or concept.
+     - Live results: the oil post got an oil rig / petrol station image; fireworks got a 2 MB video;
+       the drone interception got nothing, because the military stock looked like another country's
+       (that is correct: it falls back to a generated image).
   4. The same file is not reused per employee for 30 days.
   Policy is `business_rules.stock_media` = `auto` (default: only when the source has no media) | `prefer` | `off`,
   and `stock_media_kind` = `auto` | `image` | `video`. Test: section 5g7 of `verify_creator.py`.

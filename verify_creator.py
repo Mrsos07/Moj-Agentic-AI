@@ -909,6 +909,7 @@ def check_stock_media() -> None:
                                                 "tags": "missile, night", "duration": 300, "size": 1}])
             return MCPResponse.ok(results=[
                 {"id": 1, "kind": "image", "url": "https://pixabay.com/get/a.jpg", "tags": "beach, sunset", "width": 1920},
+                {"id": 4, "kind": "image", "url": "https://pixabay.com/get/u.jpg", "tags": "ufo, intercept, science fiction", "width": 1920},
                 {"id": 2, "kind": "image", "url": "https://pixabay.com/get/b.jpg", "tags": "missile, air defense, night", "width": 1920},
                 {"id": 3, "kind": "image", "url": "https://pixabay.com/get/c.jpg", "tags": "small", "width": 300}])
 
@@ -918,11 +919,15 @@ def check_stock_media() -> None:
         def complete_json(self, system, prompt, temperature=0.2):
             if "queries" in system:
                 return {"queries": ["air defense missile night", "صاروخ"], "kind": "video", "avoid": ["flags"]}
-            return {"choice": 2 if "missile, air defense" in prompt.split("2.")[1][:60] else 1}
+            seen.append(prompt)
+            lines = [ln for ln in prompt.splitlines() if re.match(r"^\d+\. \[", ln)]
+            return {"scores": [{"n": i + 1, "score": 9 if "missile" in ln else 2} for i, ln in enumerate(lines)]}
 
+    seen = []
     ctx.mcp, ctx.llm = _MCP(), _LLM()
-    orig_avail, orig_path = SM.available, SM._USED_PATH
+    orig_avail, orig_path, orig_vision = SM.available, SM._USED_PATH, SM._vision_ok
     SM.available = lambda c: True
+    SM._vision_ok = lambda text, cand: None          # بلا رؤية: يُقبل فقط ما درجته ≥ 8
     SM._USED_PATH = Path(tempfile.mkdtemp()) / "used.json"
     try:
         url = SM.find(ctx, "اعتراض صاروخ باليستي فوق الرياض الليلة")
@@ -930,13 +935,17 @@ def check_stock_media() -> None:
         check("الصورة المطابقة للموضوع تُختار (لا الأولى ولا الصغيرة)", url.endswith("b.jpg"), url)
         check("كلمات البحث إنجليزية فقط (الحروف غير اللاتينية تُحذف)",
               all(re.fullmatch(r"[A-Za-z0-9 \-]*", p.get("q", "")) for _, p in calls), str(calls)[:200])
+        check("وسوم خيالية (ufo/science fiction) تُسقط قبل التقييم", seen and "ufo" not in seen[0])
         url2 = SM.find(ctx, "اعتراض صاروخ باليستي فوق الرياض الليلة")
         check("الملف نفسه لا يتكرر للموظف", url2 != url, url2)
+        SM._vision_ok = lambda text, cand: False
+        SM._USED_PATH = SM._USED_PATH.with_name("used2.json")
+        check("رفض فحص الرؤية ← لا ميديا (لا صورة مضلِّلة)", SM.find(ctx, "اعتراض صاروخ باليستي") == "")
         cfg.business_rules["stock_media"] = "off"
         SM.available = orig_avail
         check("stock_media=off ← لا بحث", SM.enabled(cfg) is False)
     finally:
-        SM.available, SM._USED_PATH = orig_avail, orig_path
+        SM.available, SM._USED_PATH, SM._vision_ok = orig_avail, orig_path, orig_vision
         cfg.business_rules.pop("stock_media", None)
 
 

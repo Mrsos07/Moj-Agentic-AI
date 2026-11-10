@@ -39,7 +39,8 @@ def api_key() -> str:
 
 def _image(h: Dict[str, Any]) -> Dict[str, Any]:
     return {"id": h.get("id"), "kind": "image", "tags": h.get("tags", ""), "page_url": h.get("pageURL", ""),
-            "url": h.get("largeImageURL") or h.get("webformatURL") or "", "preview": h.get("previewURL", ""),
+            "url": h.get("largeImageURL") or h.get("webformatURL") or "",
+            "preview": h.get("webformatURL") or h.get("previewURL", ""),
             "width": h.get("imageWidth"), "height": h.get("imageHeight"), "likes": h.get("likes", 0),
             "views": h.get("views", 0), "downloads": h.get("downloads", 0), "user": h.get("user", "")}
 
