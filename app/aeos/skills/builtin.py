@@ -401,6 +401,25 @@ def _grounded_candidates(context: "ExecutionContext") -> List[dict]:
                 "_priority": 5,
             })
 
+    # مواضيع ترند التخصص (أدوات MCP + نموذج الموظف اختارها داخل تخصصه) — تغريدات X عنها إن وُجدت
+    spec_news = context.scratch.get("specialty_news") or []
+    for st in (context.scratch.get("specialty_trends") or [])[:2]:
+        words = [w for w in st["x_query"].split() if len(w) > 2]
+        tweets = [n for n in spec_news if any(w in (n.get("summary") or "") for w in words)][:3]
+        media = next((n.get("media_url") for n in tweets if n.get("media_url")), "")
+        summary = " | ".join([st.get("why") or ""] + st.get("headlines", []) +
+                             [(n.get("summary") or "")[:140] for n in tweets])
+        candidates.append({
+            "source": "specialty_trend",
+            "title": st["topic"],
+            "summary": summary.strip(" |")[:500],
+            "media_url": media,
+            "_rel": max(min_rel, 2),
+            "_imp": 0.8,
+            "_media": 1 if media else 0,
+            "_priority": 6,
+        })
+
     x_trends = context.scratch.get("x_trends") or []
     if x_trends:
         trend_tweets = context.scratch.get("trend_tweets") or []

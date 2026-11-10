@@ -41,25 +41,9 @@ def is_admin(user: Optional[User]) -> bool:
 def user_from_token(token: str) -> Optional[User]:
     """توثيق خارج تبعيات FastAPI (الـWebSocket): نفس قواعد ``require_user`` حرفياً —
     توكن صالح، غير مُبطَل بتسجيل خروج، ومستخدم موجود ونشط."""
-    from app.auth.security import decode_token
-    from app.db.redis_client import RedisClient
+    from app.auth.token_guard import authenticate
 
-    token = (token or "").strip()
-    if not token or RedisClient.is_blacklisted(token):
-        return None
-    data = decode_token(token)
-    if data is None:
-        return None
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == data.user_id).first()
-        if user is not None and getattr(user, "is_active", True) is False:
-            return None
-        if user is not None:
-            db.expunge(user)
-        return user
-    finally:
-        db.close()
+    return authenticate(token)[0]
 
 
 # ─────────────────────────── employees ───────────────────────────

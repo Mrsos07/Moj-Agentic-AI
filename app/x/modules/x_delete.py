@@ -1,10 +1,14 @@
 import json
-import os
 import re
 import time
 from typing import Optional
 
-from playwright.sync_api import sync_playwright
+from .x_captcha import guard as _captcha_guard
+from .x_captcha import goto as _goto
+from .x_captcha import launch_browser as _launch_browser
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import sync_playwright
+from .sync_bridge import sync_safe
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -23,6 +27,7 @@ def _tweet_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+@sync_safe
 def delete_tweet_by_id(storage_state_path: str, tweet_id: str, headless: bool = True,
                        wait_after_ms: int = 3000, expected_handle: str = "") -> bool:
     """حذف تغريدة من X باستخدام ID التغريدة فقط (انظر ``delete_tweet``)."""
@@ -46,6 +51,7 @@ def _delete_confirmed(resp_box: list) -> Optional[bool]:
     return None
 
 
+@sync_safe
 def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
                  wait_after_ms: int = 3000, expected_handle: str = "") -> bool:
     """حذف تغريدة يملكها الحساب، مع تأكيد فعلي.
@@ -62,21 +68,13 @@ def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
     if not tweet_id:
         raise RuntimeError("رابط/معرّف التغريدة غير صالح")
     expected = (expected_handle or "").strip().lstrip("@").lower()
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
 
     with sync_playwright() as p:
-        launch_args = {"channel": chrome_channel, "headless": headless}
-        if headless:
-            launch_args["args"] = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                                   "--window-size=1920,1080"]
-        try:
-            browser = p.chromium.launch(**launch_args)
-        except Exception:
-            browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(
-            storage_state=storage_state_path,
+        browser = _launch_browser(p, headless=headless)
+        context = _captcha_context(
+            browser, storage_state_path,
+            page_url=tweet_url,
             viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
@@ -86,7 +84,8 @@ def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
         focal_sel = f"article[data-testid='tweet']:has(a[href$='/status/{tweet_id}'] time)"
 
         try:
-            page.goto(tweet_url, wait_until="domcontentloaded")
+            _goto(page, tweet_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             focal = page.locator(focal_sel)
             try:
                 focal.first.wait_for(state="visible", timeout=25_000)
@@ -121,8 +120,9 @@ def delete_tweet(storage_state_path: str, tweet_url: str, headless: bool = True,
                 raise RuntimeError("رفض X طلب الحذف")
             if verdict is None:
                 # لم نلتقط ردّ الشبكة: التحقق بإعادة فتح التغريدة
-                page.goto(tweet_url, wait_until="domcontentloaded")
+                _goto(page, tweet_url, wait_until="domcontentloaded")
                 page.wait_for_timeout(6000)
+                _captcha_guard(page, log=print)
                 if page.locator(focal_sel).count():
                     raise RuntimeError("لم يتأكد الحذف: التغريدة ما زالت ظاهرة")
             page.wait_for_timeout(min(wait_after_ms, 1500))

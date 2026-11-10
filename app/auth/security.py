@@ -57,6 +57,8 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     user_id: Optional[int] = None
     email: Optional[str] = None
+    iat: Optional[float] = None
+    exp: Optional[float] = None
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -84,7 +86,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     else:
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
-    to_encode.update({"exp": expire, "iat": datetime.utcnow()})
+    # jti: توكنان في نفس الثانية لنفس المستخدم كانا متطابقين حرفياً — خروج أحدهما يُبطل الآخر
+    to_encode.update({"exp": expire, "iat": datetime.utcnow(), "jti": secrets.token_hex(8)})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -105,7 +108,8 @@ def decode_token(token: str) -> Optional[TokenData]:
         except (ValueError, TypeError):
             return None
             
-        return TokenData(user_id=user_id, email=email)
+        return TokenData(user_id=user_id, email=email,
+                         iat=payload.get("iat"), exp=payload.get("exp"))
     except JWTError:
         return None
 

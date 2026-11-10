@@ -153,6 +153,14 @@ class ObservePhase(ICognitivePhase):
             if snap and age_min < cache_ttl and snapshot_has_signals(snap):
                 restore_snapshot(snap, context.scratch, observations)
                 observations["signals_cache_age_min"] = round(age_min, 1)
+                try:                       # ترندات التخصص كل دورة حتى مع ذاكرة الرصد
+                    from ..employee import tool_use
+
+                    st = tool_use.specialty_trends(context)
+                    if st:
+                        observations["specialty_trends"] = [t["topic"] for t in st]
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("specialty trends failed: %s", exc)
                 context.scratch["observations"] = observations
                 context.emit_progress(
                     f"🗂️ **@{account} يستخدم ذاكرة الرصد المخزّنة** — آخر مسح "
@@ -252,6 +260,18 @@ class ObservePhase(ICognitivePhase):
                 logger.warning("top posts browse failed: %s", exc)
                 observations["top_posts_error"] = str(exc)
                 _source("⭐", "أهم البوستات", None, error=str(exc))
+
+            # ترندات التخصص من أدوات MCP (trendsmcp…) — كل دورة، قبل البحث في X لأنه يبحث بها
+            try:
+                from ..employee import tool_use
+
+                st = tool_use.specialty_trends(context)
+                if st:
+                    observations["specialty_trends"] = [t["topic"] for t in st]
+                    _source("📈", "ترندات التخصص (" + "، ".join(t["topic"][:40] for t in st) + ")",
+                            len(st), "موضوعاً")
+            except Exception as exc:  # noqa: BLE001 - تحسين لا شرط للدورة
+                logger.warning("specialty trends failed: %s", exc)
 
             # تصفّح أحدث أخبار التخصص عبر Playwright (بحث حي على X) — بديل خادم
             # الأخبار: نكتفي بـPlaywright لجلب آخر ما يخص مجال الموظف.
@@ -399,6 +419,21 @@ class ObservePhase(ICognitivePhase):
                 logger.warning("fetch news failed: %s", exc)
                 observations["news_error"] = str(exc)
                 _source("📻", "أخبار قوقل", None, error=str(exc))
+
+        # أدوات MCP المفعّلة (ترندات حية…) حسب خطة استخدام كل خادم — مرة كل دورة
+        try:
+            from ..employee import tool_use
+
+            signals = context.scratch.get("mcp_signals")
+            if signals is None:
+                signals = tool_use.observe(context)
+            if signals:
+                observations["mcp_signals_count"] = len(signals)
+                observations["mcp_signals_preview"] = [f"{s['source']}: {s['text'][:100]}" for s in signals]
+                _source("🧰", "أدوات MCP (" + "، ".join(dict.fromkeys(s["source"] for s in signals)) + ")",
+                        len(signals), "إشارة")
+        except Exception as exc:  # noqa: BLE001 - الأدوات تحسين لا شرط للدورة
+            logger.warning("mcp observe failed: %s", exc)
 
         context.scratch["observations"] = observations
 

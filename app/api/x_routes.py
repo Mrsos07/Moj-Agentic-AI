@@ -282,6 +282,34 @@ async def x_upload_cookies(
         )
 
 
+@router.get("/proxy-status")
+async def x_proxy_status(
+    check: bool = False,
+    current_user: User = Depends(get_current_user)
+):
+    """حالة تدوير IP السعودي: المزوّد/الدولة/سياسة التدوير (بلا كلمة مرور).
+
+    ``check=true`` يطلب IP فعلياً ويفحص جنسيته عبر نفس البروكسي (طلب صغير).
+    """
+    from app.core.proxy_rotation import status as proxy_status
+
+    return proxy_status(check=check)
+
+
+@router.get("/captcha-status")
+async def x_captcha_status(
+    check_balance: bool = False,
+    current_user: User = Depends(get_current_user)
+):
+    """حالة مزوّد حل الكابتشا (المزوّد/الرصيد/آخر 4 أحرف من المفتاح — لا المفتاح).
+
+    ``check_balance=true`` يستدعي المزوّد فعلياً (مجاني في كل المزوّدين).
+    """
+    from app.core.captcha_solver import status as captcha_status
+
+    return captcha_status(check_balance=check_balance)
+
+
 @router.post("/post", response_model=XPostResponse)
 async def x_post(
     request: XPostRequest,
@@ -395,7 +423,7 @@ async def x_profile_update(
                     )
             
             # تحديث الملف الشخصي
-            update_profile_on_x(
+            media = update_profile_on_x(
                 storage_state_path=storage_state_path,
                 name=request.name,
                 bio=request.bio,
@@ -404,11 +432,12 @@ async def x_profile_update(
                 avatar_path=avatar_path,
                 banner_path=banner_path,
                 headless=request.headless
-            )
+            ) or {}
         
         return {
             "success": True,
             "message": "تم تحديث الملف الشخصي بنجاح",
+            "media": media,
             "timestamp": datetime.now().isoformat()
         }
     

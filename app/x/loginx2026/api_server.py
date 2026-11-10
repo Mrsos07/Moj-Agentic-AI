@@ -33,6 +33,8 @@ app = Flask(__name__)
 # ============ Config ============
 COOKIES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies")
 BASE_DIR = Path(__file__).parent
+# حل كابتشا Arkose يضيف حتى CAPTCHA_TIMEOUT قبل إكمال الدخول
+LOGIN_TIMEOUT = max(120, int(os.getenv("CAPTCHA_TIMEOUT", "150") or 150) + 120)
 
 # ============ Task Storage ============
 login_tasks = {}
@@ -45,7 +47,7 @@ def run_login(username, password, cookies_dir=COOKIES_DIR):
     """تشغيل تسجيل الدخول كـ subprocess"""
     result = subprocess.run(
         [sys.executable, "-m", "x_auth.login_sync", username, password, cookies_dir],
-        capture_output=True, text=True, encoding="utf-8", timeout=120,
+        capture_output=True, text=True, encoding="utf-8", timeout=LOGIN_TIMEOUT,
         cwd=str(BASE_DIR)
     )
     output = result.stdout + result.stderr

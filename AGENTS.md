@@ -10,12 +10,89 @@
   `.env`/`data/` instead. Exit code 2 = the three copies disagree — investigate.
 - Do NOT publish half-done or failing work just to "keep it synced".
 
+## Security rules (review 2026-11-08)
+- X session cookies were tracked in Git despite `.gitignore`: 6 JSON files with `auth_token`/`ct0` in
+  `app/x/loginx/CookiesBackup/` and `app/x/loginx2026/cookies/`, plus `debug_post.html`, which held
+  `ct0` in `document.cookie`. They were tracked BEFORE the ignore rule, so the old staged-diff check
+  never saw them. They are now untracked (local copies kept). `publish.ps1` scans the WHOLE tree
+  (`git ls-tree` paths + `git grep` for key/`auth_token`/`ct0` values and cookie-export JSON shape)
+  before every push. Deleting a forbidden file is allowed; adding one is not. The history still has them
+  until the owner approves a rewrite.
+- Auth has ONE gate: `app/auth/token_guard.authenticate(token, db=None)` checks signature+expiry,
+  then revocation, then that the user exists and is active, then that the token was issued after the
+  user's `revoke_user` cutoff. `middleware`, `dependencies`, `ownership.user_from_token` (WebSocket)
+  and `/verify` all call it. Never decode a JWT for auth anywhere else.
+  - Revocations are stored as the sha256 of the token, in Redis AND in `data/auth_revocations.json`.
+    A Redis outage never turns logout into a fake success; if the local write fails, logout returns 503.
+  - `revoke_user` runs on password change, deactivation and deletion.
+  - Tokens carry `jti`: two same-second tokens used to be byte-identical.
+- The chat WebSocket re-authenticates on EVERY message and every 60 s while idle. On failure it sends
+  `auth_expired` and closes with 4401.
+- Internal callbacks (`app/auth/internal.py` v2) use a key domain-separated from the JWT secret
+  (`INTERNAL_CALLBACK_SECRET` overrides it). `exp` and `nonce` are inside the HMAC; a nonce is consumed
+  once, persisted in `data/internal_callback_nonces.json`. Login TTL is 30 min; schedule TTL is
+  run_at + 1 day. Tests: section 4/4c of `verify_isolation.py`, which isolates those files in a temp dir.
+
 ## Environment
 - The working virtualenv is `venv\` (NOT `.venv\`, which is missing most deps).
   Use `.\venv\Scripts\python.exe` for everything.
 - Windows console is cp1252 by default; set `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`
   before running scripts that print Arabic, otherwise they crash with a
   `charmap` codec error.
+- `.env` must be UTF-8. Saved as UTF-16 (BOM `FF FE`, e.g. by PowerShell `>`/Notepad) it
+  crashes `load_dotenv` in `app/main.py` with `UnicodeDecodeError ... 0xff` and the runner
+  restarts the worker forever.
+- Local services on a fresh machine:
+  - **Neo4j** (graph memory): `.\venv\Scripts\python.exe scripts\install_neo4j.py` — installs
+    pinned JDK 21 + Neo4j 5.26 LTS into `%LOCALAPPDATA%\Moj-Agentic-AI` (SHA-256 checked), sets
+    the initial password and verifies bolt. After that `neo4j_service.ensure_neo4j()` autostarts it.
+    Without it: `Neo4j autostart: install missing` and the employee has no emotional state.
+  - **Redis** (session cache, optional): Docker container
+    `docker run -d --name moj-redis --restart unless-stopped -p 127.0.0.1:6379:6379 -v moj-redis-data:/data redis:7.4.10-alpine redis-server --appendonly yes`.
+    It only runs while Docker Desktop runs. `RedisClient` caches a failed connect for the
+    whole process, so start Redis before `run.py`, or restart the app.
+  - **loginx** needs `uiautomator2` (in requirements.txt). Without it the server dies at startup with `ModuleNotFoundError`.
+- X reads (timeline/trends/search/profile) must wait via `playwright_x/server.py::_wait_cards`,
+  never a bare `locator.wait_for`. Through the residential proxy X sometimes fails to load its
+  vendor JS (`?failedScript=vendor`) and shows «Something went wrong, but don't fret… Try again».
+  Waiting never fixes it; clicking Try again (≤3) does. Measured 2026-10-26: one whole cycle did
+  nothing because timeline, trends and specialty search each burned 45 s on that screen. The
+  account itself was fine (HomeTimeline 200, rate limit 499/500). Test: section 5g2 of `verify_creator.py`.
+- Reply composer (`x_actions._reply_scope` / `_open_reply_composer`): a tweet page has TWO
+  `tweetTextarea_0` (inline `inline_reply_offscreen` + the reply modal). The modal's mask covers
+  the page immediately, but the `[aria-modal]` dialog stays 0 px high until its content loads (slow
+  over the proxy). So never require the dialog to be `is_visible()`: a dialog that contains the editor
+  IS the scope, and a visible mask with no editor-dialog means "wait", never "use the page".
+  Measured 2026-10-28: the 800 ms settle wasn't enough and replies failed with a mask-intercepted
+  click. Test: section 5g3 of `verify_creator.py`. Verified live with a real posted reply.
+- X length limit: `app/x/modules/x_text.py` (`weighted_len` per twitter-text v3: URLs 23, emoji/CJK 2,
+  Arabic 1; `fit` cuts at a sentence end). Over 280 (no Premium) X DISABLES the Reply/Post button,
+  so nothing is ever sent. Measured 2026-10-28: a 3-point reply was 13 over, failing with «بقي
+  المحرّر ممتلئاً». Replies had no length cap at all. Now: a hard ≤240 line in the reply prompt,
+  `fit(…, 270)` before sending (10 margin: our count said 288 where X said 293), and
+  `x_actions.reply_to_tweet` fails fast with a clear message if text over the limit reaches it.
+  `_normalize_post_text` uses the same `fit`. Test: section 5g4 of `verify_creator.py`.
+- The owner can rename the X handle at any time. Measured 2026-11-08: nxjrjrjdj became nxjrjrjdj2 and
+  `x.com/nxjrjrjdj` showed «هذا الحساب غير موجود», so the identity refresh timed out waiting for
+  `UserName`. Readers of the account's OWN page (`_read_account_profile`, `_read_my_posts`) go
+  through `_goto_own_profile`, which reads the real handle from `AppTabBar_Profile_Link` and
+  re-navigates. The snapshot stores the current `handle` plus `handle_changed_from`.
+  `cfg.account_username` is NOT auto-renamed (chat mentions/ledger key on it). Test: section 5g5 of `verify_creator.py`.
+- Proxy failover (since 2026-10-28): a residential exit node can die mid-session. Seen live:
+  `ERR_PROXY_CONNECTION_FAILED` / `ERR_TIMED_OUT` on every proxied read for ~15 min while direct
+  sources worked. `captcha_browser.goto` classifies route errors (`proxy_rotation.ROUTE_ERRORS`, or
+  a `Page.goto` timeout) on a rotated context (`ctx._moj_proxy_scope`). It then calls `mark_bad(scope)`,
+  so the rest of the window uses a NEW Saudi session. On the page's FIRST navigation (nothing done on X yet)
+  it raises `ProxyRouteError`, and `with_proxy_failover` retries the whole operation once. That wrapper is
+  applied in `sync_bridge.sync_safe` (all X actions) and `@_failover` on the 6 playwright_x readers.
+  A later-navigation error is NOT retried (it could duplicate an action), only rotated.
+  `proxy_rotation` must exist as ONE module instance (it's registered under both names), otherwise
+  the rotation state splits in two. `PROXY_CITY` is empty = all of Saudi Arabia (owner decision; the
+  Riyadh-only pool kept dropping). Test: section 6 of `verify_proxy_rotation.py`.
+- Port 8000 can be taken by another desktop app (measured: Beem, an Electron app with `--inspect=8000`).
+  The bind then fails with `WinError 10013`, and the listener is invisible to `netstat`
+  (psutil sees it, status `NONE`). `run.py::_free_port` uses psutil and kills only `python*`
+  leftovers. Any other owner gets a clear message and exit 1. Never auto-kill another app.
 
 ## The LLM provider is OpenRouter — resolve it ONLY via `resolve_llm()`
 - `app/core/llm_provider.py::resolve_llm()` is the single source of truth for
@@ -37,6 +114,23 @@
   stay on the system endpoint. Ollama's URL is server config (`OLLAMA_BASE_URL`), never user
   input (SSRF). Catalog: `app/core/llm_catalog.py`; service: `app/services/user_llm.py`; API:
   `/api/llm/*`; test: `verify_llm_providers.py [--live]`.
+- **Picking any OpenRouter model from the chat** (since 2026-10-28). `llm_catalog.openrouter_catalog()`
+  reads OpenRouter's own public `GET /models` (no key, cached 1 h) and keeps ONLY chat models
+  whose `supported_parameters` include `tools`, because the coordinator manages employees through
+  tool calls (owner decision; 390 of 456 models). Each item has name, $/1M in/out, context and free.
+  Admin/developer (`llm.system_models` permission) may pick any of them on the SYSTEM key
+  (`via_system`, `_system_openrouter()`); a normal user needs their own key, so nobody drains the
+  system credit with an expensive model. `set_selection` rejects ids not in that list. Ways to change it:
+  the chat header `ChatModelPicker` (search box + prices), `GET /api/llm/openrouter/models`, and the
+  coordinator tool `chat_model` (current/search/set/reset; `set` needs a full id from `search`).
+  The change applies from the next message. Test: section 6b of `verify_llm_providers.py`.
+- **Per-employee model** (employee card «🧠 نموذج الذكاء الاصطناعي», `GET/PUT /api/aeos/employees/{id}/llm`,
+  or the coordinator: `chat_model` with an `employee` arg). Stored in `business_rules.llm` (existing JSON
+  column, no migration). `bootstrap` merges `business_rules`, so saving the card doesn't wipe it.
+  `runtime/manager.py` sets `LLM_OWNER = (user_id, "employee", business_rules.llm)`, and
+  `endpoint_for(user, purpose, override)` gives it priority over the owner's general «employee»
+  model, validated with the OWNER's keys/permission (a deleted key or revoked permission means it's ignored).
+  Resolution order: employee choice → owner's employee model → system. Test: section 6c of `verify_llm_providers.py`.
 - OpenRouter wins whenever `OPENROUTER_API_KEY` is set; OpenAI is the fallback.
   Both use the same `openai` package — only `base_url` and the model name differ.
 - **Model names must be provider-qualified**: `openai/gpt-4o-mini`, not `gpt-4`.
@@ -63,6 +157,18 @@
   (`assign_angle`). The skill writes from `media_brief` (no shallow research). The quality gate's
   echo check uses `echo_ref` = instructions only — comparing against the full brief (with
   research/facts) flagged faithful fact-quoting as `echo_brief`. Test: `verify_media_brief.py`.
+- **Campaigns** (`plan_campaign` coordinator tool, prompt rule 5ب) are for any direct "make the team
+  post about X" task:
+  1. One media brief.
+  2. `_propose_assignments`: the LLM, acting as editor-in-chief, gives each employee a DIFFERENT
+     sub-topic, angle, hook and format (post/thread) based on role and interests. An employee far from
+     the topic gets `skip`, and unknown handles are dropped. Without an LLM it falls back to rotating the angles.
+  3. With `dispatch=false` (the default) the coordinator shows the brief and the proposals and asks «أوجّههم؟».
+  4. `dispatch=true` (or `only=[…]`) reuses the SAME cached plan (30 min, no new search) and dispatches
+     with `for_employee(brief, angle_text=…)`.
+  `order_publish` stays for a single employee. When there is no `TAVILY_API_KEY`, `_research` falls
+  back to Google News RSS (`when:2d`, then `7d`). Measured 2026-11-08: no key in `.env` and the Tavily
+  MCP needed OAuth, so every directed publish had gone out with NO research. Test: the campaign section of `verify_media_brief.py`.
 - Post images go through `app/aeos/employee/visual_director.py` (NOT a raw prompt): an LLM art
   director turns the post into a concrete, literal news scene (subject/setting/composition/
   lighting/camera/palette/mood) with banned clichés (chess, crowns, maps, flags…), Gulf cultural
@@ -294,6 +400,284 @@ defences it forced are still in the code and still required if you set
   undone targets → `flags.engaged_urls` so cycles don't redo them.
   Test: `verify_x_control.py` (80 checks, offline). Live checks so far were
   read-only («already» paths + delete refusal on another account's tweet).
+
+## Profile identity (avatar/header): what the owner approves is exactly what lands on X
+- Reported: the card «هوية X من الشخصية» previewed a portrait + header, the owner pressed
+  «تطبيق على X», and the account showed a different picture. Measured on @nxjrjrjdj
+  (2026-10-22, app/x `operations` + chat log): (a) creating the employee ran
+  `apply_persona_identity_async`, which generated its OWN avatar (image MCP) and uploaded it
+  unseen (ops 1110→1111, 14:10, «وصورة شخصية جديدة مولّدة»); (b) the approved apply (op 1113,
+  14:18:48) was a bare daemon thread — the `git pull` into the running copy at 14:19:21 reloaded
+  uvicorn and killed it: no result, no message, the card had already closed. Same class: chat
+  «ولّد هوية» → «طبّق الهوية» generated a NEW identity at apply time.
+- On create only persona name+bio are synced — **never an image** — and nothing at all if the
+  owner already has an approved identity (`identity_store.has_owner_identity`).
+- Approval pins bytes (`identity_store.create_pending`): the previewed files are copied from the
+  identity server's `static/generated/` (URL must be `/static/generated/<32hex>.<ext>` — no network
+  fetch, foreign/internal URLs rejected) into `data/employees/<id>/identity/` with sha256, plus
+  `pending.json`. The apply uploads those bytes as multipart (`x_bridge.update_profile(avatar_path=…)`
+  → `avatar_file`), never a URL. The identity server deletes previews after 1h → approval fails with
+  «أعد توليد المعاينة» (HTTP 400; the card keeps the preview) instead of applying something else.
+- `identity_service.resume_pending()` (main.py startup) resumes an interrupted approval with the same
+  pinned files (≤3 attempts, ≤24h, deleted employee ⇒ dropped); a newer approval supersedes an older
+  one (`is_current`). Publishing into the copy the app runs from ALWAYS kills in-flight background
+  work (op 1112, an X thread post, died the same way at the 14:14:30 pull) — anything the owner
+  approved must be persisted.
+- Chat: persona-based «ولّد هوية للموظف» uses `generate_preview` (persona-first name/bio, same as the
+  card) and remembers it; «طبّق الهوية» (`apply_from_chat`) applies that preview (same owner, ≤1h) and
+  consumes it; it generates only when nothing was shown.
+- `x_profile.update_profile_on_x`: `_handle_crop_if_any` polls for the crop dialog and never clicks
+  `Profile_Save_Button` (a late dialog made the name list reach «حفظ» = save before the image was
+  applied); after Save it waits for X's `account/update_profile_image|banner` responses (or the modal
+  closing + 20s) instead of navigating after a fixed 2.5s (which aborts slow uploads through the
+  proxy while name/bio still verify); returns `media: {avatar|banner: confirmed|unconfirmed}` and
+  raises on an HTTP error from those endpoints. The chat says «أكّد X» only for `confirmed`. Endpoint
+  names come from the web client (rettiwt-api calls `…/i/api/1.1/account/update_profile_banner.json`)
+  and were **observed live** on 2026-10-22 (op 1137 on @nxjrjrjdj: `media: {avatar: confirmed,
+  banner: confirmed}`); the images on the profile page then matched the pinned approved files at
+  perceptual-hash distance 1/256 (unrelated images ≈115). If X renames them, the result degrades to
+  «unconfirmed», never to a false failure.
+- The employee card mirrors the account as X shows it (`x_profile.json` in the same folder, exposed as
+  `agent.x_profile` by `_agent_view`): banner, avatar overlapping it, name, @handle, bio, last sync.
+  Sources: (1) every metrics read — `read_my_posts` already opens `x.com/<handle>`, so it fills
+  `header_out` at no extra navigation and `ReadOwnMetricsCapability` saves it; (2) the card's
+  «تحديث من X» → `POST /employees/{id}/x-profile/refresh` (`read_account_profile`, `_browser_slot(25)`
+  fail-fast); (3) right after an approved apply (the frontend polls `GET …/x-profile` until
+  `fetched_at` changes). After the apply, a changed avatar/banner URL on the profile page is a second,
+  independent confirmation; an unchanged URL is reported as a warning, never as ✓.
+- Header extraction (`_HEADER_JS`): name/bio by the proven `UserName`/`UserDescription` testids, avatar
+  via the `/<handle>/photo` link (fallback `UserAvatar-Container-<handle>`; tweets link
+  `/status/<id>/photo/1`, so other users' avatars never match), banner via `/<handle>/header_photo`
+  (only the account's banner uses `profile_banners` on its own page). Text is built from child nodes
+  with `img[alt]`: X draws emoji as images, and `innerText` dropped the 🇸🇦 from «صقر الجزيرة 🇸🇦»
+  (measured live). `account_header` keeps only `pbs.twimg.com`/`abs.twimg.com` URLs and upsizes them
+  (`_400x400`, `/1500x500`). A read with neither name nor avatar never overwrites a good snapshot.
+- Test: `.\venv\Scripts\python.exe verify_identity.py` (offline, temp dirs, fake page/clock, plus
+  `_HEADER_JS` executed in a real headless Chrome on an X-shaped page with all network aborted).
+
+## Captcha is solved by a provider — never by a human, never silently
+- One solver: `app/core/captcha_solver.py` (stdlib only) for four providers
+  (YesCaptcha / 2Captcha / CapMonster / Anti-Captcha). Keys live in `.env`
+  (`YESCAPTCHA_KEY` … or a generic `CAPTCHA_KEY`); `CAPTCHA_PROVIDER` picks one,
+  otherwise the first key found. `GET /api/x/captcha-status` reports
+  provider/balance and only the last 4 characters of the key.
+- It is loaded **by path** from every process that needs it: xsuite runs with
+  `cwd=app/x`, `x_auth` runs as `python -m x_auth.login_sync`, loginx runs with
+  `cwd=app/x/loginx` — none can import `app`. Hence the module has no app imports,
+  and `captcha_bridge.py` sits next to every copy of `x_auth` (4 copies; 3 are
+  byte-identical).
+- Playwright paths call `guard_page()` (through `app/x/modules/x_captcha.py`)
+  right after `goto` and again after submit: `x_post` (post/thread), `x_actions`
+  (like/repost/bookmark/reply/quote/follow/unfollow), `x_delete`, `x_profile`,
+  and every read in `system/mcps/playwright_x/server.py`. The guard **raises**
+  when it cannot solve — a swallowed captcha is a phantom success (see
+  «Never report success…»), and on `x_post` it used to consume `posts_today`
+  while nothing was published. Reads are the same trap in reverse: a captcha page
+  has no tweet cards, so the employee used to «observe» an empty timeline.
+- Captcha solving adds up to `CAPTCHA_TIMEOUT` (150s) to a login, so the login
+  timeouts are `max(120, CAPTCHA_TIMEOUT + 120)`: `x_login._LOGIN_TIMEOUT`,
+  `loginx2026/api_server.LOGIN_TIMEOUT`, `x_login_new.LOGIN_TIMEOUT`. A fixed 120s
+  kills the process mid-solve and reports a timeout that looks like a wrong password.
+- `x_bridge._POST_TIMEOUT` (`CAPTCHA_TIMEOUT + 120`) applies to `/api/post*` only:
+  the guard also runs **after** submit, and a solved captcha must not outlive the
+  client timeout — a late success reported as failure is the mirror image of the
+  phantom success above.
+- API login returns `subtask_id: "ArkoseLogin"`. The token is submitted as
+  `web_modal.completion_deeplink = "twitter://onboarding/web_modal/next_link?access_token=<token>"`
+  (shape taken from the twscrape/tweety implementations, not guessed). X's login
+  Arkose public key is `0152B4EB-D2DC-460A-89A1-629838B529C9` (signup:
+  `2CB16598-CB82-4CF7-B332-5990DB66F3AB`); the `blob` is optional — take it from
+  the subtask if X sends it. `captcha_solver.solve_x_login_captcha()` is the one
+  entry point.
+- YesCaptcha's changelog (2026-10-16) says the FunCaptcha **token** routes are not
+  stable (`FunCaptchaTaskProxyless` fails and is refunded; `…M1` is the current
+  one). So the order is: token first (2Captcha/CapMonster/Anti-Captcha often
+  succeed), then `FunCaptchaClassification` (3 points, synchronous) + clicking the
+  tile in the page. The emulator has no JS injection, so it only uses the
+  classification + tap path (`j4.solve_captcha`).
+- Measured with the owner's key (2026-10-21): `getBalance` 46,958 points;
+  `ImageToTextTaskOcrBase` returned `ABCD5` exactly; `FunCaptchaClassification` on
+  the docs' sample (`q62`, an **arrows** puzzle) returned `objects: [1]`.
+- Arrows puzzles are therefore **skipped, not tapped**: the classification answers
+  «which image», not «which cell», and the docs describe switching with the arrows
+  — a 3×2 tile tap would be a wrong click that burns attempts. Only `Pick the …`
+  6-tile grids use the tap path. Don't «fix» this by guessing an arrow count.
+- **Cloudflare is a different animal** («Just a moment…» / «لحظة…» / «Performing
+  security verification», Ray ID). Measured on 2026-10-21 with @emaad5079's valid
+  cookies: `x.com/home` redirects to `/account/access` and stays challenged for 30s
+  in both headless and visible Chrome, even with `--disable-blink-features=
+  AutomationControlled` and `navigator.webdriver` hidden — i.e. it is IP/egress
+  level, not a widget we can inject into. `detect()` now returns
+  `kind: "cloudflare"`; the guard raises a message naming `CAPTCHA_PROXY` instead of
+  silently passing (it used to return `None` and the caller then «observed» an empty
+  timeline).
+- Cloudflare solving is `CloudFlareTaskS3` (20 points) and **requires a public
+  proxy** (`CAPTCHA_PROXY`); local/private addresses are rejected by the provider.
+  `cf_clearance` is bound to the exit IP **and** the User-Agent, and YesCaptcha
+  passes the check with desktop Chrome on **Linux**. So the returned cookies only
+  help a context launched with the returned `user_agent` (and the same proxy).
+- Pre-solving is implemented: `captcha_browser.new_context()` (wired in `x_post`,
+  `x_actions`, `x_delete`, `x_follow`, `x_unfollow`, `x_profile`, `x_bookmark`, and
+  the `playwright_x` reads) solves `CloudFlareTaskS3` **before** creating the
+  context when `CAPTCHA_PROXY` is set, then creates it with the returned UA and
+  injects `cf_clearance`; results are cached 45 min (`_CLEARANCE_CACHE`). The proxy
+  must be **global at launch** (`launch_proxy_kwargs()`), not per-context:
+  Playwright refuses a per-context proxy without a global one, and `cf_clearance`
+  is IP-bound anyway — so every request has to leave through it.
+  `CAPTCHA_CLOUDFLARE_PRESOLVE=0` disables the pre-solve.
+  **Only an explicit `CAPTCHA_PROXY` (or `proxy=` argument) is pre-solved — never a
+  rotation session** (since 2026-10-25). The rotation proxy used to flow into the same
+  variable, so with a captcha key every new context paid 20 points and got YesCaptcha's
+  **Linux** UA on a **Windows** Chrome (UA says Linux, `navigator.platform` and
+  `sec-ch-ua-platform` say Windows — a detection signal on every page), while the Saudi
+  exit shows no challenge at all. `verify_stealth.py` section 6 asserts both sides.
+- Measured 2026-10-21 on @emaad5079 (valid `auth_token`+`ct0`): the real blocker was
+  **not** a captcha. `api.x.com` GraphQL returned code 326 «this account is
+  temporarily locked … log in to https://twitter.com to unlock», and every browser
+  request bounced to `/account/access` (which Cloudflare fronts). So `detect()`
+  reports `kind: "account_locked"` and the guard raises «الحساب مقفل مؤقتاً … افتحه
+  من /account/access» before any paid call. **No captcha provider can unlock an
+  account** — only the owner can, by logging in (which is where Arkose solving
+  applies, if X asks for it).
+- The image/OCR path (`solve_image`) is for X's own text captcha; the emulator
+  cannot crop it from the WebView, so it only handles the Arkose grid.
+- Never log a captcha key. Errors keep the provider code (`ERROR_…`, `HTTP_401`) so
+  «wrong key» stays distinguishable from «wrong wiring».
+- Verify: `.\venv\Scripts\python.exe verify_captcha.py` (offline, fake provider
+  servers; `--live` checks balance + one OCR with a real key).
+
+## IP rotation: one **verified Saudi** exit per employee session
+- `app/core/proxy_rotation.py` — stdlib only, loaded **by path** from every process
+  that needs it (same reason as `captcha_solver`: xsuite runs with `cwd=app/x`,
+  `x_auth` as `python -m x_auth.login_sync`, loginx with `cwd=app/x/loginx`).
+- Providers: `oxylabs` (default), `brightdata`, `decodo`, `iproyal`, `soax`, and
+  `generic` via `PROXY_USERNAME_TEMPLATE`. The geo/session suffixes are **ours**,
+  not the customer's: `PROXY_USERNAME` is the base only. Exact shapes are asserted
+  in `verify_proxy_rotation.py` — change a template there first, then in code.
+  Oxylabs uses **`cc-SA`** (not `country-sa`) and `sessid-…`, with a 10-minute
+  default session, so a longer `PROXY_SESSION_TTL` must append `-sesstime-<min>`
+  (max 1440) — otherwise the exit IP changes mid-session and `cf_clearance` dies.
+  Bright Data/Decodo use `country-`/`session-`; IPRoyal uses underscores and
+  `lifetime-`; SOAX uses `region-`/`sessionid-`.
+- `PROXY_ROTATE=session` (default) derives the session id from
+  `sha1(scope:bucket)` where `bucket = epoch // PROXY_SESSION_TTL`; `request` adds a
+  `time_ns` **and a counter** (measured: `time_ns` alone repeated on Windows and two
+  «different» sessions came out identical). Ids are 13 chars because Bright Data /
+  Oxylabs cap session ids at 16.
+- **The Saudi guarantee is runtime, not marketing**: `acquire()` sends a geo query
+  *through the proxy itself* and rejects anything whose `countryCode != SA`, rotating
+  to a new session up to `PROXY_MAX_TRIES`, then raising `NOT_SAUDI`. Never «trust»
+  `PROXY_COUNTRY` alone; provider pools occasionally answer from a neighbour country.
+  Results are cached for `PROXY_VERIFY_TTL` (15 min) so a cycle does not pay a geo
+  call per action.
+- Playwright needs a **global** proxy before a context may override it, so
+  `launch_proxy_kwargs()` returns the placeholder `{"server": "http://per-context"}`
+  when rotation is on, and `new_context(scope=...)` sets the session proxy. `scope`
+  defaults to the cookie file stem = the account/employee. If the proxy cannot be
+  acquired, `new_context` **raises** — running without it would leak the real IP and
+  defeat the whole feature.
+- The emulator path is different: Android's global proxy
+  (`j4.set_android_proxy`) has no username/password fields, so it only works with a
+  provider that whitelists our public IP; auth-based proxies are browser-only.
+- Operational: rotating an account's IP on every request is *worse* for X trust than
+  a stable IP per employee. Start at `PROXY_SESSION_TTL=900` and raise it if
+  challenges appear. Per-account scope is the account label, so two accounts of the
+  same employee get different IPs — that is intended.
+- Measured live with the owner's Oxylabs sub-user (2026-10-22):
+  `resi_xxx-cc-SA-city-riyadh-sessid-…` returns **407**; the same string with a
+  **`customer-` prefix** returns SA/Riyadh (Saudinet/STC, then Zain). The code adds
+  the prefix when missing. Two more real defects found the same way:
+  (a) a password containing `+` is built as `%2B` in the URL and **must be
+  unquoted** before handing it to Playwright, or every request is 407 — this bit
+  both `proxy_rotation.playwright_proxy` and `captcha_browser._proxy_dict`;
+  (b) Playwright's default headless UA contains `HeadlessChrome`, and **x.com
+  answers 403** to it (same context with a real Chrome UA: 307 → login page).
+  That UA is now set browser-wide from the real Chrome version (see «The X browser is
+  Patchright + the installed Chrome»); the old hard-coded `DEFAULT_UA` is gone.
+  With the Saudi proxy, public pages (`x.com/explore`, `/i/flow/login`) load with
+  **no Cloudflare challenge at all**; only `/account/access` (the locked-account
+  page) still shows it — so the CF problem was the egress IP, as suspected.
+- Provider research (prices/coverage read from their own pages, 2026-10-22):
+  Oxylabs 1,024,158 SA residential + Riyadh city + SA mobile ($8/$9 per GB);
+  Bright Data 416,641 SA IPs, city/ZIP targeting, ISP static 10 IPs $18/mo, $8/GB
+  (−50% promo); Decodo $2–3.75/GB with city/ZIP targeting (verify SA in dashboard);
+  IPRoyal/ProxyEmpire list SA cities and mobile on stc/Mobily/Zain. IP counts are
+  provider claims — the runtime geo check is what actually enforces «Saudi».
+- Test: `.\venv\Scripts\python.exe verify_proxy_rotation.py` (35 checks, a local fake
+  proxy answers geo and records the usernames, so the provider templates are verified
+  without an account).
+
+## The X browser is Patchright + the installed Chrome — one launcher, no automation traces
+- Every X browser (`x_post/x_actions/x_delete/x_follow/x_unfollow/x_profile/x_bookmark` and
+  the `playwright_x` reads) comes from `app/core/stealth_browser.py` via
+  `captcha_browser.launch_browser(p, headless)` (= `x_captcha.launch_browser`), inside
+  `with sync_playwright()` from the same module. Never `p.chromium.launch(...)` or
+  `from playwright.sync_api import sync_playwright` in an X path: `verify_stealth.py` §1 fails.
+- Measured before (2026-10-25, Chrome 155, Playwright 1.46): deviceandbrowserinfo.com
+  «You are a bot!» (`hasWebdriverTrue`, `isAutomatedWithCDP`, `isAutomatedWithCDPInWebWorker`),
+  sannysoft «WebDriver present», CreepJS 67% headless with `HeadlessChrome/155` leaking from the
+  workers; the UA header said Chrome/142 (post/delete: Chrome/120) while `sec-ch-ua` said 155;
+  post/delete ran with `--disable-web-security` (no same-origin policy in a browser holding the
+  account cookies) and `--no-sandbox`. After (Patchright 1.64.1 + installed Chrome, headless):
+  «You are human!» with no flag, sannysoft all passed, CreepJS 0% headless / 0% stealth (its
+  «31% like headless» is identical for a real headful Chrome on this machine), x.com/explore 200
+  through the Saudi proxy, @nxjrjrjdj home + profile read with its cookies.
+- Why Patchright, not Camoufox: same API (every live-verified flow — Lexical composer, uploads,
+  crop dialog, GraphQL response checks — keeps working), drives the real auto-updated Chrome
+  (genuine TLS/JA4 and client hints), and patches the CDP `Runtime.enable` leak and the
+  automation flags. Camoufox is a Firefox fork with injected fingerprints whose README still says
+  it "may not be suitable for stable production use"; every Chrome-verified flow would need
+  re-verification.
+- UA: headless gets `--user-agent` built from the real `browser.version` (reduced
+  `Chrome/<major>.0.0.0`, frozen OS token). A context `user_agent` does NOT reach (Shared)Workers
+  or the service worker — exactly where CreepJS found `HeadlessChrome`. The version is probed once
+  per process; a launch whose major differs (Chrome auto-updated) relaunches with the right UA.
+  Headful keeps the native UA. `context_options()` adds no UA for these browsers, plus a `screen`
+  larger than the viewport (Playwright makes screen == viewport, a headless tell). Never
+  hard-code a UA again (an HTTP client like `x_auth_local`'s curl_cffi `impersonate=chromeNNN`
+  is different: its UA must match its impersonated version).
+- Flags: only `--disable-dev-shm-usage` (Linux) and `--no-sandbox` (Linux as root = Docker);
+  Patchright adds `--disable-blink-features=AutomationControlled` and drops `--enable-automation`
+  itself. No `--disable-web-security`, no `--no-sandbox` on Windows, no `--disable-gpu`
+  (software WebGL «Microsoft Basic Render Driver» = VM/headless signal).
+- Patchright runs `evaluate` in an isolated world: DOM reads (every scraper JS here) work
+  unchanged, page globals are invisible. Anything that must call page JS (captcha callbacks,
+  `___grecaptcha_cfg`, `window[cb]`) goes through `stealth_browser.main_world_evaluate` (it
+  checks the signature, so plain-Playwright test pages still work). `page.on("console")` does not
+  fire in Patchright (Console domain disabled) — don't build on it.
+- `stealth_browser.goto()` retries a navigation ONCE on a transient network error
+  (`ERR_CONNECTION_CLOSED/RESET`, tunnel/proxy failures). The reported
+  `read_timeline/read_my_posts … ERR_CONNECTION_CLOSED` was a dropped residential tunnel, not
+  detection: the same path then loaded home + profile 4/4 times, urllib through the same proxy
+  got 200, and X answers a detected fingerprint with 403 (`ERR_HTTP_RESPONSE_CODE_FAILURE`).
+  Timeouts, 403 and everything else still raise.
+- `X_BROWSER_ENGINE=playwright` forces plain Playwright (diagnostics); a missing patchright warns
+  once and falls back (with `AutomationControlled` + `ignore_default_args=--enable-automation`).
+  `XSUITE_CHROME_CHANNEL` still picks the channel (`chromium` = bundled build, which needs
+  `patchright install chromium`; Docker installs it).
+- Deps: `patchright==1.64.1` + `playwright==1.64.0` with `pyee==14.0.0`/`greenlet==3.5.6`
+  (1.46 pinned pyee 11 / greenlet 3.0.3 — incompatible). After `pip install`, check
+  `site-packages/{patchright,playwright}/driver/node.exe` and `greenlet/_greenlet*.pyd` exist: one
+  install in the OneDrive venv silently left both drivers without `node.exe`
+  (`FileNotFoundError [WinError 2]`) and greenlet without its `.pyd`;
+  `pip install --force-reinstall --no-deps <pkg>` fixed it. Never upgrade the venv under a running
+  app (the live xsuite had 1.46 in memory and the 1.64 driver on disk) — upgrade right before the
+  restart.
+- **Kaspersky Endpoint Security (installed on the owner's machine) removed the drivers once**
+  (2026-10-25): right after `pip install`, its log (`Kaspersky Endpoint Security`, event 4662,
+  behavior-detection bases) showed the pip command, and both `driver/node.exe` + `driver/package/
+  cli.js` (+ ~50 package files) vanished from the venv the app runs from — every X read then died
+  with `FileNotFoundError [WinError 2]` at `sync_playwright()`, while the same files in the OneDrive
+  venv survived (so it was not an install bug). Fix without a reinstall: copy `driver/` from a
+  healthy venv of the same version (robocopy /E); the files survived the next live runs. `engine()`
+  now also falls back to plain Playwright (with a warning) when the Patchright driver is missing,
+  and the launch error names the reinstall command. If it recurs, the owner must exclude the venv
+  (or `…\site-packages\patchright\driver`) from Kaspersky — do not try to disable the AV.
+- Test: `.\venv\Scripts\python.exe verify_stealth.py` (offline: static rules, engine, a probe page
+  served by `route` + Worker/SharedWorker, captcha main-world injection, goto retry,
+  context/presolve rules); `--live` adds deviceandbrowserinfo/sannysoft/CreepJS and x.com through
+  the Saudi proxy; `--account <label|cookies.json>` reads home + profile with that account's
+  cookies (read-only).
 
 ## Backend "hangs" are usually a zombie reloader, not a blocked event loop
 - Symptom: port 8000 accepts TCP but answers nothing (even `/api/aeos/health`),
@@ -671,6 +1055,32 @@ independent structural causes — none of them fixable by telling the model to
 - `_image_prompt()` keeps one visual style (`image_style`) for brand consistency
   and forbids text in the image (Arabic renders garbled in image models).
 
+## unslop: no AI-sounding writing, for every employee (since 2026-10-26)
+- Upstream skill https://github.com/theclaymethod/unslop (MIT) is vendored UNCHANGED in
+  `system/skills/unslop/` (coordinator skill; commit pinned in `UPSTREAM.md`). Don't edit it.
+  Its own AGENTS.md/CLAUDE.md rules (eval-first) apply only to the upstream repo.
+- **Its scanners are English-only** and decline other languages. Measured: an English AI
+  paragraph gave 4 flags, and the same text in Arabic gave 0. So `app/aeos/employee/unslop.py` has two layers:
+  - English → the upstream `scripts/banned_phrase_scan.py` (`scan_for_violations`), loaded via
+    `system_loader`. sys.path is restored after loading so its scripts can't shadow packages.
+  - Arabic → a pattern table built on unslop's own categories. Following unslop, patterns are
+    contextual, not word bans: «يقف شاهداً على» flags, literal «شاهد على الحادث» doesn't. «ليس مجرد/فقط X بل Y»
+    flags, a real correction «ليس اليوم بل غداً» doesn't. Text inside «…» / "…" quotes is exempt.
+    Text is normalised first (tashkeel, أإآ→ا, ى→ي, ة→ه): «الحقيقه» is common on X.
+- Policy (owner decision): any hard finding, or ≥2 soft ones → ONE rewrite with the actual
+  phrases (`fix_hint`). The new version is kept only if it scores cleaner (`polish`, plus `accept`
+  for replies: no repetition). It NEVER blocks publishing: `ai_slop` is in `_HARD_QUALITY_ISSUES`,
+  NOT in `_BLOCKING_QUALITY_ISSUES`. Owner-written text (`params.text`/`reply_text`) is never touched.
+- Wired into: posts (`_quality_issues` + `_generate_quality_post`), replies, quotes, threads
+  (whole thread), scheduled posts, plus a prevention line in `_content_prompt` and in the
+  reply/quote prompts. `system/skills/unslop_guard` is the always_on employee skill (dashboard
+  toggle). Per-employee opt-out: `business_rules.unslop = false`.
+- `use_system_skill` now takes `resource` so the coordinator can read files a SKILL.md points to
+  (`references/…`). Text files only, no path escape, 60k cap.
+- Adding a skill changes the counts hard-coded in `verify_system_admin.py`
+  (`default_skills()` length and overview `coordinator`/`employee`): update them.
+- Test (no posting, no LLM): `.\venv\Scripts\python.exe verify_unslop.py`.
+
 ## Content-creator brain
 - `app/aeos/employee/strategy.py` owns content pillars, formats (incl. threads),
   the per-post performance ledger and the weighted choice. State lives in
@@ -784,6 +1194,30 @@ independent structural causes — none of them fixable by telling the model to
   auto-called, and calls happen only at write time (posts, quotes; replies if
   `research_before_replies`). 6h query cache; built-in search via Tavily suppresses a duplicate
   Tavily-MCP search.
+- **Usage plan per MCP server** (`tool_use.usage_plan`, stored in `data/mcp_usage_plans.json`, rebuilt
+  when the tool list changes). Tools that aren't search/extract/news (e.g. trendsmcp
+  `get_top_trends(type,country)`) used to be ignored. Now the system model writes a plan once per
+  server: `observe` = called once each cycle with fixed args (2h cache) → `scratch["mcp_signals"]`
+  → post prompt; `research` = called before writing with the topic in `topic_arg`; `skip` = never
+  called. `_valid_plan` keeps only real schema args and drops a tool if a required arg has no
+  value or the tool is a write tool. Failed calls are not cached. The plan covers ONLY tools
+  `classify` does NOT handle (search/extract/news keep their `gather` path; a topic is never passed
+  as a URL arg). When the plan is built, each observe board is probed once. Measured 2026-11-08:
+  trendsmcp's X and Google boards for SA returned `count: 0`, while TikTok SA was full. Empty boards
+  are re-planned once, then dropped. `_compact` turns replies into one ranked line. `get_context`
+  arrives cut at 6000 chars (invalid JSON), so titles are pulled by regex. Test: section 5g6 of `verify_creator.py`.
+- **Specialty trends every cycle** (`tool_use.specialty_trends`, called in `ObservePhase` BEFORE
+  `browse_specialty_news`, and also on the signal-snapshot path):
+  1. Two search keywords are derived from the persona's role, bio and audience (`_specialty_keywords`,
+     cached per day). The raw interest `politics` returned US politics in English for a Saudi account.
+  2. The first `research` tool is called with each keyword (1 h cache), together with the boards and the X trends.
+  3. The employee's LLM picks ≤2 topics INSIDE the specialty, each with an `x_query` and evidence headline numbers.
+  4. Results go into `scratch["specialty_trends"]` and `scratch["trend_x_queries"]`:
+     - `browse_specialty_news` searches X with those queries first, and the relevance filter accepts them.
+     - `_grounded_candidates` adds a `specialty_trend` candidate (`_priority` 6) with the headlines and
+       matching X tweets, and `_editorial_pick` chooses among the candidates.
+  Measured live: «اليمن والحوثيون» was picked, with 3 real headlines. Test: `check_specialty_trends_drive_cycle`. A server is used by
+  employees only if `scope.employees` is true AND its keys are set: trendsmcp needs `Authorization: Bearer …`.
 - Tavily is the ONLY search/trend provider (user decision): built-in `system/mcps/search`
   (`tavily_search()` helper) and the Trend Detector's single `TavilyCollector` (queries = Saudi/Gulf
   news + employees' top interests, `topic=news`, `time_range=day`; landing pages/social hosts

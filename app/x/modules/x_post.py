@@ -2,7 +2,13 @@ import re
 import time
 from typing import List, Optional
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+
+from .x_captcha import guard as _captcha_guard
+from .x_captcha import goto as _goto
+from .x_captcha import launch_browser as _launch_browser
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import sync_playwright
+from .sync_bridge import sync_safe
 
 
 # =================
@@ -546,6 +552,7 @@ def _click_add_another_post(page) -> None:
     raise RuntimeError("لم أجد زر إضافة تغريدة إلى الثريد (addButton).")
 
 
+@sync_safe
 def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[str],
                      headless: bool) -> Optional[str]:
     """انشر ثريد (سلسلة تغريدات) في جلسة متصفح واحدة — نشرٌ ذرّي كما يفعل X.
@@ -566,19 +573,11 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
         return post_to_x(storage_state_path, parts[0], media_path, headless)
 
     with sync_playwright() as p:
-        launch_args = {"channel": "chrome", "headless": headless}
-        if headless:
-            launch_args["args"] = [
-                "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                "--disable-web-security", "--disable-features=VizDisplayCompositor",
-                "--window-size=1920,1080",
-            ]
-        browser = p.chromium.launch(**launch_args)
-        context = browser.new_context(
-            storage_state=storage_state_path,
+        browser = _launch_browser(p, headless=headless)
+        context = _captcha_context(
+            browser, storage_state_path,
+            page_url="https://x.com/home",
             viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
@@ -622,8 +621,10 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
             return ids
 
         try:
-            page.goto("https://x.com/home", wait_until="domcontentloaded")
+            _goto(page, "https://x.com/home", wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
+            # كابتشا «Verify you are human» تظهر قبل المحرّر أحياناً — حلها وإلا فشل النشر
+            _captcha_guard(page, log=print)
             page.get_by_test_id("SideNav_NewTweet_Button").click(timeout=DEFAULT_TIMEOUT)
             page.wait_for_timeout(900)
 
@@ -660,6 +661,8 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
 
             _click_publish(page)
             page.wait_for_timeout(2000)
+            # قد يطلب X تحققاً بعد الإرسال؛ بدون حله يُغلق المحرّر بلا نشر (نجاح كاذب)
+            _captcha_guard(page, log=print)
             sent = _confirm_submitted(page, timeout_ms=12_000,
                                       saw_dialog_before=composer_open_before)
             if not sent:
@@ -712,41 +715,24 @@ def post_thread_to_x(storage_state_path: str, texts: list, media_path: Optional[
             browser.close()
 
 
+@sync_safe
 def post_to_x(storage_state_path: str, text: str, media_path: Optional[str], headless: bool) -> Optional[str]:
     with sync_playwright() as p:
-        # إعدادات أفضل للـ headless
-        launch_args = {
-            "channel": "chrome",
-            "headless": headless,
-        }
-        
-        # في وضع headless، أضف إعدادات إضافية لتجنب المشاكل
-        if headless:
-            launch_args.update({
-                "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-web-security",
-                    "--disable-features=VizDisplayCompositor",
-                    "--window-size=1920,1080"
-                ]
-            })
-        
-        browser = p.chromium.launch(**launch_args)
-        
+        browser = _launch_browser(p, headless=headless)
+
         # إعدادات السياق مع viewport مناسب
-        context = browser.new_context(
-            storage_state=storage_state_path,
+        context = _captcha_context(
+            browser, storage_state_path,
+            page_url="https://x.com/home",
             viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
 
         try:
-            page.goto("https://x.com/home", wait_until="domcontentloaded")
+            _goto(page, "https://x.com/home", wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
+            _captcha_guard(page, log=print)
 
             page.get_by_test_id("SideNav_NewTweet_Button").click(timeout=DEFAULT_TIMEOUT)
             page.wait_for_timeout(900)
@@ -791,6 +777,7 @@ def post_to_x(storage_state_path: str, text: str, media_path: Optional[str], hea
             # اختصار X الرسمي Ctrl+Enter لإرسال التغريدة، ثم نعيد التأكيد.
             _click_publish(page)
             page.wait_for_timeout(1500)
+            _captcha_guard(page, log=print)
 
             sent = _confirm_submitted(page, timeout_ms=8_000,
                                       saw_dialog_before=composer_open_before)

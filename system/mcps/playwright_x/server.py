@@ -24,10 +24,13 @@ Tools:
     - read_user_profile(handle, limit=30): a target user's bio + original
       tweets + replies — the raw sample used by the persona-cloning system to
       imitate that account's style, topics and discussion manner.
+    - read_account_profile(handle): the account's own identity as X shows it
+      now (name, bio, avatar, header) — mirrored on the employee card.
 """
 from __future__ import annotations
 
 import logging
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -61,6 +64,189 @@ def _browser_slot(timeout: float):
 
 # نفس مجلد الكوكيز المستخدم في رفع الكوكيز وأتمتة X
 _COOKIES_DIR = Path(__file__).resolve().parents[3] / "app" / "x" / "cookies"
+
+
+def _guard_captcha(page) -> None:
+    """كابتشا في مسار القراءة = «لا تغريدات» كاذبة؛ نحلها أو نفشل بوضوح."""
+    from app.core.captcha_browser import guard_page
+
+    guard_page(page, log=logger.info)
+
+
+def _new_context(browser, storage_state_path: str, *, viewport=None,
+                 page_url: str = "https://x.com/home"):
+    """سياق يجهّز Cloudflare مسبقاً إن وُجد CAPTCHA_PROXY (وإلا سياق عادي)."""
+    from app.core.captcha_browser import new_context
+
+    kwargs = {"viewport": viewport} if viewport else {}
+    return new_context(browser, storage_state_path, page_url=page_url, **kwargs)
+
+
+def _sync_playwright():
+    """Patchright + Chrome الخفي — نفس مُطلِق وحدات X (``x_captcha``)، لا Playwright العادي."""
+    from app.x.modules.x_captcha import sync_playwright
+
+    return sync_playwright()
+
+
+def _goto(page, url: str, **kwargs):
+    """تنقّل بإعادة واحدة على عطل شبكة عابر (ERR_CONNECTION_CLOSED من نفق البروكسي)."""
+    from app.x.modules.x_captcha import goto
+
+    return goto(page, url, **kwargs)
+
+
+def _failover(fn):
+    """القراءة تُعاد مرة واحدة بIP سعودي جديد إن سقط مسار البروكسي في أول تنقّل
+    (``ProxyRouteError`` من ``goto``) — كل قراءة تفتح متصفحاً جديداً فتأخذ الجلسة البديلة."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from app.x.modules.x_captcha import with_proxy_failover
+
+        return with_proxy_failover(fn)(*args, **kwargs)
+
+    return wrapper
+
+
+#: زر شاشة خطأ X («Something went wrong, but don't fret — let's give it another shot.»)
+_RETRY_BUTTON = re.compile(r"^\s*(?:Try again|Retry|حاول مرة أخرى|حاول مجدداً|إعادة المحاولة|أعد المحاولة)\s*$", re.I)
+
+
+def _wait_cards(page, selector: str, timeout_ms: int, retries: int = 3) -> None:
+    """انتظر بطاقات المحتوى، وإن ظهرت شاشة خطأ X اضغط «Try again» بدل انتظار المهلة كاملة.
+
+    قيس 2026-10-26: دورة كاملة بلا أي فعل لأن الخط الزمني والترندات وبحث التخصص فشلت كلها
+    بـ«Locator.wait_for: Timeout 45000ms». الصفحة كانت شاشة «Something went wrong… Try again»
+    (الحساب سليم: HomeTimeline أعاد 200 وحدّه 499/500)، وبعد ضغطتين ظهر المحتوى. الانتظار
+    وحده لا يشفيها أبداً. يرفع الخطأ كما كان إن لم يظهر المحتوى (المستدعون يعاملونه كفشل/فراغ).
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    loc = page.locator(selector).first
+    clicks = 0
+    while (remaining := deadline - time.time()) > 0:
+        try:
+            loc.wait_for(state="visible", timeout=int(min(4.0, max(0.5, remaining)) * 1000))
+            return
+        except Exception:  # noqa: BLE001 - لم يظهر بعد
+            pass
+        if clicks >= retries:
+            continue
+        try:
+            btn = page.get_by_role("button", name=_RETRY_BUTTON)
+            if btn.count() and btn.first.is_visible():
+                btn.first.click(timeout=5_000)
+                clicks += 1
+                logger.info("X error screen at %s → Try again (%d/%d)", page.url, clicks, retries)
+        except Exception:  # noqa: BLE001
+            pass
+    if clicks:
+        raise TimeoutError(f"X أظهر «Something went wrong» ولم يظهر المحتوى بعد {clicks} محاولات "
+                           f"«Try again» ({page.url})")
+    loc.wait_for(state="visible", timeout=500)   # يرفع خطأ Playwright الأصلي
+
+
+# رأس صفحة الحساب: الاسم والنبذة بمحدّدات read_user_profile المتحقَّق منها حيّاً، والصورة
+# عبر رابط /<handle>/photo، والغلاف عبر /<handle>/header_photo (ولا يظهر profile_banners
+# في صفحة الحساب إلا لغلافه هو). X يرسم الإيموجي <img alt> فيُسقطها innerText — قيس حيّاً:
+# «صقر الجزيرة 🇸🇦» قُرئ بلا العلم — لذا يُبنى النص من العُقد مع alt الصور.
+_HEADER_JS = r"""
+(handle) => {
+  const h = (handle || '').toLowerCase();
+  const textOf = el => {
+    let out = '';
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3) out += n.textContent;
+      else if (n.nodeName === 'IMG') out += n.getAttribute('alt') || '';
+      else if (n.nodeName === 'BR') out += '\n';
+      else if (n.nodeType === 1) out += textOf(n);
+    }
+    return out;
+  };
+  const block = document.querySelector('div[data-testid="UserName"]');
+  const first = block ? block.querySelector('span') : null;
+  let name = first ? textOf(first).trim() : '';
+  if (!name && block) {
+    name = (block.innerText || '').split('\n').map(s => s.trim()).find(s => s && !s.startsWith('@')) || '';
+  }
+  const bioEl = document.querySelector('div[data-testid="UserDescription"]');
+  const linkImg = (suffix, pat) => {
+    for (const a of document.querySelectorAll('a[href]')) {
+      if ((a.getAttribute('href') || '').toLowerCase() === `/${h}/${suffix}`) {
+        const img = a.querySelector(`img[src*="${pat}"]`);
+        if (img && img.src) return img.src;
+      }
+    }
+    return '';
+  };
+  let avatar = linkImg('photo', 'profile_images');
+  if (!avatar) {
+    const c = document.querySelector(`div[data-testid="UserAvatar-Container-${handle}"] img[src*="profile_images"]`);
+    avatar = c ? c.src : '';
+  }
+  let banner = linkImg('header_photo', 'profile_banners');
+  if (!banner) {
+    const b = document.querySelector('img[src*="profile_banners"]');
+    banner = b ? b.src : '';
+  }
+  return { name, bio: bioEl ? textOf(bioEl).trim() : '', avatar_url: avatar, banner_url: banner };
+}
+"""
+_X_CDN = ("https://pbs.twimg.com/", "https://abs.twimg.com/")
+
+
+def account_header(raw: Dict[str, Any]) -> Dict[str, str]:
+    """رأس الحساب منظّفاً: روابط صور X فقط، بأعلى دقة يعرضها (400x400 للصورة و1500x500 للغلاف)."""
+    def cdn(url: Any) -> str:
+        url = str(url or "").strip()
+        return url if url.startswith(_X_CDN) else ""
+
+    return {
+        "name": str(raw.get("name") or "").strip()[:60],
+        "bio": str(raw.get("bio") or "").strip()[:300],
+        "avatar_url": re.sub(r"_(normal|bigger|mini|x96|\d+x\d+)(\.\w+)$", r"_400x400\2",
+                             cdn(raw.get("avatar_url"))),
+        "banner_url": re.sub(r"/\d+x\d+$", "/1500x500", cdn(raw.get("banner_url"))),
+    }
+
+
+def _own_handle(page, wait_ms: int = 15_000) -> str:
+    """يوزر الحساب المسجّل فعلاً من رابط «الملف الشخصي» في قائمة X الجانبية — لا من إعداداتنا.
+
+    قيس 2026-11-08: المالك غيّر يوزر الحساب على X (nxjrjrjdj ← nxjrjrjdj2)، فصارت
+    ``x.com/nxjrjrjdj`` «هذا الحساب غير موجود» وفشل جلب الهوية بانتظار رأس لا يظهر أبداً.
+    """
+    link = page.locator('a[data-testid="AppTabBar_Profile_Link"]').first
+    try:
+        link.wait_for(state="attached", timeout=wait_ms)
+        return (link.get_attribute("href") or "").strip("/").split("/")[0].split("?")[0]
+    except Exception:  # noqa: BLE001 - لا قائمة جانبية (تخطيط آخر): نبقى على المعروف
+        return ""
+
+
+def _goto_own_profile(page, handle: str) -> str:
+    """افتح صفحة الحساب نفسه بيوزره **الحالي** على X وأعده (قد يختلف عن المحفوظ عندنا)."""
+    _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
+    _guard_captcha(page)
+    own = _own_handle(page)
+    if own and own.lower() != (handle or "").lower():
+        logger.warning("X handle changed: @%s is now @%s — reading the current profile", handle, own)
+        _goto(page, f"https://x.com/{own}", wait_until="domcontentloaded")
+        _guard_captcha(page)
+        return own
+    return handle
+
+
+def _profile_header(page, handle: str, wait_ms: int = 15_000) -> Dict[str, str]:
+    """اقرأ رأس صفحة الحساب المفتوحة: ينتظر الاسم ثم يمهل الصورة لحظة ليُعرف رابطها."""
+    _wait_cards(page, 'div[data-testid="UserName"]', wait_ms)
+    try:
+        page.locator('img[src*="profile_images"]').first.wait_for(state="attached", timeout=5_000)
+    except Exception:  # noqa: BLE001
+        pass
+    return account_header(page.evaluate(_HEADER_JS, handle) or {})
+
 
 # دالة JS لاستخراج بطاقة تغريدة واحدة — مشتركة بين قارئ التايم لاين وقارئ الخلايا
 _ARTICLE_FN = r"""
@@ -336,7 +522,8 @@ class PlaywrightXMCP(IMCPServer):
     name = "playwright_x"
 
     _TOOLS = ["read_timeline", "read_trends", "search_tweets", "read_top_posts",
-              "read_notifications", "read_user_profile", "read_my_posts"]
+              "read_notifications", "read_user_profile", "read_my_posts",
+              "read_account_profile"]
 
     #: Mentions tab — the replies/mentions directed at THIS account
     _MENTIONS_URL = "https://x.com/notifications/mentions"
@@ -403,11 +590,22 @@ class PlaywrightXMCP(IMCPServer):
                 handle = (p.get("handle") or label or "").strip().lstrip("@")
                 if not handle:
                     return MCPResponse.fail("handle is required for read_my_posts")
+                header: Dict[str, str] = {}
                 posts = self._read_my_posts(
-                    str(cookie_file), handle, limit=limit, headless=headless,
+                    str(cookie_file), handle, limit=limit, headless=headless, header_out=header,
                 )
                 return MCPResponse.ok(posts=posts, count=len(posts), account=label,
-                                      handle=f"@{handle}")
+                                      handle=f"@{handle}", profile=header)
+
+            if tool == "read_account_profile":
+                handle = (p.get("handle") or label or "").strip().lstrip("@")
+                if not handle:
+                    return MCPResponse.fail("handle is required for read_account_profile")
+                profile = self._read_account_profile(
+                    str(cookie_file), handle, headless=headless,
+                    lock_timeout=float(p.get("lock_timeout") or 0),
+                )
+                return MCPResponse.ok(account=label, handle=f"@{handle}", profile=profile)
 
             if tool == "read_user_profile":
                 handle = (p.get("handle") or "").strip().lstrip("@")
@@ -448,33 +646,29 @@ class PlaywrightXMCP(IMCPServer):
             return MCPResponse.fail(f"{tool} failed: {exc}")
 
     # -- Playwright work (sync API, runs in a worker thread) --------------
+    @_failover
     def _read(self, storage_state_path: str, url: str, limit: int, headless: bool,
               soft: bool = False) -> List[Dict[str, Any]]:
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser  # reuse chrome-channel launch
 
         seen: Dict[str, Dict[str, Any]] = {}
         # serialize with all other browser automation: sync playwright is not
         # safe to run concurrently across threads and would deadlock the fleet.
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto(url, wait_until="domcontentloaded")
+                _goto(page, url, wait_until="domcontentloaded")
+                _guard_captcha(page)
                 # انتظر ظهور أول تغريدة (يؤكد نجاح الدخول بالكوكيز). في الوضع
                 # الليّن (soft) لا نفشل الدورة إن لم توجد تغريدات (مثلاً لا توجد
                 # منشنات) بل نرجع قائمة فارغة.
                 try:
-                    page.locator('article[data-testid="tweet"]').first.wait_for(
-                        state="visible", timeout=(20_000 if soft else 45_000)
-                    )
+                    _wait_cards(page, 'article[data-testid="tweet"]', 20_000 if soft else 45_000)
                 except Exception:  # noqa: BLE001
                     if soft:
                         logger.info("no tweet cards at %s (soft read -> empty)", url)
@@ -500,6 +694,7 @@ class PlaywrightXMCP(IMCPServer):
 
         return list(seen.values())[:limit]
 
+    @_failover
     def _read_top_posts(self, storage_state_path: str, limit: int, headless: bool) -> List[Dict[str, Any]]:
         """Read the Creator "Inspiration → Top Posts" page.
 
@@ -508,27 +703,22 @@ class PlaywrightXMCP(IMCPServer):
         account or doesn't surface posts, it returns an empty list instead of
         failing the whole cycle.
         """
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
         seen: Dict[str, Dict[str, Any]] = {}
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto(self._TOP_POSTS_URL, wait_until="domcontentloaded")
+                _goto(page, self._TOP_POSTS_URL, wait_until="domcontentloaded")
+                _guard_captcha(page)
                 # انتظار ليّن: إن لم تظهر بطاقات تغريدات خلال 20 ثانية نرجع فارغاً
                 try:
-                    page.locator('article[data-testid="tweet"]').first.wait_for(
-                        state="visible", timeout=20_000
-                    )
+                    _wait_cards(page, 'article[data-testid="tweet"]', 20_000)
                 except Exception:  # noqa: BLE001
                     logger.info("top_posts page has no tweet cards (account may lack creator tools)")
                     return []
@@ -551,17 +741,20 @@ class PlaywrightXMCP(IMCPServer):
 
         return list(seen.values())[:limit]
 
+    @_failover
     def _read_my_posts(self, storage_state_path: str, handle: str,
-                       limit: int, headless: bool) -> List[Dict[str, Any]]:
+                       limit: int, headless: bool,
+                       header_out: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """اقرأ منشورات الحساب نفسه مع مؤشرات أدائها الفعلية.
 
         هذه هي حلقة التغذية الراجعة التي كانت مفقودة تماماً: بدونها لا يعرف
         الموظف أيّ منشور نجح فعلاً. نقرأ صفحته الشخصية ونستخرج لكل منشور
         (ردود/إعادات نشر/إعجابات/مشاهدات) + وقت النشر، ثم يحسب المستوى الأعلى
         معدّل التفاعل ويتعلّم منه.
-        """
-        from playwright.sync_api import sync_playwright
 
+        ``header_out``: يُملأ برأس الصفحة نفسها (اسم/نبذة/صورة/هيدر) بلا تنقّل إضافي —
+        فتبقى بطاقة الموظف مطابقة لهويته على X مع كل قراءة أداء. فشله لا يمس القراءة.
+        """
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
@@ -569,20 +762,24 @@ class PlaywrightXMCP(IMCPServer):
 
         target = f"@{handle.lower()}"
         seen: Dict[str, Dict[str, Any]] = {}
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 1000},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 1000})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                # يوزر الحساب الحالي على X (قد يكون تغيّر): منه تُقاس «منشوراتي» لا من المحفوظ
+                handle = _goto_own_profile(page, handle)
+                target = f"@{handle.lower()}"
+                if header_out is not None:
+                    header_out["handle"] = handle
+                    try:
+                        header_out.update(_profile_header(page, handle))
+                    except Exception:  # noqa: BLE001
+                        logger.info("profile header not read for @%s", handle)
                 try:
-                    page.locator('article[data-testid="tweet"]').first.wait_for(
-                        state="visible", timeout=25_000
-                    )
+                    _wait_cards(page, 'article[data-testid="tweet"]', 25_000)
                 except Exception:  # noqa: BLE001
                     logger.info("no posts on profile of @%s", handle)
                     return []
@@ -620,6 +817,31 @@ class PlaywrightXMCP(IMCPServer):
 
         return list(seen.values())[:limit]
 
+    @_failover
+    def _read_account_profile(self, storage_state_path: str, handle: str, headless: bool,
+                              lock_timeout: float = 0.0) -> Dict[str, str]:
+        """هوية الحساب كما تظهر على X الآن (اسم/نبذة/صورة/هيدر) — لبطاقة الموظف.
+
+        ``lock_timeout`` > 0 لطلب تفاعلي من المالك: يفشل سريعاً برسالة واضحة إن كان
+        المتصفح محجوزاً بدورة، بدل انتظار مفتوح حتى تنتهي مهلة الطلب."""
+        from app.services.x_bridge import browser_lock
+        from app.x.modules.x_actions import _launch_browser
+
+        slot = _browser_slot(lock_timeout) if lock_timeout > 0 else browser_lock
+        with slot, _sync_playwright() as pw:
+            browser = _launch_browser(pw, headless=headless)
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+            page.set_default_timeout(30_000)
+            try:
+                handle = _goto_own_profile(page, handle)
+                return {**_profile_header(page, handle, wait_ms=20_000), "handle": handle}
+            finally:
+                context.close()
+                browser.close()
+
+    @_failover
     def _read_user_profile(self, storage_state_path: str, handle: str,
                            limit: int, headless: bool,
                            lock_timeout: float = 45.0,
@@ -645,8 +867,6 @@ class PlaywrightXMCP(IMCPServer):
         ``from:<handle>`` في فترات أقدم، لأن التبويبين يعيدان الأحدث فقط: هوية
         مأخوذة من آخر أسبوعين هي «مواضيع المرحلة» لا الشخصية.
         """
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
@@ -681,11 +901,10 @@ class PlaywrightXMCP(IMCPServer):
             skip = exclude or set()
             seen: Dict[str, Dict[str, Any]] = {}
             if navigate:
-                page.goto(url, wait_until="domcontentloaded")
+                _goto(page, url, wait_until="domcontentloaded")
+                _guard_captcha(page)
             try:
-                page.locator('article[data-testid="tweet"]').first.wait_for(
-                    state="visible", timeout=15_000
-                )
+                _wait_cards(page, 'article[data-testid="tweet"]', 15_000)
             except Exception:  # noqa: BLE001
                 logger.info("no tweet cards at %s (empty/protected profile?)", url)
                 return []
@@ -734,9 +953,10 @@ class PlaywrightXMCP(IMCPServer):
             """
             rank = {"pairs": 3, "loose": 2, "originals": 1}
             found: Dict[str, Dict[str, Any]] = {}
-            page.goto(url, wait_until="domcontentloaded")
+            _goto(page, url, wait_until="domcontentloaded")
+            _guard_captcha(page)
             try:
-                page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=15_000)
+                _wait_cards(page, 'article[data-testid="tweet"]', 15_000)
             except Exception:  # noqa: BLE001
                 logger.info("no tweet cards at %s", url)
                 return found
@@ -771,22 +991,29 @@ class PlaywrightXMCP(IMCPServer):
             return found
 
         started = time.time()
-        with _browser_slot(lock_timeout), sync_playwright() as pw:
+        with _browser_slot(lock_timeout), _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(30_000)
             try:
                 # 1) الصفحة الرئيسية: البايو + التغريدات الأصلية (تحميل واحد فقط —
                 #    كان الكود يعيد الانتقال إلى نفس الرابط مرتين بلا داعٍ)
-                page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded")
+                # أول تحميل عبر جلسة بروكسي سكني باردة قد يتجاوز 30 ث (قيس 2026-10-25:
+                # فشل الاستنساخ بمهلة goto، وطلب HTML نفسه أخذ 15.5 ث بارداً ثم 1.4-2.4 ث
+                # دافئاً، والإعادة نجحت في 7.5 ث) — إعادة واحدة بمهلة أطول، ثم فشل صريح.
                 try:
-                    page.locator('div[data-testid="UserName"]').first.wait_for(
-                        state="visible", timeout=20_000
-                    )
+                    _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded")
+                except Exception as exc:  # noqa: BLE001
+                    if "Timeout" not in str(exc):
+                        raise
+                    logger.warning("read_user_profile @%s: goto timeout — إعادة واحدة", handle)
+                    _goto(page, f"https://x.com/{handle}", wait_until="domcontentloaded",
+                          timeout=60_000)
+                _guard_captcha(page)
+                try:
+                    _wait_cards(page, 'div[data-testid="UserName"]', 20_000)
                     profile.update(page.evaluate(bio_js) or {})
                 except Exception:  # noqa: BLE001
                     logger.info("profile header not found for @%s", handle)
@@ -842,26 +1069,22 @@ class PlaywrightXMCP(IMCPServer):
         }
         return profile
 
+    @_failover
     def _read_trends(self, storage_state_path: str, limit: int, headless: bool) -> List[Dict[str, Any]]:
         """Read the account's own Trending tab (what X shows THIS account)."""
-        from playwright.sync_api import sync_playwright
-
         from app.services.x_bridge import browser_lock
         from app.x.modules.x_actions import _launch_browser
 
-        with browser_lock, sync_playwright() as pw:
+        with browser_lock, _sync_playwright() as pw:
             browser = _launch_browser(pw, headless=headless)
-            context = browser.new_context(
-                storage_state=storage_state_path,
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _new_context(browser, storage_state_path,
+                                   viewport={"width": 1280, "height": 900})
             page = context.new_page()
             page.set_default_timeout(60_000)
             try:
-                page.goto("https://x.com/explore/tabs/trending", wait_until="domcontentloaded")
-                page.locator('[data-testid="trend"]').first.wait_for(
-                    state="visible", timeout=45_000
-                )
+                _goto(page, "https://x.com/explore/tabs/trending", wait_until="domcontentloaded")
+                _guard_captcha(page)
+                _wait_cards(page, '[data-testid="trend"]', 45_000)
                 page.wait_for_timeout(1200)
                 trends = page.evaluate(_TRENDS_JS) or []
             finally:

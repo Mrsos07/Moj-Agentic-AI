@@ -1,22 +1,23 @@
-import os
 import re
 import time
 from typing import Optional
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page
+
+from .x_captcha import guard as _captcha_guard
+from .x_captcha import goto as _goto
+from .x_captcha import launch_browser as _stealth_launch
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import sync_playwright
+from .sync_bridge import sync_safe
 
 
 DEFAULT_TIMEOUT = 30_000
 
 
 def _launch_browser(p, headless: bool):
-    """Launch Chromium with optional Chrome channel (defaults to installed Chrome)."""
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-    try:
-        return p.chromium.launch(channel=chrome_channel, headless=headless)
-    except Exception:
-        # Fallback if channel isn't available
-        return p.chromium.launch(headless=headless)
+    """Chrome الخفي (Patchright) مع بروكسي الإطلاق — يُستورد من بقية الوحدات وقارئ playwright_x."""
+    return _stealth_launch(p, headless=headless)
 
 
 def _norm_tweet_url(url: str) -> str:
@@ -31,7 +32,9 @@ def _goto_tweet(page: Page, tweet_url: str):
     tweet_url = _norm_tweet_url(tweet_url)
     if not tweet_url:
         raise ValueError("tweet_url required")
-    page.goto(tweet_url, wait_until="domcontentloaded")
+    _goto(page, tweet_url, wait_until="domcontentloaded")
+    # تحقق «Verify you are human» يظهر أحياناً قبل التغريدة — بدونه كل تفاعل يفشل
+    _captcha_guard(page, log=print)
     # Ensure tweet page is ready
     page.wait_for_timeout(6200)
     # Sometimes content loads after initial DOMContentLoaded
@@ -234,17 +237,117 @@ def _success_toast_sent(page) -> bool:
         return False
 
 
-def _reply_submitted(page, filled_text: str = "", timeout_ms: int = 20_000) -> bool:
+_REPLY_TB = "div[data-testid='tweetTextarea_0']"
+
+
+def _reply_scope(page):
+    """نطاق محرّر الرد: مودال الرد إن انفتح، وإلا الصفحة (المحرّر المضمّن تحت التغريدة).
+
+    صفحة التغريدة فيها محرّر رد مضمّن، وزر «رد» يفتح مودالاً بمحرّر ثانٍ بنفس
+    ``data-testid``. البحث على مستوى الصفحة بـ``.first`` كان يلتقط المضمّن خلف قناع
+    المودال: «mask ... intercepts pointer events» ثم Timeout، أو يُكتب النص في المودال
+    ويُضغط زر الصفحة فيبقى المحرّر ممتلئاً (قيس 2026-10-25 بلقطة debug_reply.png).
+    بنية DOM المقيسة: ``#layers > [role=dialog]`` (ارتفاعه 0 فـ``is_visible`` خاطئ) ``> [role=group]
+    > [role=dialog][aria-modal=true]`` (المودال الفعلي)، والمحرّر المضمّن
+    ``inline_reply_offscreen`` يسبقه في ترتيب DOM — لذا المودال الداخلي تحديداً.
+
+    لا يُشترط ظهور المودال نفسه: قيس 2026-10-28 أن القناع يغطي الصفحة فوراً بينما المودال
+    ارتفاعه 0 حتى يُحمَّل محتواه (أبطأ عبر البروكسي)، فكان ``is_visible`` خاطئاً فيُعاد نطاق
+    الصفحة والمحرّر المضمّن خلف القناع ← نفس Timeout. وجود المحرّر داخله يكفي.
+    """
+    for sel in (f"div[role='dialog'][aria-modal='true']:has({_REPLY_TB})",
+                f"div[role='dialog']:has({_REPLY_TB})"):
+        dlg = page.locator(sel).last
+        try:
+            if dlg.count():
+                return dlg
+        except Exception:
+            pass
+    return page
+
+
+def _modal_layer_open(page) -> bool:
+    """قناع طبقة مودال يغطي الصفحة (#layers [data-testid=mask]) — لا نقر على الصفحة خلفه."""
+    try:
+        mask = page.locator("#layers [data-testid='mask']")
+        return bool(mask.count() and mask.first.is_visible())
+    except Exception:
+        return False
+
+
+def _open_reply_composer(page, tweet_url: str, timeout_ms: int = 30_000):
+    """افتح محرّر الرد للتغريدة المستهدفة وأعد نطاقه (المودال أو الصفحة)."""
+    def ready():
+        scope = _reply_scope(page)
+        if scope is page and _modal_layer_open(page):
+            return None                  # مودال يُفتح ولم يظهر محرّره بعد: انتظر، لا الصفحة خلفه
+        tb = scope.locator(_REPLY_TB)
+        try:
+            return scope if (tb.count() and tb.first.is_visible()) else None
+        except Exception:
+            return None
+
+    scope = ready()
+    if scope is not None:
+        return scope
+    if _modal_layer_open(page) and _reply_scope(page) is page:
+        # مودال آخر بلا محرّر (إعلان/تنبيه من X) يحجب زر الرد: أغلقه أولاً
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(600)
+    # زر الرد في التغريدة المستهدفة نفسها: صفحة الرد تعرض الأصل فوقها، وأول زر في
+    # الصفحة كان قد يفتح الرد على تغريدة أخرى
+    try:
+        focal_tweet(page, tweet_url).locator("[data-testid='reply']").first.click(timeout=10_000)
+    except Exception:
+        _click_first_visible(page, ["div[data-testid='reply']", "button[data-testid='reply']"],
+                             timeout_ms=timeout_ms)
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        if ready() is not None:
+            page.wait_for_timeout(800)  # حركة فتح المودال: «element is not stable» ثم إعادة تركيب
+            scope = ready()
+            if scope is not None:
+                return scope
+        page.wait_for_timeout(300)
+    raise RuntimeError("لم ينفتح محرّر الرد على التغريدة.")
+
+
+def _click_reply_publish(scope) -> None:
+    """زر نشر الرد داخل نطاق المحرّر نفسه (tweetButton في المودال، tweetButtonInline في الصفحة)."""
+    for sel in ("button[data-testid='tweetButton']", "button[data-testid='tweetButtonInline']"):
+        btn = scope.locator(sel)
+        try:
+            if not (btn.count() and btn.first.is_visible()):
+                continue
+        except Exception:
+            continue
+        btn.first.scroll_into_view_if_needed()
+        try:
+            btn.first.click(timeout=8_000)
+        except Exception:
+            btn.first.click(timeout=8_000, force=True)
+        return
+    raise RuntimeError("لم أجد زر نشر الرد داخل المحرّر.")
+
+
+def _reply_submitted(page, filled_text: str = "", timeout_ms: int = 20_000, scope=None) -> bool:
     """تأكيد فعلي أن الرد أُرسل.
 
     إشارتان موثوقتان بعد الضغط على زر النشر:
       1) ظهور توست نجاح ("Your reply was sent" / "تم إرسال ردك").
-      2) إفراغ/اختفاء محرّر الرد (tweetTextarea_0) بعد أن كان يحوي النص.
+      2) إفراغ/اختفاء محرّر الرد (tweetTextarea_0) بعد أن كان يحوي النص — داخل
+         نطاق المحرّر الذي كُتب فيه (المودال)، لا أول محرّر في الصفحة.
     إن بقي المحرّر ممتلئاً بالنص ولم يظهر توست => الرد لم يُرسل.
+    توست خطأ صريح من X (تكرار/حد) يُرفع استثناءً بنصه بدل «لم يتأكد».
     """
+    from .x_post import _error_toast_text
+
     deadline = time.time() + (timeout_ms / 1000.0)
-    tb = page.locator("div[data-testid='tweetTextarea_0']")
+    tb = (scope if scope is not None else page).locator(_REPLY_TB)
     while time.time() < deadline:
+        err = _error_toast_text(page)
+        if err:
+            raise RuntimeError(f"رفض X نشر الرد: {err}")
         if _success_toast_sent(page):
             return True
         try:
@@ -260,11 +363,12 @@ def _reply_submitted(page, filled_text: str = "", timeout_ms: int = 20_000) -> b
     return False
 
 
+@sync_safe
 def like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
     """Like a tweet by URL."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -296,11 +400,12 @@ def like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_aft
             browser.close()
 
 
+@sync_safe
 def repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
     """Repost (retweet) a tweet by URL."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -398,13 +503,14 @@ def _state_in(scope, testid: str, timeout_ms: int = 8_000) -> bool:
     return False
 
 
+@sync_safe
 def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000) -> str:
     """Undo repost (unretweet). Returns ``"done"`` (verified) or ``"already"`` (was not reposted).
 
     كان يضغط نص «Undo repost» الإنجليزي فقط، بلا أي تحقق، على أول تغريدة في الصفحة."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -429,6 +535,7 @@ def undo_repost_tweet(storage_state_path: str, tweet_url: str, headless: bool, w
             browser.close()
 
 
+@sync_safe
 def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000) -> str:
     """Undo like. Returns ``"done"`` (verified) or ``"already"`` (was not liked).
 
@@ -436,7 +543,7 @@ def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wai
     معجَباً بها بدل أن يتراجع."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -456,6 +563,7 @@ def undo_like_tweet(storage_state_path: str, tweet_url: str, headless: bool, wai
             browser.close()
 
 
+@sync_safe
 def reply_to_tweet(
     storage_state_path: str,
     tweet_url: str,
@@ -469,78 +577,83 @@ def reply_to_tweet(
     reply_text = (reply_text or "").strip()
     if not reply_text:
         raise ValueError("reply_text required")
+    from .x_text import X_LIMIT, weighted_len
+
+    # X يعطّل زر «ردّ» فوق الحد (بلا Premium) فلا يُرسل أبداً: افشل فوراً بسبب واضح لا بعد دقيقتين
+    if weighted_len(reply_text) > X_LIMIT:
+        raise ValueError(f"الرد أطول من حد X ({weighted_len(reply_text)}/{X_LIMIT} حرفاً) — اختصره")
 
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
             _goto_tweet(page, tweet_url)
 
-            # Open reply composer (if needed)
-            reply_btn_selectors = [
-                "div[data-testid='reply']",
-                "button[data-testid='reply']",
-                "div[role='button'][data-testid='reply']",
-                "[aria-label*='Reply']",
-                "[aria-label*='رد']",
-            ]
-            # If textbox already visible, skip clicking reply
-            textbox = page.locator("div[data-testid='tweetTextarea_0']")
-            if not (textbox.count() and textbox.first.is_visible()):
-                _click_first_visible(page, reply_btn_selectors, timeout_ms=30_000)
-
-            # Textbox
-            tb = page.locator("div[data-testid='tweetTextarea_0'][role='textbox']")
-            if not tb.count():
-                tb = page.locator("div[data-testid='tweetTextarea_0']")
-            tb.first.wait_for(state="visible", timeout=60_000)
-            tb.first.click()
+            # كل ما يلي داخل نطاق محرّر واحد (المودال أو المضمّن) — انظر _reply_scope
+            scope = _open_reply_composer(page, tweet_url)
+            tb = scope.locator(_REPLY_TB).first
             try:
-                tb.first.fill(reply_text)
+                tb.click(timeout=10_000)
             except Exception:
-                tb.first.press("Control+A")
-                
+                # حُجب النقر (مودال انفتح بعد اختيار النطاق): أعد تحديد المحرّر ثم ركّز بلا نقر
+                scope = _open_reply_composer(page, tweet_url)
+                tb = scope.locator(_REPLY_TB).first
+                try:
+                    tb.click(timeout=10_000)
+                except Exception:
+                    tb.focus()
+            try:
+                tb.fill(reply_text)
+            except Exception:
+                tb.press("Control+A")
+                tb.type(reply_text, delay=10)
+            if not (tb.inner_text() or "").strip():
+                tb.type(reply_text, delay=10)
 
             # Attach media (optional) for reply
             if media_path and str(media_path).strip():
-                scope = _get_scope(page)
                 file_input = _pick_file_input(scope)
                 if file_input is None:
                     raise RuntimeError("Could not find file input for reply composer.")
                 file_input.wait_for(state="attached", timeout=60_000)
                 file_input.set_input_files(media_path)
                 _wait_media_uploaded_in_composer(page, timeout_ms=media_timeout_ms)
-            
-            
-            # Publish reply: tweetButtonInline preferred
-            publish_selectors = [
-                "button[data-testid='tweetButtonInline']",
-                "button[data-testid='tweetButton']",
-                # fallback by visible text (EN/AR)
-                "button:has-text('Reply')",
-                "button:has-text('رد')",
-                "button:has-text('نشر')",
-                "button:has-text('Post')",
-            ]
 
             # Wait until enabled (no eval/CSP-safe). For video replies this matters.
-            scope = _get_scope(page)
-            _wait_button_enabled(scope, ["button[data-testid='tweetButtonInline']", "button[data-testid='tweetButton']", "button:has-text('Reply')", "button:has-text('رد')", "button:has-text('نشر')", "button:has-text('Post')"], timeout_ms=120_000)
+            publish_selectors = ["button[data-testid='tweetButton']",
+                                 "button[data-testid='tweetButtonInline']"]
+            # الميديا (فيديو) تحتاج وقتاً حتى يُفعَّل الزر؛ النص وحده إن لم يُفعَّل خلال 15 ث فلن يُفعَّل
+            enabled = _wait_button_enabled(scope, publish_selectors,
+                                           timeout_ms=120_000 if media_path else 15_000)
 
             # If it never becomes enabled, we'll still attempt the click (X UI can be flaky)
-            _click_first_visible(page, publish_selectors, timeout_ms=30_000)
+            _click_reply_publish(scope)
             page.wait_for_timeout(1500)
 
-            # تأكيد فعلي أن الرد أُرسل قبل اعتبار العملية ناجحة (يمنع النجاح الكاذب).
-            if not _reply_submitted(page, filled_text=reply_text, timeout_ms=20_000):
+            # تأكيد فعلي أن الرد أُرسل قبل اعتبار العملية ناجحة (يمنع النجاح الكاذب)،
+            # ثم فولباك Ctrl+Enter كالنشر والاقتباس (محرّر X يتجاهل النقر البرمجي أحياناً).
+            sent = _reply_submitted(page, filled_text=reply_text, timeout_ms=15_000, scope=scope)
+            if not sent:
+                try:
+                    box = scope.locator(_REPLY_TB)
+                    if box.count() and box.first.is_visible():
+                        box.first.click(timeout=5_000)
+                        page.keyboard.press("Control+Enter")
+                        page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+                sent = _reply_submitted(page, filled_text=reply_text, timeout_ms=10_000, scope=scope)
+            if not sent:
                 try:
                     page.screenshot(path="debug_reply.png", full_page=True)
                 except Exception:
                     pass
                 raise RuntimeError(
-                    "لم يتم تأكيد إرسال الرد: بقي المحرّر ممتلئاً ولم يظهر تأكيد الإرسال."
+                    "لم يتم تأكيد إرسال الرد: "
+                    + ("زر «ردّ» بقي معطّلاً (رفض X النص — غالباً تجاوز الحد أو محتوى غير مسموح)."
+                       if not enabled else "بقي المحرّر ممتلئاً ولم يظهر تأكيد الإرسال.")
                 )
 
             # انتظار قصير بعد التأكيد
@@ -554,7 +667,7 @@ def bookmark_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait
     """Bookmark a tweet by URL."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -586,6 +699,7 @@ def bookmark_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait
             browser.close()
 
 
+@sync_safe
 def quote_tweet(
     storage_state_path: str,
     tweet_url: str,
@@ -602,7 +716,7 @@ def quote_tweet(
 
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -705,11 +819,12 @@ def quote_tweet(
             browser.close()
 
 
+@sync_safe
 def share_copy_link(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 2_000):
     """Open share menu and click 'Copy link' (share via OS sheet is not reliable in automation)."""
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -743,23 +858,21 @@ def share_copy_link(storage_state_path: str, tweet_url: str, headless: bool, wai
             browser.close()
 
 
+@sync_safe
 def follow_user(storage_state_path: str, profile_url: str, headless: bool = True, wait_after_ms: int = 2000):
     """
     Follow user by visiting their profile and clicking Follow.
     Supports Arabic/English because it relies on data-testid patterns when possible.
     """
-    from playwright.sync_api import sync_playwright
-
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel=chrome_channel, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        browser = _launch_browser(p, headless=headless)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(60_000)
 
         try:
-            page.goto(profile_url, wait_until="domcontentloaded")
+            _goto(page, profile_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             page.wait_for_timeout(6200)
 
             # Prefer testid like "*-follow"
@@ -817,23 +930,21 @@ def follow_user(storage_state_path: str, profile_url: str, headless: bool = True
             browser.close()
 
 
+@sync_safe
 def unfollow_user(storage_state_path: str, profile_url: str, headless: bool = True, wait_after_ms: int = 2000):
     """
     Unfollow user by visiting their profile and clicking Following -> confirm.
     Uses data-testid '*-unfollow' and confirmationSheetConfirm.
     """
-    from playwright.sync_api import sync_playwright
-
-    chrome_channel = os.getenv("XSUITE_CHROME_CHANNEL", "").strip() or "chrome"
-
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel=chrome_channel, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        browser = _launch_browser(p, headless=headless)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(60_000)
 
         try:
-            page.goto(profile_url, wait_until="domcontentloaded")
+            _goto(page, profile_url, wait_until="domcontentloaded")
+            _captcha_guard(page, log=print)
             page.wait_for_timeout(6200)
 
             btn = page.locator('[data-testid$="-unfollow"]')

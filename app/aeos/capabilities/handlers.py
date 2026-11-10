@@ -13,7 +13,7 @@ import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
-from ..employee import x_algorithm
+from ..employee import unslop, x_algorithm
 from ..mcp.base import MCPRequest
 from ..memory.base import MemoryLayerType
 from .base import CapabilityRequest, CapabilityResult, ICapability
@@ -160,17 +160,10 @@ def _normalize_post_text(text: str) -> str:
     # collapse excessive blank lines
     while "\n\n\n" in t:
         t = t.replace("\n\n\n", "\n\n")
-    if len(t) <= 280:
-        return t
-    # قصّ ذكي: فضّل نهاية جملة تامة، وإلا آخر مسافة — دون قطع كلمة في منتصفها
-    cut = t[:279]
-    ends = list(re.finditer(r"[\.!\?؟…]", cut))
-    if ends and ends[-1].end() >= 140:
-        return cut[: ends[-1].end()].strip()
-    sp = cut.rfind(" ")
-    if sp >= 140:
-        return cut[:sp].rstrip() + "…"
-    return cut.rstrip() + "…"
+    # قصّ ذكي بطول X الفعلي (الإيموجي حرفان، الرابط 23): نهاية جملة تامة وإلا آخر مسافة
+    from app.x.modules.x_text import fit
+
+    return fit(t)
 
 
 #: عبارات القوالب الميتة التي تجعل المنشور يبدو آلياً بلا مضمون. وجود أيّ منها
@@ -258,12 +251,15 @@ def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> 
             if " ".join(str(prev).split()[:3]).lower() == opening:
                 issues.append("repeated_opening")
                 break
+    # علامات الكتابة الآلية (مهارة unslop): إعادة توليد بتصحيح محدد، لا منع للنشر
+    if unslop.enabled(context.config) and unslop.needs_fix(unslop.scan(t)):
+        issues.append("ai_slop")
     return issues
 
 
 #: عيوب تستحق إعادة توليد
 _HARD_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief",
-                        "repeated_opening", "question_ending", "copied_exemplar"}
+                        "repeated_opening", "question_ending", "copied_exemplar", "ai_slop"}
 
 #: عيوب تمنع النشر نهائياً لو بقيت بعد إعادة التوليد. تكرار المطلع ليس منها:
 #: شخصية تبدأ منشوراتها دائماً بنمط واحد (مثل «عاجل:») كانت ستُمنع من النشر
@@ -546,7 +542,13 @@ def _content_prompt(brief: str, context: "ExecutionContext") -> str:
             f"{_pick_variant(context, 'voice', _POST_VOICES)}"),
         "- تنوّعُ الأسلوب لا يُلغي الشخصية: الموقف والقيم والتخصص ثابتة، "
         "والمتغير هو الصياغة والإيقاع.",
+        unslop.prompt_rules(context.config),
     ]
+    from ..employee import tool_use as _tu
+
+    mcp_block = _tu.signals_block(context)        # ترندات/إشارات أدوات MCP المرصودة هذه الدورة
+    if mcp_block:
+        lines += ["", mcp_block]
     if vp:
         lines += ["", voice_profile.voice_block(vp, "post")]
     if focus:
@@ -606,6 +608,9 @@ def _generate_quality_post(brief: str, context: "ExecutionContext",
 
     hints = "\n".join(f"- {_QUALITY_FIX_HINTS[i]}" for i in hard
                       if i in _QUALITY_FIX_HINTS)
+    if "ai_slop" in hard:
+        # تصحيح بالعبارات الفعلية التي ظهرت في هذا النص (لا توجيه عام)
+        hints = (hints + "\n" if hints else "") + unslop.fix_hint(unslop.scan(text))
     logger.info("post quality retry (issues=%s)", hard)
     retry = _autofix_post_text(_generate_post_text(brief, context, hints))
     if not retry:
@@ -776,6 +781,9 @@ class ReplyToUserCapability(ICapability):
                 if brief else
                 "- جملة إلى ثلاث جمل كحد أقصى، بلا هاشتاقات، وإيموجي واحد كحد أقصى.\n"
             )
+            # حد X الصارم يعلو أي أسلوب (بصمة/نقاط مرقّمة من النقد الذاتي): رد 3 نقاط تجاوز 280
+            # بـ13 حرفاً فعطّل X زر الرد (قيس 2026-10-28)
+            length_line += "- الحد الصارم: أقل من 240 حرفاً شاملاً المسافات والترقيم — لا قوائم مرقّمة طويلة في الرد.\n"
             voice_reply = ""
             if vp:
                 voice_reply = "\n" + (voice_profile.voice_block(vp, "reply") + "\n" + plan["block"]
@@ -808,6 +816,7 @@ class ReplyToUserCapability(ICapability):
                 "- لا تذكر أنك ترد أو تعلّق، اكتب الرد مباشرة وبدون علامات اقتباس.\n"
                 "- إن كان النص الأصلي خارج مجال تخصصك أو يبدو إعلانياً/ترويجياً فلا تنجرف وراءه، وحافظ على رد مهني ضمن اختصاصك فقط.\n"
                 "- التزم حرفياً بتعليمات الشخصية ومحظوراتها (Do/Don't) وقيمها الواردة في تعليمات النظام.\n"
+                + (unslop.prompt_rules(context.config) + "\n" if unslop.enabled(context.config) else "")
                 + voice_reply
                 + x_algorithm.algo_prompt_block("reply")
             )
@@ -837,6 +846,11 @@ class ReplyToUserCapability(ICapability):
                 if retry:
                     reply_text = retry
                     issues = voice_profile.reply_repetition(reply_text, own_replies, plan["banned"])
+            if reply_text and not issues:
+                # unslop: مرة واحدة، والنسخة الجديدة مقبولة فقط إن لم تكرر الردود السابقة
+                reply_text, _ = unslop.polish(
+                    reply_text, _generate_reply, context.config,
+                    accept=lambda r: not voice_profile.reply_repetition(r, own_replies, plan["banned"]))
             if issues and bool((context.config.business_rules or {}).get("quality_gate", True)):
                 return CapabilityResult.fail(
                     f"رُفض الرد في بوابة التكرار ({', '.join(issues)}): «{reply_text[:80]}»", self.name)
@@ -849,13 +863,15 @@ class ReplyToUserCapability(ICapability):
         if _vp.copies_exemplar(reply_text, _vp.get(context.config)):
             return CapabilityResult.fail(
                 "الرد نسخة شبه حرفية من رد حقيقي للحساب المستنسخ — لا يُنشر", self.name)
-        # حدّ صارم للطول في وضع الاختصار الشديد
-        if brief and len(reply_text) > 160:
-            reply_text = reply_text[:157].rstrip() + "..."
+        from app.x.modules.x_text import fit
+
         if request.params.get("hashtag"):
             from ..employee.trend_intel import ensure_hashtag
 
             reply_text = ensure_hashtag(reply_text, request.params["hashtag"])
+        # حد X بالطول الفعلي (وأقصر في وضع الاختصار الشديد): نص أطول يعطّل زر «ردّ» فلا يُرسل أبداً.
+        # هامش 10: عدّنا للرد الفاشل 288 بينما أظهر X ‎-13 (293) — لا نراهن على تطابق العدّ حرفياً
+        reply_text = fit(reply_text, 150 if brief else 270)
 
         res = context.mcp.call(MCPRequest(
             employee_id=context.config.id, tool="reply",
@@ -1122,8 +1138,12 @@ class BrowseSpecialtyNewsCapability(ICapability):
 
         lang = getattr(context.config.persona, "language", "ar") or "ar"
         limit = int(request.params.get("limit", 12))
-        # استعلام بحث حي على X لأحدث ما يخص التخصص (Playwright فقط)
-        query = " OR ".join(interests[:3])
+        # استعلام بحث حي على X لأحدث ما يخص التخصص (Playwright فقط). مواضيع ترند التخصص
+        # (أدوات MCP هذه الدورة) تتقدّم: يبحث الموظف في X عمّا يُتداول الآن في مجاله
+        trend_q = [q for q in (context.scratch.get("trend_x_queries") or []) if q][:2]
+        terms = [f'"{q}"' if " " in q else q for q in trend_q] + interests[:3 - min(len(trend_q), 2)]
+        interests = list(interests) + trend_q           # فلتر الصلة يقبل تغريدات موضوع الترند
+        query = " OR ".join(terms)
         if lang in ("ar", "en"):
             query = f"({query}) lang:{lang}"
 
@@ -1523,7 +1543,7 @@ class PublishThreadCapability(ICapability):
     _MAX_PART = 270
 
     def _generate_parts(self, request: CapabilityRequest,
-                        context: "ExecutionContext") -> List[str]:
+                        context: "ExecutionContext", hint: str = "") -> List[str]:
         wanted = max(2, min(int(request.params.get("parts", 4) or 4), 8))
         brief = request.params.get("brief") or "اكتب ثريداً مفيداً في مجال تخصصك."
         if not (context.llm and context.llm.available):
@@ -1548,6 +1568,7 @@ class PublishThreadCapability(ICapability):
                 "- بلا ترقيم آلي (1/5) وبلا هاشتاقات إلا واحداً في الأخيرة كحد أقصى.\n"
                 "- بلا عبارات تمهيدية مثل «ثريد:» أو «سلسلة تغريدات».\n"
                 + x_algorithm.algo_prompt_block("thread", include_common=False)
+                + (f"\n\nتصحيحات إلزامية لهذه المحاولة:\n{hint}" if hint else "")
             ),
             temperature=0.8,
         ) or {}
@@ -1565,6 +1586,13 @@ class PublishThreadCapability(ICapability):
         parts = [str(t).strip() for t in (request.params.get("texts") or []) if str(t).strip()]
         if not parts:
             parts = self._generate_parts(request, context)
+            # unslop على الثريد كاملاً: إعادة توليد واحدة بتصحيح محدد، ويُحتفظ بالأفضل
+            if len(parts) >= 2:
+                joined, _ = unslop.polish(
+                    "\n\n".join(parts),
+                    lambda hint: "\n\n".join(self._generate_parts(request, context, hint)),
+                    context.config, accept=lambda t: len([p for p in t.split("\n\n") if p.strip()]) >= 2)
+                parts = [p for p in joined.split("\n\n") if p.strip()]
         if len(parts) < 2:
             return CapabilityResult.fail(
                 "could not generate a thread (need at least 2 parts)", self.name)
@@ -1636,28 +1664,33 @@ class QuotePostCapability(ICapability):
             # الاقتباس يضيف «زاوية أو معلومة»: أدوات الموظف (Tavily…) تعطيه المعلومة فعلاً
             research_block = (_with_tool_research("", original, context)
                               if (context.config.business_rules or {}).get("research_before_quotes", True) else "")
-            gen = context.mcp.call(MCPRequest(
-                employee_id=context.config.id, tool="generate",
-                params={
-                    "prompt": _trend_prompt(request.params, research_block + (
-                        f"هذه تغريدة في مجالك:\n«{original}»\n\n"
-                        f"اكتب تعليق اقتباس (Quote) قصيراً باللغة ({lang})"
-                        + (f" وبلهجة {dialect}" if dialect else "") + ":\n"
-                        "- أضف زاوية أو معلومة أو موقفاً واضحاً لا يكرّر نص التغريدة.\n"
-                        "- جملتان كحد أقصى، أقل من 200 حرف، بلا هاشتاقات، وبلا اقتباس النص حرفياً.\n"
-                        "- لا تقل «أقتبس» أو «أشارككم»، اكتب التعليق مباشرة.\n"
-                        f"- النبرة المطلوبة هذه المرة (تتغير): "
-                        f"{_pick_variant(context, 'voice', _POST_VOICES)}\n"
-                        "- لا تنهِ التعليق بسؤال روتيني من نوع «ما رأيكم؟».\n"
-                        "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر.\n"
-                        + x_algorithm.algo_prompt_block("quote")
-                    )),
-                    "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
-                    "temperature": 0.85, "max_tokens": 160,
-                },
-                context={"server": "content"},
+
+            prompt = _trend_prompt(request.params, research_block + (
+                f"هذه تغريدة في مجالك:\n«{original}»\n\n"
+                f"اكتب تعليق اقتباس (Quote) قصيراً باللغة ({lang})"
+                + (f" وبلهجة {dialect}" if dialect else "") + ":\n"
+                "- أضف زاوية أو معلومة أو موقفاً واضحاً لا يكرّر نص التغريدة.\n"
+                "- جملتان كحد أقصى، أقل من 200 حرف، بلا هاشتاقات، وبلا اقتباس النص حرفياً.\n"
+                "- لا تقل «أقتبس» أو «أشارككم»، اكتب التعليق مباشرة.\n"
+                f"- النبرة المطلوبة هذه المرة (تتغير): "
+                f"{_pick_variant(context, 'voice', _POST_VOICES)}\n"
+                "- لا تنهِ التعليق بسؤال روتيني من نوع «ما رأيكم؟».\n"
+                "- إن كان الطرح ناقصاً فكمّله بأدب، وإن كان خاطئاً فصحّحه بلطف ودليل مختصر.\n"
+                + unslop.prompt_rules(context.config) + "\n"
+                + x_algorithm.algo_prompt_block("quote")
             ))
-            text = (gen.data.get("text", "") or "").strip()
+
+            def _gen_quote(hint: str = "") -> str:
+                gen = context.mcp.call(MCPRequest(
+                    employee_id=context.config.id, tool="generate",
+                    params={"prompt": prompt + (f"\n⚠️ تصحيح: {hint}\n" if hint else ""),
+                            "system": context.persona_prompt() + context.action_prompt(request.params, self.name),
+                            "temperature": 0.85, "max_tokens": 160},
+                    context={"server": "content"},
+                ))
+                return (gen.data.get("text", "") or "").strip()
+
+            text, _ = unslop.polish(_gen_quote(), _gen_quote, context.config)
         if not text:
             return CapabilityResult.fail("no quote comment generated", self.name)
         text = _normalize_post_text(text)
@@ -1727,14 +1760,19 @@ class SchedulePostCapability(ICapability):
         text = (request.params.get("text") or "").strip()
         if not text:
             brief = request.params.get("brief") or "اكتب منشوراً أصلياً في مجال تخصصك."
-            gen = context.mcp.call(MCPRequest(
-                employee_id=context.config.id, tool="generate",
-                params={"prompt": _content_prompt(brief, context),
-                        "system": context.persona_prompt(),
-                        "temperature": 0.85, "max_tokens": 220},
-                context={"server": "content"},
-            ))
-            text = (gen.data.get("text", "") or "").strip()
+
+            def _gen_scheduled(hint: str = "") -> str:
+                gen = context.mcp.call(MCPRequest(
+                    employee_id=context.config.id, tool="generate",
+                    params={"prompt": _content_prompt(brief, context)
+                            + (f"\n\nتصحيحات إلزامية لهذه المحاولة:\n{hint}" if hint else ""),
+                            "system": context.persona_prompt(),
+                            "temperature": 0.85, "max_tokens": 220},
+                    context={"server": "content"},
+                ))
+                return (gen.data.get("text", "") or "").strip()
+
+            text, _ = unslop.polish(_gen_scheduled(), _gen_scheduled, context.config)
         if not text:
             return CapabilityResult.fail("no content to schedule", self.name)
         text = _normalize_post_text(text)
@@ -1899,6 +1937,14 @@ class ReadOwnMetricsCapability(ICapability):
             return CapabilityResult.fail(res.error, self.name)
 
         posts = res.data.get("posts", []) or []
+        # رأس الصفحة نفسها (اسم/نبذة/صورة/هيدر) ← بطاقة الموظف تبقى مطابقة لهويته على X
+        if res.data.get("profile"):
+            try:
+                from ..services import identity_store
+
+                identity_store.save_x_profile(context.config.id, handle, res.data["profile"], "metrics")
+            except Exception:  # noqa: BLE001
+                logger.debug("x profile snapshot from metrics skipped", exc_info=True)
         stats = strategy.update_metrics(context.config, posts)
         report = strategy.performance_report(context.config)
         context.scratch["own_posts"] = posts

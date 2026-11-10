@@ -48,11 +48,50 @@ def _norm(topic: str) -> str:
     return re.sub(r"\s+", " ", topic or "").strip().lower()[:200]
 
 
+def _google_news_research(query: str) -> Dict[str, Any]:
+    """بحث أخبار بلا مفتاح: Google News RSS (آخر يومين ثم أسبوع). المحتوى عنوان + مقتطف فقط،
+    فالرسالة أقصر من Tavily لكنها من مصادر حقيقية مؤرّخة."""
+    import html as _html
+    import xml.etree.ElementTree as ET
+
+    import requests
+
+    from app.aeos.employee.news_sources import search_feed
+
+    results: List[Dict[str, Any]] = []
+    for when in ("2d", "7d"):
+        try:
+            resp = requests.get(search_feed(f"{query} when:{when}"), timeout=20,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            root = ET.fromstring(resp.content)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("google news research failed: %s", exc)
+            continue
+        seen = {r["url"] for r in results}
+        for item in root.iter("item"):
+            url = (item.findtext("link") or "").strip()
+            if not url or url in seen:
+                continue
+            src = item.find("source")
+            desc = re.sub(r"<[^>]+>", " ", _html.unescape(item.findtext("description") or ""))
+            results.append({"url": url, "title": (item.findtext("title") or "").strip(),
+                            "published_date": item.findtext("pubDate") or "",
+                            "site": (urlsplit(src.get("url", "")).hostname or "") if src is not None else "",
+                            "content": re.sub(r"\s+", " ", desc).strip()})
+        if len(results) >= 6:
+            break
+    if not results:
+        raise RuntimeError("البحث غير مُهيّأ (TAVILY_API_KEY) ولم يُعِد Google News نتائج")
+    return {"answer": "", "results": results[:10]}
+
+
 def _research(query: str) -> Dict[str, Any]:
     from app.aeos.mcp.servers.core_mcp import search_provider, tavily_search
 
     if not search_provider()[0]:
-        raise RuntimeError("البحث غير مُهيّأ (TAVILY_API_KEY)")
+        # قيس 2026-11-08: لا TAVILY_API_KEY في .env وخادم Tavily MCP يطلب OAuth ⇒ كان كل توجيه
+        # (order_publish) يُسند بلا بحث إطلاقاً. بديل مجاني بلا مفتاح: بحث Google News (RSS).
+        return _google_news_research(query)
     data = tavily_search(query, max_results=8, topic="news", time_range="day", depth="advanced",
                          include_answer=True, full=True, timeout=45)
     results = [r for r in data.get("results") or [] if r.get("url")]
@@ -77,7 +116,7 @@ def build(topic: str, *, user_id: Optional[int], llm=None, query: str = "") -> D
     q = clean_query(query or topic)
     research = _research(q)
     sources = [{"n": i + 1, "title": (r.get("title") or "")[:140], "url": r["url"],
-                "site": (urlsplit(r["url"]).hostname or "").removeprefix("www."),
+                "site": (r.get("site") or urlsplit(r["url"]).hostname or "").removeprefix("www."),
                 "date": r.get("published_date") or "", "content": (r.get("content") or "")[:900]}
                for i, r in enumerate(research["results"])]
     if not sources:
@@ -156,10 +195,11 @@ def _list(items, fmt) -> List[str]:
     return out
 
 
-def for_employee(brief: Dict[str, Any], angle_index: int = 0) -> str:
-    """الرسالة الإعلامية بصيغة يكتب منها الموظف (تُحقن في بريف النشر)."""
+def for_employee(brief: Dict[str, Any], angle_index: int = 0, angle_text: str = "") -> str:
+    """الرسالة الإعلامية بصيغة يكتب منها الموظف (تُحقن في بريف النشر).
+    ``angle_text``: زاوية مفصّلة على تخصص الموظف (خطة الحملة) تتقدّم على زوايا الرسالة العامة."""
     angles = [_txt(a) for a in brief.get("angles") or [] if a]
-    angle = angles[angle_index % len(angles)] if angles else ""
+    angle = angle_text.strip() or (angles[angle_index % len(angles)] if angles else "")
     blocks = [f"📰 الرسالة الإعلامية — {_txt(brief.get('headline'))}"]
     if brief.get("summary"):
         blocks.append(f"الخلاصة: {_txt(brief['summary'])}")

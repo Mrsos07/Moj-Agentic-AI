@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { FiSend, FiPlus, FiImage, FiFile } from 'react-icons/fi'
-import { FiUserPlus } from 'react-icons/fi'
+import { Send, Paperclip, Image, FileText, UserPlus } from 'lucide-react'
 
 const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnected, onAttachImage, onAttachFile, onAttachCookies, onFocusRef, mentionOptions = [] }) => {
   const [isAttachOpen, setIsAttachOpen] = useState(false)
@@ -77,16 +76,16 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
   }
 
   return (
-    <div className="w-full bg-background-light dark:bg-background-dark pt-3 pb-4 px-4 md:px-8">
-      <div className="w-full max-w-[840px] mx-auto">
+    <div className="w-full bg-transparent pt-3 pb-4 px-4 md:px-8">
+      <div className="w-full max-w-[900px] mx-auto">
         {mentionMatches.length > 0 && (
-          <div className="mb-2 rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark shadow-lg overflow-hidden">
+          <div className="moj-glass-strong mb-2 rounded-2xl overflow-hidden">
             {mentionMatches.map((e, i) => (
               <button
                 key={e.handle}
                 type="button"
                 onClick={() => pickMention(e.handle)}
-                className={`w-full flex items-center gap-2 px-4 py-2 text-right text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${i === 0 ? 'bg-primary/5' : ''}`}
+                className={`w-full flex items-center gap-2 px-4 py-2 text-start text-sm hover:bg-gray-50 dark:hover:bg-gray-700 ${i === 0 ? 'bg-primary/5' : ''}`}
               >
                 <span className={`size-2 rounded-full ${e.enabled ? 'bg-green-500' : 'bg-gray-400'}`} />
                 <span className="font-semibold text-text-primary-light dark:text-text-primary-dark">{e.name}</span>
@@ -96,52 +95,67 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
             ))}
           </div>
         )}
-        <div className="relative flex items-end w-full p-3 bg-card-light dark:bg-card-dark border border-border-light dark:border-border-dark rounded-2xl shadow-sm hover:shadow-md focus-within:border-primary dark:focus-within:border-primary transition-all duration-200">
+        {!isConnected && (
+          <p className="text-xs text-amber-700 dark:text-amber-300 mb-2">جارٍ إعادة الاتصال بالخادم…</p>
+        )}
+        <div className="moj-glass-input relative flex items-end gap-1 w-full p-2 ps-2 pe-2 rounded-[22px] focus-within:ring-2 focus-within:ring-primary/30 transition-colors duration-150">
           <button
             onClick={handleSendMessage}
             disabled={!inputValue.trim() || !isConnected}
-            className={`p-2.5 mb-0.5 rounded-lg transition-all duration-200 shrink-0 ${
+            title={!isConnected ? 'لا يوجد اتصال بالخادم' : !inputValue.trim() ? 'اكتب رسالة أولاً' : 'إرسال'}
+            aria-label="إرسال"
+            className={`moj-hover size-10 mb-0.5 rounded-xl transition-colors duration-150 shrink-0 flex items-center justify-center ${
               inputValue.trim() && isConnected
-                ? 'bg-primary hover:bg-secondary text-white'
-                : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
+                ? 'moj-primary text-white'
+                : 'bg-black/5 dark:bg-white/10 text-text-secondary-light dark:text-text-secondary-dark cursor-not-allowed'
             }`}
           >
-            <FiSend size={18} />
+            <Send size={18} />
           </button>
+          <textarea
+            ref={textareaRef}
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyPress={handleKeyPress}
+            className="w-full max-h-[200px] py-3 px-3 bg-transparent border-0 focus:ring-0 text-text-primary-light dark:text-text-primary-dark placeholder-text-secondary-light dark:placeholder-text-secondary-dark resize-none leading-relaxed outline-none text-sm"
+            placeholder="وجّه فريقك… اكتب @ لتخاطب وكيلاً بعينه"
+            rows="1"
+            style={{ minHeight: '48px' }}
+          />
           <div className="relative shrink-0 mb-0.5">
             <button
               type="button"
               onClick={() => setIsAttachOpen((v) => !v)}
-              className="p-2 text-text-secondary-light dark:text-text-secondary-dark hover:text-primary dark:hover:text-primary transition-all duration-200 rounded-lg hover:bg-gray-50 dark:hover:bg-sidebar-dark"
+              className="moj-pill moj-hover size-10 flex items-center justify-center text-text-secondary-light dark:text-text-secondary-dark hover:text-primary dark:hover:text-primary rounded-xl"
               title="إرفاق"
             >
-              <FiPlus size={20} />
+              <Paperclip size={18} />
             </button>
 
             {isAttachOpen && (
-              <div className="absolute bottom-full mb-2 left-0 z-20 w-44 rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark shadow-lg overflow-hidden">
+              <div className="moj-glass-strong absolute bottom-full mb-2 z-20 w-44 rounded-2xl overflow-hidden" style={{ insetInlineEnd: 0 }}>
                 <button
                   type="button"
                   onClick={handleChooseImage}
-                  className="w-full flex items-center gap-2 px-4 py-3 text-right hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                  className="moj-hover w-full flex items-center gap-2 px-4 py-3 text-start hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
                 >
-                  <FiImage size={18} className="text-text-secondary-light dark:text-text-secondary-dark" />
+                  <Image size={18} className="text-text-secondary-light dark:text-text-secondary-dark" />
                   <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">إرفاق صورة</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleChooseFile}
-                  className="w-full flex items-center gap-2 px-4 py-3 text-right hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors border-t border-border-light dark:border-border-dark"
+                  className="moj-hover w-full flex items-center gap-2 px-4 py-3 text-start hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors border-t border-border-light dark:border-border-dark"
                 >
-                  <FiFile size={18} className="text-text-secondary-light dark:text-text-secondary-dark" />
+                  <FileText size={18} className="text-text-secondary-light dark:text-text-secondary-dark" />
                   <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">إرفاق ملف</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleChooseCookies}
-                  className="w-full flex items-center gap-2 px-4 py-3 text-right hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors border-t border-border-light dark:border-border-dark"
+                  className="moj-hover w-full flex items-center gap-2 px-4 py-3 text-start hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors border-t border-border-light dark:border-border-dark"
                 >
-                  <FiUserPlus size={18} className="text-primary" />
+                  <UserPlus size={18} className="text-primary" />
                   <span className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">إضافة حساب (كوكيز/CSV)</span>
                 </button>
               </div>
@@ -169,20 +183,10 @@ const MessageInput = ({ inputValue, setInputValue, handleSendMessage, isConnecte
               onChange={handleCookiesSelected}
             />
           </div>
-          <textarea
-            ref={textareaRef}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyPress={handleKeyPress}
-            className="w-full max-h-[200px] py-3 px-3 bg-transparent border-0 focus:ring-0 text-text-primary-light dark:text-text-primary-dark placeholder-text-secondary-light dark:placeholder-text-secondary-dark resize-none leading-relaxed outline-none text-sm"
-            placeholder="وجّه فريقك... اكتب @ لتخاطب موظفاً بعينه"
-            rows="1"
-            style={{ minHeight: '48px' }}
-          />
         </div>
         <div className="text-center mt-2">
           <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark">
-            Mwj AI يمكن أن يخطئ. تحقق من المعلومات المهمة.
+            قد يخطئ موج. تحقّق من المعلومات المهمة.
           </p>
         </div>
       </div>

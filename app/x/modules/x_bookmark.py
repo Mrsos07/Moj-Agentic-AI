@@ -3,9 +3,10 @@
 كانت النسختان تضغطان أول زر تجدانه ثم تعتبران ذلك نجاحاً؛ والتراجع كان يضغط
 ``bookmark`` إن لم يجد ``removeBookmark`` — أي أنه **يحفظ** تغريدة غير محفوظة.
 """
-from playwright.sync_api import sync_playwright
-
 from .x_actions import _goto_tweet, _launch_browser, _state_in, focal_tweet
+from .x_captcha import new_context as _captcha_context
+from .x_captcha import sync_playwright
+from .sync_bridge import sync_safe
 
 DEFAULT_TIMEOUT = 30_000
 
@@ -14,7 +15,7 @@ def _toggle(storage_state_path: str, tweet_url: str, headless: bool, wait_after_
             press: str, result: str, label: str) -> str:
     with sync_playwright() as p:
         browser = _launch_browser(p, headless=headless)
-        context = browser.new_context(storage_state=storage_state_path)
+        context = _captcha_context(browser, storage_state_path)
         page = context.new_page()
         page.set_default_timeout(DEFAULT_TIMEOUT)
         try:
@@ -39,12 +40,14 @@ def _toggle(storage_state_path: str, tweet_url: str, headless: bool, wait_after_
             browser.close()
 
 
+@sync_safe
 def bookmark_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 3000) -> str:
     """Bookmark a tweet. ``"done"`` (verified) or ``"already"``."""
     return _toggle(storage_state_path, tweet_url, headless, wait_after_ms,
                    "bookmark", "removeBookmark", "الحفظ")
 
 
+@sync_safe
 def undo_bookmark_tweet(storage_state_path: str, tweet_url: str, headless: bool, wait_after_ms: int = 3000) -> str:
     """Remove a bookmark. ``"done"`` (verified) or ``"already"`` (was not bookmarked)."""
     return _toggle(storage_state_path, tweet_url, headless, wait_after_ms,
