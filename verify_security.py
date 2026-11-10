@@ -228,6 +228,14 @@ ngx = Path("frontend/nginx.conf").read_text(encoding="utf-8")
 check("nginx يرسل عنواناً واحداً محسوماً لا قائمة يضيف إليها العميل",
       "$proxy_add_x_forwarded_for" not in ngx and "X-Forwarded-For $remote_addr" in ngx
       and "set_real_ip_from 172.16.0.0/12" in ngx and "real_ip_header X-Forwarded-For" in ngx)
+check("DOMAIN فارغ ← caddy يأخذ «:80» (قيمة فارغة تكسر Caddyfile)",
+      compose["caddy"]["environment"].get("DOMAIN") == "${DOMAIN:-:80}")
+_loc_root = ngx.split("location / {", 1)[1].split("}", 1)[0]
+check("ترويسات الأمان داخل location / (nginx يُسقط ترويسات server عند أي add_header محلي)",
+      all(h in _loc_root for h in ("X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy")))
+check("caddy يضع ترويسات الأمان وHSTS لكل الردود",
+      all(h in Path("deploy/Caddyfile").read_text(encoding="utf-8")
+          for h in ("Strict-Transport-Security", "X-Frame-Options", "X-Content-Type-Options")))
 envx = Path(".env.docker.example").read_text(encoding="utf-8")
 check("قالب الإنتاج: التسجيل مغلق وDEBUG معطّل", "ALLOW_REGISTRATION=false" in envx and "DEBUG=False" in envx)
 check("سكربتات الخادم بنهايات LF (CRLF يكسر bash)",

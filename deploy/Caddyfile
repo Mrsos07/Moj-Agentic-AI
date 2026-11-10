@@ -5,5 +5,15 @@
 
 {$DOMAIN::80} {
 	encode zstd gzip
+	# ترويسات الأمان لكل الردود (الواجهة والـAPI). HSTS يتجاهله المتصفح على HTTP، ولا
+	# includeSubDomains: النظام غالباً على نطاق فرعي ولا يجوز فرض HTTPS على نطاقات المالك الأخرى.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
 	reverse_proxy frontend:80
 }

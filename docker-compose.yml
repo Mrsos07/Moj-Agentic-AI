@@ -23,7 +23,9 @@ services:
     image: caddy:2.10-alpine
     restart: unless-stopped
     environment:
-      DOMAIN: ${DOMAIN:-}
+      # فارغ أو غير معرَّف ⇒ «:80» (HTTP على IP). قيمة فارغة تصل caddy كما هي وتكسر الإعداد،
+      # فالبديل هنا لا في Caddyfile (قيس: «unrecognized global option: encode»).
+      DOMAIN: ${DOMAIN:-:80}
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
