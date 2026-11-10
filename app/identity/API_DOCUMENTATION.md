@@ -196,7 +196,8 @@ print(profile.name)
 ## 🐍 استخدام Python Client
 
 ### التثبيت
-لا يحتاج تثبيت - فقط انسخ الملف `identity_api_client.py` إلى مشروعك.
+> ملاحظة: `identity_api_client.py` حُذف من المستودع (2026-11-10) لأن النظام لا يستخدمه — موج
+> يكلّم الخادم مباشرة عبر `app/services/identity_bridge.py`. الأمثلة أدناه للرجوع فقط؛ الملف موجود في سجل git.
 
 ### الاستيراد
 ```python

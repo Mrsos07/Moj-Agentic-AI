@@ -91,7 +91,6 @@ headers = {
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/login` |
-| **ملف Client** | `apis/login_api.py` |
 
 #### المعاملات:
 
@@ -139,7 +138,6 @@ curl -X POST http://localhost:5789/api/login \
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/post` |
-| **ملف Client** | `apis/post_client.py` |
 
 #### المعاملات:
 
@@ -189,7 +187,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/delete-tweet` |
-| **ملف Client** | `apis/delete_api.py` |
 
 #### المعاملات:
 
@@ -235,7 +232,6 @@ print(result)
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/like` |
-| **ملف Client** | `apis/like_api.py` |
 
 #### المعاملات:
 
@@ -274,7 +270,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/undo-like` |
-| **ملف Client** | `apis/undo_like_api.py` |
 
 #### المعاملات:
 
@@ -311,7 +306,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/repost` |
-| **ملف Client** | `apis/repost_api.py` |
 
 #### المعاملات:
 
@@ -350,7 +344,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/undo-repost` |
-| **ملف Client** | `apis/undo_repost_api.py` |
 
 #### المعاملات:
 
@@ -387,7 +380,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/reply` |
-| **ملف Client** | `apis/reply_api.py` |
 
 #### المعاملات:
 
@@ -429,7 +421,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/quote` |
-| **ملف Client** | `apis/Quote_api.py` |
 
 #### المعاملات:
 
@@ -471,7 +462,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/bookmark` |
-| **ملف Client** | `apis/Bookmark_api.py` |
 
 #### المعاملات:
 
@@ -510,7 +500,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/undo-bookmark` |
-| **ملف Client** | `apis/undo_bookmark_api.py` |
 
 #### المعاملات:
 
@@ -547,7 +536,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/follow` |
-| **ملف Client** | `apis/Follow_api.py` |
 
 #### المعاملات:
 
@@ -586,7 +574,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/unfollow` |
-| **ملف Client** | `apis/Unfollow_api.py` |
 
 #### المعاملات:
 
@@ -625,7 +612,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/share` |
-| **ملف Client** | `apis/Share_api.py` |
 
 #### المعاملات:
 
@@ -664,7 +650,6 @@ print(response.json())
 | الخاصية | القيمة |
 |---------|--------|
 | **Endpoint** | `POST /api/profile/update` |
-| **ملف Client** | `apis/profile_api.py` |
 
 #### المعاملات:
 
@@ -794,29 +779,6 @@ print(response.json())
     "success": false,
     "error": "cookie_label and tweet_url required"
 }
-```
-
----
-
-## 📁 هيكل مجلد APIs
-
-```
-apis/
-├── login_api.py          # تسجيل الدخول
-├── post_client.py        # نشر تغريدة
-├── delete_api.py         # حذف تغريدة
-├── like_api.py           # إعجاب
-├── undo_like_api.py      # التراجع عن الإعجاب
-├── repost_api.py         # إعادة النشر
-├── undo_repost_api.py    # التراجع عن إعادة النشر
-├── reply_api.py          # الرد
-├── Quote_api.py          # الاقتباس
-├── Bookmark_api.py       # البوك مارك
-├── undo_bookmark_api.py  # التراجع عن البوك مارك
-├── Follow_api.py         # المتابعة
-├── Unfollow_api.py       # إلغاء المتابعة
-├── Share_api.py          # المشاركة
-└── profile_api.py        # تعديل البروفايل
 ```
 
 ---

@@ -516,8 +516,8 @@ defences it forced are still in the code and still required if you set
   while nothing was published. Reads are the same trap in reverse: a captcha page
   has no tweet cards, so the employee used to «observe» an empty timeline.
 - Captcha solving adds up to `CAPTCHA_TIMEOUT` (150s) to a login, so the login
-  timeouts are `max(120, CAPTCHA_TIMEOUT + 120)`: `x_login._LOGIN_TIMEOUT`,
-  `loginx2026/api_server.LOGIN_TIMEOUT`, `x_login_new.LOGIN_TIMEOUT`. A fixed 120s
+  timeouts are `max(120, CAPTCHA_TIMEOUT + 120)`: `x_login._LOGIN_TIMEOUT` (the old
+  `loginx2026`/`x_login_new` copies were removed as unused on 2026-11-10). A fixed 120s
   kills the process mid-solve and reports a timeout that looks like a wrong password.
 - `x_bridge._POST_TIMEOUT` (`CAPTCHA_TIMEOUT + 120`) applies to `/api/post*` only:
   the guard also runs **after** submit, and a solved captcha must not outlive the
@@ -675,7 +675,7 @@ defences it forced are still in the code and still required if you set
   per process; a launch whose major differs (Chrome auto-updated) relaunches with the right UA.
   Headful keeps the native UA. `context_options()` adds no UA for these browsers, plus a `screen`
   larger than the viewport (Playwright makes screen == viewport, a headless tell). Never
-  hard-code a UA again (an HTTP client like `x_auth_local`'s curl_cffi `impersonate=chromeNNN`
+  hard-code a UA again (an HTTP client using curl_cffi `impersonate=chromeNNN`, like `x_auth`,
   is different: its UA must match its impersonated version).
 - Flags: only `--disable-dev-shm-usage` (Linux) and `--no-sandbox` (Linux as root = Docker);
   Patchright adds `--disable-blink-features=AutomationControlled` and drops `--enable-automation`

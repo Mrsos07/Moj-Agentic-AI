@@ -71,7 +71,6 @@ docs/
 
 # Windows
 QUICK_START.bat
-run - Copy.py
 
 # الدوكر نفسه
 Dockerfile*
