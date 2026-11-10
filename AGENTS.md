@@ -33,13 +33,41 @@
   once, persisted in `data/internal_callback_nonces.json`. Login TTL is 30 min; schedule TTL is
   run_at + 1 day. Tests: section 4/4c of `verify_isolation.py`, which isolates those files in a temp dir.
 
-## Production (Docker) — verified 2026-11-09 with a full smoke run (all 4 services healthy)
-- `cp .env.docker.example .env` (UTF-8), fill the keys + `NEO4J_PASSWORD`, then `docker compose up -d --build`.
-  Services: `backend` (ONE process: `python run.py` with RELOAD=0, BIND_HOST=0.0.0.0; it spawns
+## Production (Docker) — re-verified 2026-11-10 from a clean clone (all 5 services healthy)
+- The server install guide is `دليل_الدوكر.txt` (Ubuntu, DNS, ufw, .env with `openssl` secrets, first
+  admin, update, backup/restore, troubleshooting). Keep it in sync when deployment changes.
+- `cp .env.docker.example .env` (UTF-8), fill the keys + `NEO4J_PASSWORD` + `DOMAIN`, then `docker compose up -d --build`.
+  Services: `caddy` (the ONLY public ports, 80/443; automatic Let's Encrypt when `DOMAIN` is set, plain
+  HTTP on `:80` when it is empty), `backend` (ONE process: `python run.py` with RELOAD=0, BIND_HOST=0.0.0.0; it spawns
   xsuite 5789, loginx 5000 and identity 5990 inside the container), `frontend` (Nginx: serves
   dist and proxies /api, /ws, /static, /health), `neo4j:5.26-community` and `redis:7.4-alpine`.
-  Only `HTTP_PORT` (80) is public. The backend is published on 127.0.0.1 only. Never scale the backend (>1 replica).
-- Gotchas found by the smoke run:
+  backend and frontend are published on 127.0.0.1 only (diagnostics). Never scale the backend (>1 replica).
+- First admin / any account: `docker compose exec backend python scripts/create_user.py --email … [--role admin] [--reset]`.
+  The template sets `ALLOW_REGISTRATION=false`: open signup let anyone spend the system LLM key, and
+  there is no API that creates users. The script validates the email with `EmailStr` (a `*.local`
+  admin could never log in), and `--reset` calls `revoke_user`.
+- Client IP behind the proxies: uvicorn saw nginx's container IP for EVERY user, so the per-IP login limit
+  (20/15 min) would have locked everyone out together. Now Caddy sets XFF, nginx trusts it only from
+  private ranges (`set_real_ip_from` + `real_ip_recursive`) and forwards ONE address
+  (`X-Forwarded-For $remote_addr`, never `$proxy_add_x_forwarded_for`, which the client can prepend
+  to), and the backend sets `FORWARDED_ALLOW_IPS=*`. With `*`, uvicorn takes the first XFF entry.
+  Verified live: a forged `X-Forwarded-For: 6.6.6.6` is ignored.
+- Gotchas found by the 2026-11-10 run (all locked in section 7 of `verify_security.py`):
+  - An empty `DOMAIN` reached Caddy as `""`, and the Caddyfile default didn't apply («unrecognized global
+    option: encode»). The default now lives in compose: `${DOMAIN:-:80}`.
+  - nginx drops server-level `add_header` in any location that has its own `add_header`, so UI pages had
+    no X-Frame-Options. The headers are now repeated in the locations, and Caddy also sets them plus HSTS.
+  - A single-file bind mount keeps the OLD inode after `git pull` replaces the file, and without `--watch`
+    Caddy never reloads. Caddy now mounts `./deploy` and runs with `--watch`.
+  - `backups/` was in neither `.gitignore` nor `.dockerignore`, so `--build` would have copied cookies and
+    secrets into the image.
+  - `*.sh` must be LF (`.gitattributes`). The scripts handle Git Bash path conversion (`cygpath`/`MSYS_NO_PATHCONV`).
+- Backup/restore: `scripts/backup.sh [dir] [--with-neo4j]` takes an SQLite online backup, tars the
+  backend volumes via `--volumes-from`, and copies `.env`. `scripts/restore.sh <dir>` asks for confirmation
+  and replaces everything. Both were verified live: a user created after the backup is gone after the
+  restore, and login still works.
+- Identity (5990) is skipped without `GEMINI_API_KEY`, by design. With any key it boots (verified, HTTP 200).
+- Gotchas found by the 2026-11-09 smoke run:
   - The old healthcheck hit `/api/health`, which doesn't exist; it is `/health`.
   - `.dockerignore` excluded `*.md`, which dropped every `system/skills/*/SKILL.md`, so the image had no skills.
   - `requirements.txt` listed `uiautomator2` twice (3.7.0 and 3.7.1), and pip failed with ResolutionImpossible.
