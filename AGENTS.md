@@ -33,6 +33,35 @@
   once, persisted in `data/internal_callback_nonces.json`. Login TTL is 30 min; schedule TTL is
   run_at + 1 day. Tests: section 4/4c of `verify_isolation.py`, which isolates those files in a temp dir.
 
+## Production (Docker) — verified 2026-11-09 with a full smoke run (all 4 services healthy)
+- `cp .env.docker.example .env` (UTF-8), fill the keys + `NEO4J_PASSWORD`, then `docker compose up -d --build`.
+  Services: `backend` (ONE process: `python run.py` with RELOAD=0, BIND_HOST=0.0.0.0; it spawns
+  xsuite 5789, loginx 5000 and identity 5990 inside the container), `frontend` (Nginx: serves
+  dist and proxies /api, /ws, /static, /health), `neo4j:5.26-community` and `redis:7.4-alpine`.
+  Only `HTTP_PORT` (80) is public. The backend is published on 127.0.0.1 only. Never scale the backend (>1 replica).
+- Gotchas found by the smoke run:
+  - The old healthcheck hit `/api/health`, which doesn't exist; it is `/health`.
+  - `.dockerignore` excluded `*.md`, which dropped every `system/skills/*/SKILL.md`, so the image had no skills.
+  - `requirements.txt` listed `uiautomator2` twice (3.7.0 and 3.7.1), and pip failed with ResolutionImpossible.
+  - Copying from Windows/OneDrive gives read-only dirs, so loginx died on `PermissionError` until `chmod -R u+w`.
+  - `neo4j_service._port_open` probed 127.0.0.1 only. It now uses the host from `NEO4J_URI`.
+- Volumes: `moj_data` (DB, employees, revocations, secrets), `moj_cookies` (X sessions),
+  identity images and uploads. Runtime-added MCP manifests under `system/mcps` are NOT in a
+  volume; they live in the image layer, so re-add them after a rebuild or bake them into git.
+
+## Pixabay + stock_media
+- `system/mcps/pixabay`: in-process Python port of Unlock-MCP/pixabay-mcp-server (MIT, see
+  `UPSTREAM.md`). Same 4 tools. Results are cached 24 h (Pixabay terms). It needs `PIXABAY_API_KEY`,
+  which is scrubbed from errors.
+- `stock_media` (always-on employee skill + `app/aeos/employee/stock_media.py`) runs at publish time
+  (post + thread), BEFORE `_maybe_generate_image`:
+  1. The LLM writes English literal-scene queries and picks image/video, plus things to avoid.
+  2. Pixabay search: horizontal, safesearch; video ≤ 60 s and ≤ 40 MB, otherwise it falls back to an image.
+  3. The LLM picks a match by tags, or 0 (no misleading stock).
+  4. The same file is not reused per employee for 30 days.
+  Policy is `business_rules.stock_media` = `auto` (default: only when the source has no media) | `prefer` | `off`,
+  and `stock_media_kind` = `auto` | `image` | `video`. Test: section 5g7 of `verify_creator.py`.
+
 ## Environment
 - The working virtualenv is `venv\` (NOT `.venv\`, which is missing most deps).
   Use `.\venv\Scripts\python.exe` for everything.
@@ -167,8 +196,9 @@
   4. `dispatch=true` (or `only=[…]`) reuses the SAME cached plan (30 min, no new search) and dispatches
      with `for_employee(brief, angle_text=…)`.
   `order_publish` stays for a single employee. When there is no `TAVILY_API_KEY`, `_research` falls
-  back to Google News RSS (`when:2d`, then `7d`). Measured 2026-11-08: no key in `.env` and the Tavily
-  MCP needed OAuth, so every directed publish had gone out with NO research. Test: the campaign section of `verify_media_brief.py`.
+  back to Google News RSS (`when:2d`, then `7d`). The key IS set in `.env`, and the server loads it in
+  `app/main.py`. Ad-hoc test scripts must `load_dotenv('.env')` first, or they wrongly report
+  "not configured". NEVER print `search_provider()`: it returns the raw key. Test: the campaign section of `verify_media_brief.py`.
 - Post images go through `app/aeos/employee/visual_director.py` (NOT a raw prompt): an LLM art
   director turns the post into a concrete, literal news scene (subject/setting/composition/
   lighting/camera/palette/mood) with banned clichés (chess, crowns, maps, flags…), Gulf cultural

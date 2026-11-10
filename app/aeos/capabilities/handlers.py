@@ -673,7 +673,8 @@ class PublishContentCapability(ICapability):
             logger.info("weak media dropped (generic/logo): %s", media_url[:120])
             media_url = ""
 
-        # صورة أصلية مولّدة عند غياب ميديا حقيقية (هوية بصرية لصانع المحتوى)
+        # صورة/فيديو من Pixabay يطابق الموضوع (مهارة stock_media)، ثم صورة مولّدة إن لم يوجد
+        media_url = _stock_media(context, text, media_url, request)
         media_url = media_url or _maybe_generate_image(context, text, media_url)
 
         # Important:
@@ -1466,6 +1467,21 @@ def _create_image(context: "ExecutionContext", text: str) -> str:
     return out.get("url") or ""
 
 
+def _stock_media(context: "ExecutionContext", text: str, media_url: str,
+                 request: CapabilityRequest) -> str:
+    """ميديا المنشور من Pixabay حسب سياسة الموظف: ``auto`` عند غياب ميديا المصدر، ``prefer`` دائماً."""
+    from ..employee import stock_media
+
+    try:
+        if media_url and stock_media.policy(context.config) != "prefer":
+            return media_url
+        topic = str(request.params.get("topic") or (context.event.payload or {}).get("directed_topic") or "")
+        return stock_media.find(context, text, topic) or media_url
+    except Exception:  # noqa: BLE001 - الميديا تحسين لا شرط للنشر
+        logger.exception("stock media step failed")
+        return media_url
+
+
 def _maybe_generate_image(context: "ExecutionContext", text: str,
                           existing_media: str = "") -> str:
     """ولّد صورة أصلية للمنشور عند الحاجة، بحد يومي يحترم التكلفة.
@@ -1600,6 +1616,7 @@ class PublishThreadCapability(ICapability):
         media_url = (request.params.get("media_url", "") or "").strip()
         if media_url and (not _is_http_url(media_url) or _is_weak_media(media_url)):
             media_url = ""
+        media_url = _stock_media(context, " ".join(parts), media_url, request)
         media_url = media_url or _maybe_generate_image(context, parts[0], media_url)
 
         res = context.mcp.call(MCPRequest(

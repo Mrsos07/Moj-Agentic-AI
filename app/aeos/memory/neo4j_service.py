@@ -43,7 +43,15 @@ def _bolt_port() -> int:
         return 7687
 
 
-def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
+def _bolt_host() -> str:
+    """مضيف bolt من NEO4J_URI (في الدوكر خدمة منفصلة: bolt://neo4j:7687 — لا 127.0.0.1)."""
+    from urllib.parse import urlsplit
+
+    return urlsplit(DEFAULT_URI).hostname or "127.0.0.1"
+
+
+def _port_open(port: int, host: str = "", timeout: float = 1.0) -> bool:
+    host = host or _bolt_host()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(timeout)
         return probe.connect_ex((host, port)) == 0

@@ -16,19 +16,14 @@
   "research_tool": "",
   "research_arg": "",
   "description": "استنساخ أسلوب كاتب من منشوراته (بصمة: لهجة، سجل، دليل أسلوب، عبارات، ممنوعات) وقياس تطابق أي نص معها. يستعمله استنساخ هوية الموظف داخلياً.",
-  "note": "داخلي: يستدعيه استنساخ الهوية (persona_clone) فقط — لا يظهر كأداة للمنسّق ولا للموظفين. مفتاح النموذج وعنوانه يُحقنان من resolve_llm() وقت الاتصال؛ NAWAH_MODEL (افتراضياً google/gemini-3.7-flash، مؤهَّل بالمزوّد) وNAWAH_FALLBACK_MODEL تُضبط من هنا وتُطبَّق عند إعادة الاتصال. بعد تعديل المصدر: npm run build.",
   "enabled": true,
   "scope": {
-    "coordinator": false,
-    "employees": false
+    "coordinator": true,
+    "employees": true
   },
   "source": "config",
   "added_by": "system",
   "added_at": "2026-10-25T00:00:00+00:00",
-  "server_info": {
-    "name": "nawah-clone",
-    "version": "1.0.0"
-  },
   "tools": [
     {
       "name": "list_clones",
@@ -278,6 +273,10 @@
       }
     }
   ],
+  "server_info": {
+    "name": "nawah-clone",
+    "version": "1.0.0"
+  },
   "env_keys": [
     "NAWAH_FALLBACK_MODEL",
     "NAWAH_MODEL",

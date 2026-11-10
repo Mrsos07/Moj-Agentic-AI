@@ -1,56 +1,53 @@
-# ─── الخادم الخلفي لموج (FastAPI + خوادم X و LoginX و Identity) ───
-FROM python:3.11-slim
+# ─── الخادم الخلفي لموج — صورة إنتاج ───
+# عملية واحدة (python run.py, RELOAD=0) تشغّل FastAPI وتُطلق داخلها خوادم X (5789) وLoginX (5000)
+# وIdentity (5990). لا تشغّل أكثر من نسخة: ذاكرة الرسم والطابور والمنافذ مصمّمة لعملية واحدة.
+FROM python:3.13-slim
 
-# منع الأسئلة التفاعلية أثناء البناء
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUTF8=1 \
     PYTHONIOENCODING=utf-8 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    TZ=Asia/Riyadh
 
-# تثبيت مكتبات النظام التي تحتاجها Playwright وبعض المكتبات الأخرى
+# أدوات البناء لمكتبات بايثون ذات الامتدادات + curl لفحص الصحة + tini لإنهاء العمليات الفرعية بنظافة
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl \
-        wget \
-        ca-certificates \
-        fonts-liberation \
-        libnss3 \
-        libnspr4 \
-        libatk1.0-0 \
-        libatk-bridge2.0-0 \
-        libcups2 \
-        libdrm2 \
-        libxkbcommon0 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxfixes3 \
-        libxrandr2 \
-        libgbm1 \
-        libpango-1.0-0 \
-        libcairo2 \
-        libasound2 \
-        libatspi2.0-0 \
-        build-essential \
-        git \
+        build-essential curl ca-certificates tini tzdata lsof fonts-noto-core fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
-# مجلد العمل
 WORKDIR /app
 
-# نسخ المتطلبات أولاً (للاستفادة من ذاكرة الدوكر المؤقتة)
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# تثبيت متصفح Patchright (المحرّك الخفي لمسارات X؛ لا Chrome مثبّت في الصورة فيُستخدم Chromium)
-RUN patchright install --with-deps chromium
+# متصفح Patchright (مسارات X الخفية) + مكتبات النظام التي يحتاجها، في مسار مشترك يقرؤه المستخدم غير الجذر
+RUN patchright install --with-deps chromium \
+    && playwright install chromium \
+    && chmod -R a+rX /ms-playwright
 
-# نسخ بقية ملفات المشروع
 COPY . .
 
-# إنشاء المجلدات اللازمة لحفظ البيانات
-RUN mkdir -p /app/data /app/data/schedule_outputs /app/app/x/cookies /app/app/identity/static/generated
+# مستخدم غير جذر؛ المجلدات الدائمة مملوكة له (الأحجام المسمّاة ترث الملكية عند إنشائها أول مرة).
+# u+w: النسخ من Windows/OneDrive ينقل المجلدات للقراءة فقط (dr-xr-xr-x) — قيس: loginx توقف عند
+# الإقلاع بـPermissionError على app/x/loginx/uploads.
+RUN useradd --create-home --uid 1000 moj \
+    && mkdir -p data/schedule_outputs app/x/cookies app/x/loginx/uploads app/identity/static/generated \
+                static/uploads frontend/dist \
+    && chown -R moj:moj /app && chmod -R u+w /app
+USER moj
 
-# تشغيل القاعدة عند أول تشغيل ثم تشغيل الخادم
-EXPOSE 8000 5789 5000 5990
+ENV RELOAD=0 \
+    BIND_HOST=0.0.0.0 \
+    PORT=8000 \
+    NEO4J_AUTOSTART=0
 
-CMD ["sh", "-c", "python init_database.py && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/health || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sh", "-c", "python init_database.py && exec python run.py"]

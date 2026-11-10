@@ -1,75 +1,104 @@
 # ════════════════════════════════════════════════════════════════
-#                  نظام موج الذكي - تشغيل بالدوكر
+#                  نظام موج — تشغيل الإنتاج بالدوكر
 # ════════════════════════════════════════════════════════════════
-# للتشغيل: docker compose up -d --build
-# للإيقاف: docker compose down
-# للسجلات: docker compose logs -f
+# التجهيز:  cp .env.docker.example .env   ثم املأ القيم (المفاتيح/كلمة مرور Neo4j)
+# التشغيل:  docker compose up -d --build
+# الحالة:   docker compose ps        السجلات: docker compose logs -f backend
+# الإيقاف:  docker compose down      (البيانات باقية في الأحجام؛ لا تستخدم -v إلا للمسح الكامل)
+#
+# المنفذ العام الوحيد: الواجهة (HTTP_PORT، افتراضياً 80). الخادم الخلفي وNeo4j وRedis داخليون.
 # ════════════════════════════════════════════════════════════════
+
+name: moj
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "5" }
 
 services:
 
-  # ─── الخادم الخلفي ───
-  # يشغّل: FastAPI الرئيسي + خادم X + خادم LoginX + خادم Identity
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    container_name: moj_backend
+    build: { context: ., dockerfile: Dockerfile.backend }
+    image: moj-backend:latest
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
-      # المنافذ الداخلية للخوادم الفرعية
-      XSUITE_PORT: 5789
-      LOGINX_PORT: 5000
-      IDENTITY_PORT: 5990
-      # مفتاح Gemini يجب أن يكون موجوداً في .env
-      API_KEY: ${GEMINI_API_KEY}
-    ports:
-      - "8000:8000"      # الخادم الرئيسي
-      # المنافذ التالية اختيارية للوصول المباشر للخوادم الفرعية
-      - "5789:5789"      # خادم X
-      - "5000:5000"      # خادم LoginX
-      - "5990:5990"      # خادم Identity
+      RELOAD: "0"
+      BIND_HOST: 0.0.0.0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?ضع NEO4J_PASSWORD في .env}
+      NEO4J_AUTOSTART: "0"
+      GRAPHITI_DRIVER: neo4j
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    expose: ["8000"]
+    # للوصول المباشر من الخادم نفسه فقط (تشخيص) — لا يُفتح للإنترنت
+    ports: ["127.0.0.1:${BACKEND_LOCAL_PORT:-8000}:8000"]
     volumes:
-      # حفظ قاعدة البيانات والكوكيز خارج الحاوية لمنع الفقدان عند إعادة البناء
-      - moj_data:/app/data
-      - moj_cookies:/app/app/x/cookies
+      - moj_data:/app/data                                   # قاعدة البيانات، ذاكرة الموظفين، الإبطال، الأسرار
+      - moj_cookies:/app/app/x/cookies                       # جلسات X (حساسة)
       - moj_identity_imgs:/app/app/identity/static/generated
       - moj_uploads:/app/static/uploads
-    networks:
-      - moj_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # ─── الواجهة ───
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    container_name: moj_frontend
-    restart: unless-stopped
-    ports:
-      - "80:80"          # المنفذ العادي للوصول من المتصفح
+    shm_size: "1gb"                                          # Chromium يتعطّل بذاكرة /dev/shm الافتراضية (64MB)
     depends_on:
-      - backend
-    networks:
-      - moj_network
+      neo4j: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [moj_network]
+    logging: *logging
 
+  frontend:
+    build: { context: ., dockerfile: Dockerfile.frontend }
+    image: moj-frontend:latest
+    restart: unless-stopped
+    ports: ["${HTTP_PORT:-80}:80"]
+    depends_on:
+      backend: { condition: service_healthy }
+    networks: [moj_network]
+    logging: *logging
 
-# ─── الشبكة الداخلية ───
+  neo4j:
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?ضع NEO4J_PASSWORD في .env}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 512m
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks: [moj_network]
+    logging: *logging
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [moj_network]
+    logging: *logging
+
 networks:
   moj_network:
     driver: bridge
 
-
-# ─── أحجام التخزين الدائم ───
 volumes:
-  moj_data:              # قاعدة البيانات SQLite + ملفات الجدولة
-  moj_cookies:           # كوكيز حسابات X (حساسة)
-  moj_identity_imgs:     # الصور المولّدة من Gemini
-  moj_uploads:           # ملفات المستخدمين المرفوعة
+  moj_data:
+  moj_cookies:
+  moj_identity_imgs:
+  moj_uploads:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:

@@ -885,6 +885,61 @@ def check_specialty_trends_drive_cycle() -> None:
           st is not None and "اعتراض مسيّرة حوثية" in st["summary"], str(st)[:200])
 
 
+def check_stock_media() -> None:
+    """مهارة stock_media: بحث Pixabay بخطة النموذج، اختيار مطابق أو لا شيء، وبلا تكرار للملف."""
+    import re
+    import tempfile
+    from pathlib import Path
+
+    from app.aeos.employee import stock_media as SM
+    from app.aeos.mcp.base import MCPResponse
+
+    cfg = make_config()
+    ctx = make_context(cfg, with_signals=False)
+    calls = []
+
+    class _MCP:
+        def has(self, name):
+            return name == "pixabay"
+
+        def call(self, req):
+            calls.append((req.tool, dict(req.params)))
+            if req.tool == "search_videos":
+                return MCPResponse.ok(results=[{"id": 9, "kind": "video", "url": "https://cdn.pixabay.com/v.mp4",
+                                                "tags": "missile, night", "duration": 300, "size": 1}])
+            return MCPResponse.ok(results=[
+                {"id": 1, "kind": "image", "url": "https://pixabay.com/get/a.jpg", "tags": "beach, sunset", "width": 1920},
+                {"id": 2, "kind": "image", "url": "https://pixabay.com/get/b.jpg", "tags": "missile, air defense, night", "width": 1920},
+                {"id": 3, "kind": "image", "url": "https://pixabay.com/get/c.jpg", "tags": "small", "width": 300}])
+
+    class _LLM:
+        available = True
+
+        def complete_json(self, system, prompt, temperature=0.2):
+            if "queries" in system:
+                return {"queries": ["air defense missile night", "صاروخ"], "kind": "video", "avoid": ["flags"]}
+            return {"choice": 2 if "missile, air defense" in prompt.split("2.")[1][:60] else 1}
+
+    ctx.mcp, ctx.llm = _MCP(), _LLM()
+    orig_avail, orig_path = SM.available, SM._USED_PATH
+    SM.available = lambda c: True
+    SM._USED_PATH = Path(tempfile.mkdtemp()) / "used.json"
+    try:
+        url = SM.find(ctx, "اعتراض صاروخ باليستي فوق الرياض الليلة")
+        check("فيديو أطول من 60ث يُستبعد ← رجوع لصورة", any(t == "search_images" for t, _ in calls))
+        check("الصورة المطابقة للموضوع تُختار (لا الأولى ولا الصغيرة)", url.endswith("b.jpg"), url)
+        check("كلمات البحث إنجليزية فقط (الحروف غير اللاتينية تُحذف)",
+              all(re.fullmatch(r"[A-Za-z0-9 \-]*", p.get("q", "")) for _, p in calls), str(calls)[:200])
+        url2 = SM.find(ctx, "اعتراض صاروخ باليستي فوق الرياض الليلة")
+        check("الملف نفسه لا يتكرر للموظف", url2 != url, url2)
+        cfg.business_rules["stock_media"] = "off"
+        SM.available = orig_avail
+        check("stock_media=off ← لا بحث", SM.enabled(cfg) is False)
+    finally:
+        SM.available, SM._USED_PATH = orig_avail, orig_path
+        cfg.business_rules.pop("stock_media", None)
+
+
 def check_emotion_comes_from_graph_memory() -> None:
     """الحالة العاطفية يجب أن تُبنى على حقائق الذاكرة المعرفية لا على التعليمات."""
     from app.aeos.cognition.phases import EmotionPhase
@@ -1457,6 +1512,8 @@ def main() -> int:
     print("\n=== 5g6) خطة استخدام خوادم MCP ===")
     check_mcp_usage_plan()
     check_specialty_trends_drive_cycle()
+    print("\n=== 5g7) ميديا Pixabay للمنشور (stock_media) ===")
+    check_stock_media()
     print("\n=== 5h) الحالة العاطفية من الذاكرة المعرفية لا من التعليمات ===")
     check_emotion_comes_from_graph_memory()
     print("\n=== 5i) تنقية حقائق الرسم المعرفي ===")

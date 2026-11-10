@@ -1,6 +1,6 @@
-# ─── ملفات لا تُنسخ للحاوية (لتسريع البناء وتصغير الحجم) ───
+# ─── ملفات لا تُنسخ للحاوية (أمان + حجم أصغر + بناء أسرع) ───
 
-# مجلدات بايثون
+# بايثون
 __pycache__
 *.pyc
 *.pyo
@@ -15,38 +15,43 @@ env/
 .venv/
 ENV/
 
-# عقد الفرونت
+# الواجهة: تُبنى داخل Dockerfile.frontend
 frontend/node_modules/
 frontend/dist/
 frontend/build/
 
-# ملفات البيئة (يجب توفيرها وقت التشغيل عبر env_file)
+# ملفات البيئة (تُوفَّر وقت التشغيل عبر env_file) — الأمثلة فقط مسموحة
 .env
-.env.local
-.env.agents
-.env.security
+.env.*
+!.env.example
+!.env.docker.example
 Copy.env
 
-# الكوكيز الحساسة (تُحمَّل في المجلد المشترك volumes)
-app/x/cookies/*.json
-app/x/loginx2026/cookies/
+# الكوكيز وملفات تعريف المتصفح (حساسة؛ تعيش في الحجم moj_cookies لا في الصورة)
+app/x/cookies/
+**/cookies/
+**/CookiesBackup/
+**/chrome_profile/
+*storage_state*.json
 app/x/loginx/uploads/
+debug_*.html
+debug_*.png
+*.har
 
-# قاعدة البيانات المحلية (تُنشأ تلقائياً داخل الحاوية)
+# البيانات المحلية (قاعدة البيانات، ذاكرة الموظفين، الأسرار) — تعيش في الحجم moj_data
 *.db
 *.sqlite
 *.sqlite3
 data/
 
-# مخرجات التطوير وأرتفاكتس debug
+# مخرجات التطوير
 *.log
 logs/
-debug_post.html
-debug_post.png
-debug_delete.png
 *.zip
 **/htmlcov/
 **/.coverage
+playwright-report/
+test-results/
 
 # IDE
 .vscode/
@@ -61,17 +66,12 @@ Thumbs.db
 .gitignore
 .gitattributes
 
-# مستندات (لا حاجة لها في الحاوية)
-*.md
+# مستندات — لا تستبعد *.md: system/skills/*/SKILL.md تُقرأ وقت التشغيل (بدونها لا مهارات)
 docs/
 
-# سكربتات تشغيل خاصة بـ Windows
+# Windows
 QUICK_START.bat
 run - Copy.py
-
-# أرتفاكتس Playwright القديمة
-playwright-report/
-test-results/
 
 # الدوكر نفسه
 Dockerfile*

@@ -1,0 +1,45 @@
+{
+  "slug": "pixabay",
+  "label": "Pixabay (صور وفيديو مجانية)",
+  "kind": "builtin",
+  "entry": "server.py",
+  "class": "PixabayMCP",
+  "inject": [],
+  "core": false,
+  "order": 65,
+  "description": "بحث صور وفيديوهات مجانية الحقوق من Pixabay (يتطلب PIXABAY_API_KEY). يستخدمها الموظفون تلقائياً لإرفاق صورة أو فيديو بالمنشور.",
+  "enabled": true,
+  "scope": {
+    "coordinator": true,
+    "employees": true
+  },
+  "coordinator_tools": [
+    {
+      "name": "search_images",
+      "description": "ابحث في Pixabay عن صور مجانية الحقوق (الكلمات بالإنجليزية أدق).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "q": {"type": "string", "description": "كلمات البحث (≤100 حرف)"},
+          "image_type": {"type": "string", "enum": ["all", "photo", "illustration", "vector"]},
+          "orientation": {"type": "string", "enum": ["all", "horizontal", "vertical"]},
+          "per_page": {"type": "integer"}
+        },
+        "required": ["q"]
+      }
+    },
+    {
+      "name": "search_videos",
+      "description": "ابحث في Pixabay عن فيديوهات مجانية الحقوق.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "q": {"type": "string"},
+          "video_type": {"type": "string", "enum": ["all", "film", "animation"]},
+          "per_page": {"type": "integer"}
+        },
+        "required": ["q"]
+      }
+    }
+  ]
+}

@@ -14,19 +14,14 @@
   "research_tool": "",
   "research_arg": "",
   "description": "محرّك «مهمة للفريق»: بحث الويب ثم توجيه إعلامي لكل الفريق (الرسالة العامة، الحقائق الجديدة، ولكل موظف موقفه وزاويته وما يتجنّبه) ومسودة بصوت كل موظف — مستنسخاً كان أو بشخصيته.",
-  "note": "داخلي: يستدعيه المنسّق عند «انشروا عن…» (order_publish/dispatch_directed) — ليس أداة محادثة. الكود في system/mcps/nawah_clone (نفس الحزمة)؛ بعد تعديل المصدر: npm run build. مفتاح النموذج من resolve_llm() وقت الاتصال؛ NAWAH_MODEL وNEWSDATA_API_KEY تُضبط من هنا.",
   "enabled": true,
   "scope": {
-    "coordinator": false,
-    "employees": false
+    "coordinator": true,
+    "employees": true
   },
   "source": "config",
   "added_by": "system",
   "added_at": "2026-10-25T00:00:00+00:00",
-  "server_info": {
-    "name": "nawah-brief",
-    "version": "1.1.0"
-  },
   "tools": [
     {
       "name": "research",
@@ -229,6 +224,10 @@
       }
     }
   ],
+  "server_info": {
+    "name": "nawah-brief",
+    "version": "1.1.0"
+  },
   "env_keys": [
     "NAWAH_FALLBACK_MODEL",
     "NAWAH_MODEL",
