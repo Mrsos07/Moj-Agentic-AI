@@ -1416,3 +1416,10 @@ independent structural causes — none of them fixable by telling the model to
   - `_public_url` (DNS check: no private/loopback/link-local/reserved address, redirects re-checked) guards against SSRF from search-result pages.
   - Agents without the setting never pick `source=news` items. The progress line names the site.
   - Live: 6 article images from 6 real sources in 2.8 s, one of them unrelated (a politician photo). The per-tweet scoring and the vision gate are what filter those. Test: section 5b of `verify_cycle_quality.py`.
+
+## Security audit 2026-11-16
+- pip-audit (in a python:3.13-slim container) found 24 vulnerable packages. 16 were bumped within their major version (pip `--uploaded-prior-to` 7 days): python-multipart 0.0.6→0.0.31 (public form/upload DoS), requests, urllib3, idna, certifi, dotenv, pyasn1, werkzeug, anyio (+typing_extensions 4.16), dnspython, pydantic-settings, mako, ecdsa, httplib2, aiohttp, flask. `gunicorn` was unused and removed. Verified: 10 verify suites and a Docker build + import.
+- Remaining (major upgrades, owner decision pending): starlette 0.50 (needs a FastAPI upgrade to reach 1.3.1), cryptography 46→50, pillow 12→13, flask-cors 4→6, protobuf 5→6, opentelemetry-api, python-jose (no fix; mitigated: `jwt.decode(..., algorithms=[HS256])` pins the alg), ecdsa (only used by jose for EC keys; we use HS256).
+- npm: axios 1.13.2→1.21.0 (20 days old, not the 7-day-old 1.21.1), follow-redirects 1.16.3, form-data 4.0.6, @remix-run/router 1.23.4. 2 moderate react-router advisories remain (need a react-router 7 major).
+- `/api/x/health` and `/api/aeos/health` are public. They used to expose the server cookies path, the X account count, the employee/MCP server list and DB pool state. Anonymous callers now get the status only; full details need admin/developer (`app.auth.dependencies.get_current_user` = optional).
+- OPEN, owner decision: `app/x/loginx/uploads/accounts.csv` is tracked in git since 2026-05-19 with 5 rows of username/password/email in plaintext. The repo is private (anonymous API 404), but anyone with repo access or a clone has them.

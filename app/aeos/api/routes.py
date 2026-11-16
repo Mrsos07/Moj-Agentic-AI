@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.auth.ownership import is_admin, label_or_404, owns_employee
+from app.auth.dependencies import get_current_user as _optional_user
 from app.auth.ownership import require_user as get_current_user
 from app.auth.roles import require as require_perm
 from app.db.models import User
@@ -128,8 +129,13 @@ class AgentToggleIn(BaseModel):
 
 # ─────────────────────────── endpoints ───────────────────────────
 @router.get("/health")
-def health() -> Dict[str, Any]:
+async def health(viewer=Depends(_optional_user)) -> Dict[str, Any]:
     from app.db.database import engine
+
+    # مسار عام (فحص الصحة): كان يكشف لأي زائر عدد الموظفين وخوادم MCP وحالة قاعدة البيانات.
+    # التفاصيل للمشرف/المطوّر فقط
+    if not is_admin(viewer):
+        return {"ok": True, "platform": "AEOS"}
 
     # حالة مجمّع اتصالات SQLite: checked_out ثابت فوق الصفر والخادم خامل = جلسة لم تُغلق
     # (هكذا شُخّص تسرّب جلسات شات الـWebSocket الذي أسقط المجدول بـ QueuePool limit reached)

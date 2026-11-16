@@ -18,7 +18,8 @@ import time
 from app.x.modules.x_post import post_to_x
 from app.x.modules.x_profile import update_profile_on_x
 from app.x.modules.utils import download_to_temp, is_url, safe_label
-from app.auth.ownership import label_or_404, require_user as get_current_user, visible_labels
+from app.auth.dependencies import get_current_user as _optional_user
+from app.auth.ownership import is_admin, label_or_404, require_user as get_current_user, visible_labels
 from app.db.models import User
 
 router = APIRouter(prefix="/api/x", tags=["X Platform"])
@@ -531,8 +532,11 @@ async def delete_x_account(
 
 
 @router.get("/health")
-async def x_health_check():
-    """فحص صحة نظام X"""
+async def x_health_check(viewer=Depends(_optional_user)):
+    """فحص صحة نظام X. مسار عام: كان يكشف لأي زائر مسار مجلد الكوكيز في الخادم وعدد حسابات X —
+    التفاصيل للمشرف/المطوّر فقط."""
+    if not is_admin(viewer):
+        return {"status": "healthy", "service": "X Platform"}
     return {
         "status": "healthy",
         "service": "X Platform",
