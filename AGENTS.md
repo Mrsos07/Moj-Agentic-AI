@@ -34,7 +34,7 @@
   run_at + 1 day. Tests: section 4/4c of `verify_isolation.py`, which isolates those files in a temp dir.
 
 ## Production (Docker) — re-verified 2026-11-10 from a clean clone (all 5 services healthy)
-- The server install guide is `دليل_الدوكر.txt` (Ubuntu, DNS, ufw, .env with `openssl` secrets, first
+- The server install guide is `دليل_الدوكر.txt` (Ubuntu 26.04 via Docker's official apt repo — verified in a clean ubuntu:26.04 container: Docker 29.9.3, Compose v5.7.1; DNS, ufw, .env with `openssl` secrets, first
   admin, update, backup/restore, troubleshooting). Keep it in sync when deployment changes.
 - `cp .env.docker.example .env` (UTF-8), fill the keys + `NEO4J_PASSWORD` + `DOMAIN`, then `docker compose up -d --build`.
   Services: `caddy` (the ONLY public ports, 80/443; automatic Let's Encrypt when `DOMAIN` is set, plain

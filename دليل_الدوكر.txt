@@ -17,7 +17,7 @@
 ■ ١. متطلبات الخادم
 ═════════════════════
 
-   • نظام: Ubuntu Server 22.04 أو 24.04 LTS (معمارية x86_64)
+   • نظام: Ubuntu Server 26.04 LTS «Resolute» (x86_64 أو arm64) — يعمل أيضاً على 24.04 و22.04
    • الحد الأدنى: 2 vCPU، ذاكرة 4GB، قرص 30GB
    • الموصى به:   4 vCPU، ذاكرة 8GB، قرص 60GB SSD
      (كل موظف ذكي يفتح متصفح Chromium، وNeo4j يحجز حتى ~1.5GB)
@@ -49,13 +49,31 @@
       sudo apt update && sudo apt -y upgrade
       sudo apt -y install git curl openssl
 
-   ثبّت Docker Engine مع Compose (السكربت الرسمي):
-      curl -fsSL https://get.docker.com | sudo sh
+   ثبّت Docker Engine مع Compose من مستودع Docker الرسمي (الطريقة الموصى بها للإنتاج؛
+   حزمة docker.io في أرشيف أوبنتو 26.04 متأخرة عدة إصدارات، وسكربت get.docker.com للتجربة فقط):
+
+      # أزل أي حزم غير رسمية قديمة (لا خطر إن لم تكن مثبّتة)
+      sudo apt -y remove docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc
+
+      # مفتاح Docker
+      sudo install -m 0755 -d /etc/apt/keyrings
+      sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+      # المستودع بصيغة deb822 — أمر واحد في سطر واحد (أوبنتو 26.04 يعطي الاسم الرمزي resolute تلقائياً)
+      printf 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' "$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")" "$(dpkg --print-architecture)" | sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null
+
+      cat /etc/apt/sources.list.d/docker.sources      ← تحقّق: Suites: resolute بلا مسافات في أول الأسطر
+
+      sudo apt update
+      sudo apt -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      sudo systemctl enable --now docker
       sudo usermod -aG docker $USER
 
    اخرج وادخل مرة أخرى بـ SSH (لتفعيل مجموعة docker)، ثم تحقّق:
-      docker version
-      docker compose version          ← يجب أن يظهر v2 أو أحدث
+      docker version                  ← Docker Engine 29 أو أحدث
+      docker compose version          ← v2 أو أحدث (مستودع Docker يعطي v5)
+      docker run --rm hello-world     ← «Hello from Docker!»
 
    الجدار الناري (اسمح بـSSH أولاً حتى لا تُقفل نفسك خارج الخادم):
       sudo ufw allow OpenSSH
