@@ -11,7 +11,9 @@
     "create_clone",
     "get_clone",
     "list_clones",
-    "score"
+    "score",
+    "delete_clone",
+    "write"
   ],
   "research_tool": "",
   "research_arg": "",
