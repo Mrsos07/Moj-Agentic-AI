@@ -644,6 +644,44 @@ def normalize_analysis(raw: Dict[str, Any], era: Sequence[str] = ()) -> Dict[str
     }
 
 
+#: حقول الهوية التي لا تنتجها نواه (بصمتها أسلوبية فقط) — يملؤها تحليل الهوية من المنشورات والردود
+_IDENTITY_FIELDS = ("identity_core", "era_topics", "pillars", "formats", "values", "red_lines",
+                    "reply_playbook", "interaction", "stance", "humor", "rhetorical_devices", "variety")
+
+
+def _enrich_identity(analysis: Dict[str, Any], profile: Dict[str, Any], stats: Dict[str, Any],
+                     topics: Dict[str, Any], llm: Any, era: Any) -> Dict[str, Any]:
+    """هوية احترافية = بصمة نواه الأسلوبية + تحليل الهوية من المنشورات **والردود** (محاور، قيم،
+    خطوط حمراء، موقف، دليل ردود، طريقة التفاعل). كانت هذه الحقول تُترك فارغة بعد نواه فيخرج
+    المستنسخ «أسلوباً بلا شخصية». يملأ الفارغ فقط: حقول نواه (الأسلوب واللهجة والممنوعات) لا تُمس."""
+    try:
+        from ..core.llm import _safe_json
+
+        raw = llm.complete(_ANALYSIS_SYSTEM + "\nRespond ONLY with valid minified JSON.",
+                           _analysis_prompt(profile, stats, topics), temperature=0.3, max_tokens=3500)
+        ident = normalize_analysis(_safe_json(raw) if raw else {}, era=era)
+    except Exception:  # noqa: BLE001 - الهوية تحسين: بصمة نواه وحدها تبقى صالحة
+        logger.exception("identity enrichment failed")
+        return analysis
+    if not ident:
+        return analysis
+    out = dict(analysis)
+    for k in _IDENTITY_FIELDS:
+        if not out.get(k) and ident.get(k):
+            out[k] = ident[k]
+    if not out.get("reply_kinds") and ident.get("reply_kinds"):
+        out["reply_kinds"] = ident["reply_kinds"]
+    persona = dict(out.get("persona") or {})
+    for k, v in (ident.get("persona") or {}).items():
+        if v and not persona.get(k):
+            persona[k] = v
+    out["persona"] = persona
+    if not (out.get("lexicon") or {}).get("avoid") and (ident.get("lexicon") or {}).get("avoid"):
+        out["lexicon"] = {**(out.get("lexicon") or {}), "avoid": ident["lexicon"]["avoid"]}
+    out["identity_source"] = "nawah+llm"
+    return out
+
+
 def analyze(profile: Dict[str, Any], llm: Any = None,
             nawah: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]] = None) -> Dict[str, Any]:
     """ابنِ البصمة كاملة من بروفايل مسحوب. بلا نموذج: قياسات + أمثلة فقط.
@@ -708,6 +746,8 @@ def analyze(profile: Dict[str, Any], llm: Any = None,
             source = "llm" if analysis else source
         except Exception:  # noqa: BLE001
             logger.exception("voice analysis LLM call failed")
+    if source == "nawah" and llm is not None and getattr(llm, "available", False):
+        analysis = _enrich_identity(analysis, profile, stats, topics, llm, spread["era"])
     pairs = [r for r in replies_all if r.get("in_reply_to")]
     return {
         "version": VERSION,

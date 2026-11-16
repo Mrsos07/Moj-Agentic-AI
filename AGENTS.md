@@ -1400,3 +1400,8 @@ independent structural causes — none of them fixable by telling the model to
 - `verify_tools.py` needs the official SDK in a separate env at
   `%LOCALAPPDATA%\Moj-Agentic-AI\mcp_testenv` (`pip install mcp==2.2.0`). Not `%TEMP%`: Windows
   cleanup half-deleted it once and the test failed with `cannot import name 'MCPServer'`.
+
+## Clone sample + identity (2026-11-16, owner request)
+- `persona_clone.SAMPLE` = 200 original posts + 150 replies (was 70 posts, no replies). Replies feed the reply playbook, exemplars and reply policy. Nawah `create_clone` gets up to `MAX_TEXTS`=150 posts. Replies never enter the Nawah fingerprint.
+- `voice_profile._enrich_identity`: after a Nawah fingerprint, one LLM identity analysis over posts AND replies fills ONLY the empty identity fields (pillars, values, red_lines, identity_core, stance, reply_playbook, interaction...). Nawah style fields are never overwritten. `analysis.identity_source = "nawah+llm"`.
+- `verify_nawah.py`: the 2 "scope closed" checks fail on main independently of this change (scope state); `write/delete` fails only with the owner's local uncommitted mcp.json edit.

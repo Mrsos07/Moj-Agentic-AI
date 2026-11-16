@@ -35,7 +35,9 @@ _TONES = ("professional", "casual", "witty", "formal", "friendly")
 #: الردود وبلا بحث في فترات أقدم. البصمة تُبنى من التغريدات وحدها (نواه create_clone)، والردود
 #: لا تدخل لا في القياس ولا في الأمثلة. (النسخة السابقة «العميقة»: 100 تغريدة + 400 رد + 4 فترات
 #: تاريخية، ~2-4 دقائق سحب؛ الآن سحب تبويب واحد.)
-SAMPLE = {"limit": 70, "replies_limit": 0, "tab_budget_seconds": 45.0}
+#: تحديث 2026-11-16 (طلب المالك): عيّنة أكبر **مع الردود** — 200 منشور أصلي + 150 رداً. الردود
+#: تبني دليل الردود والأمثلة وسياسة الرد، والمنشورات تبني البصمة الأسلوبية في نواه.
+SAMPLE = {"limit": 200, "replies_limit": 150, "tab_budget_seconds": 90.0, "replies_budget_seconds": 90.0}
 #: اسم قديم أبقيناه لمن يستورده
 DEEP = {**SAMPLE, "replies_budget_seconds": 0.0, "history_budget_seconds": 0.0, "history_per_window": 0}
 #: فترات البحث في التاريخ: (بداية قبل كم يوم، طول الفترة بالأيام) — لم تعد تُستعمل افتراضياً
@@ -59,9 +61,12 @@ def scrape_profile(cookie_label: str, handle: str, limit: int = SAMPLE["limit"],
     from ..mcp.servers.playwright_x_mcp import PlaywrightXMCP
 
     limit = max(5, min(int(limit), SAMPLE["limit"])) if not deep else int(limit)
-    params = {"handle": handle, "limit": limit, "replies_limit": replies_limit if deep else 0,
+    replies_limit = max(0, int(replies_limit or 0))
+    params = {"handle": handle, "limit": limit, "replies_limit": replies_limit,
               "headless": headless, "lock_timeout": lock_timeout,
-              "tab_budget_seconds": tab_budget_seconds, "include_replies": bool(deep)}
+              "tab_budget_seconds": tab_budget_seconds,
+              "replies_budget_seconds": SAMPLE["replies_budget_seconds"] if replies_limit else 0.0,
+              "include_replies": bool(deep or replies_limit)}
     if deep:
         params.update({"replies_budget_seconds": 120.0, "history_windows": history_windows(),
                        "history_budget_seconds": 10.0, "history_per_window": 40})
@@ -237,13 +242,14 @@ def clone_persona(cookie_label: str, handle: str, llm: Any, limit: int = SAMPLE[
                   progress: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """التدفّق الكامل: سحب ← بصمة صوت ← برسونا ← اختبار مطابقة."""
     step = progress or (lambda _msg: None)
-    step(f"سحب آخر {min(int(limit), SAMPLE['limit'])} منشوراً أصلياً من @{handle} (بلا ردود)…")
+    step(f"سحب آخر {min(int(limit), SAMPLE['limit'])} منشوراً أصلياً"
+         + (f" و{int(replies_limit)} رداً" if replies_limit else "") + f" من @{handle}…")
     profile = scrape_profile(cookie_label, handle, limit=limit, replies_limit=replies_limit,
                              lock_timeout=lock_timeout, tab_budget_seconds=tab_budget_seconds,
                              deep=deep)
     cov = profile.get("coverage") or {}
-    step(f"سُحب {profile.get('tweet_count', 0)} منشوراً أصلياً من {cov.get('from', '?')} إلى "
-         f"{cov.get('to', '?')} — بناء بصمة الصوت عبر نواه ثم اختبار المطابقة…")
+    step(f"سُحب {profile.get('tweet_count', 0)} منشوراً أصلياً و{profile.get('reply_count', 0)} رداً من "
+         f"{cov.get('from', '?')} إلى {cov.get('to', '?')} — بناء بصمة الصوت عبر نواه ثم الهوية ثم اختبار المطابقة…")
     result = build_cloned_persona(profile, llm, language=language, test=test, cookie_label=cookie_label)
     sample = (result.get("voice_profile") or {}).get("sample", {})
     result["target"] = {
