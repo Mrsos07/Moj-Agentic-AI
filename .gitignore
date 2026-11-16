@@ -119,3 +119,6 @@ system/mcps/nawah_clone/.env
 
 # نسخ scripts/backup.sh الاحتياطية (كوكيز X وأسرار) — لا في git ولا في صورة الدوكر
 backups/
+
+# ملفات حسابات يرفعها المستخدم (أسماء وكلمات مرور) — لا تُرفع لـGit أبداً
+app/x/loginx/uploads/
