@@ -1411,3 +1411,8 @@ independent structural causes — none of them fixable by telling the model to
 - The payload carries ONLY `media_pool_key` (the payload is printed into the planning prompt). `handlers._stock_media` calls `pick_from_pool` BEFORE the normal search. Each agent re-scores the library against ITS OWN tweet text, and `_verify` runs the vision check.
 - A file another teammate took (`pool["taken"]`, checked again under the lock) or one the agent used in the last 30 days is skipped. `stock_media=off` or `stock_media_kind` is respected. A missing or expired key (e.g. after a restart) falls back to `find()`, then to a generated image.
 - Live 2026-11-16 («حرائق الغابات وجهود الإطفاء الجوي»): the library had 3 videos and 3 images. Two different tweets got two DIFFERENT firefighting-plane videos, and one candidate was rejected by vision. Test: section 5 of `verify_cycle_quality.py`.
+- Optional news-article images (owner request 2026-11-16): employee setting `news_media` (UI: «صور مقالات الأخبار في حملات التوجيه الإعلامي»), default OFF because copyright belongs to the publishers.
+  - When it is on, `_attach_media_pool` passes `media_brief_items` to `build_pool`, and `news_images` adds each source's og:image/twitter:image (parallel, 8 s timeout, reads at most 600 KB). Logo/favicon/svg images are dropped.
+  - `_public_url` (DNS check: no private/loopback/link-local/reserved address, redirects re-checked) guards against SSRF from search-result pages.
+  - Agents without the setting never pick `source=news` items. The progress line names the site.
+  - Live: 6 article images from 6 real sources in 2.8 s, one of them unrelated (a politician photo). The per-tweet scoring and the vision gate are what filter those. Test: section 5b of `verify_cycle_quality.py`.

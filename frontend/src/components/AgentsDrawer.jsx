@@ -67,6 +67,10 @@ const IMAGE_STYLE_LABELS = {
   infographic: 'تجريدي معلوماتي',
   photoreal: 'فوتوغرافي واقعي',
 }
+const NEWS_MEDIA_LABELS = {
+  off: 'لا — Pixabay المرخّصة فقط',
+  on: 'نعم — صور مقالات الأخبار (حقوقها لناشريها)',
+}
 const IMAGE_POLICY_LABELS = {
   auto: 'تلقائي (عند غياب صورة حقيقية)',
   always: 'دائماً (صورة مولّدة لكل منشور)',
@@ -304,6 +308,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
             strategy_exploration: br.strategy_exploration ?? 0.35,
             // ── الصور ──
             generate_images: br.generate_images || 'auto',
+            news_media: br.news_media ? 'on' : 'off',
             image_style: br.image_style || 'editorial',
             max_generated_images_per_day: br.max_generated_images_per_day ?? 3,
             image_prompt_extra: br.image_prompt_extra || '',
@@ -569,6 +574,7 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         strategy_exploration: clampFloat(f.strategy_exploration, 0.35, 0, 1),
         // الصور
         generate_images: IMAGE_POLICY_LABELS[f.generate_images] ? f.generate_images : 'auto',
+        news_media: f.news_media === 'on',
         image_style: IMAGE_STYLE_LABELS[f.image_style] ? f.image_style : 'editorial',
         max_generated_images_per_day: clampInt(f.max_generated_images_per_day, 3, 0, 20),
         image_prompt_extra: (f.image_prompt_extra || '').trim().slice(0, 200),
@@ -1855,6 +1861,9 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                           {selField(label, 'generate_images', 'توليد الصور', IMAGE_POLICY_LABELS, 'auto')}
                           {selField(label, 'image_style', 'النمط البصري', IMAGE_STYLE_LABELS, 'editorial')}
                           {numField(label, 'max_generated_images_per_day', 'أقصى صور مولّدة/يوم', 3, 0, 20)}
+                          <div className="col-span-3">
+                            {selField(label, 'news_media', 'صور مقالات الأخبار في حملات التوجيه الإعلامي', NEWS_MEDIA_LABELS, 'off')}
+                          </div>
                           <div className="col-span-3">
                             <label className={capCls}>إضافة لوصف الصورة (اختياري — لون/جو بصري ثابت)</label>
                             <input type="text" value={pForm[label]?.image_prompt_extra || ''}

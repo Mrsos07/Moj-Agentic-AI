@@ -267,6 +267,37 @@ try:
         SM.pick_from_pool, SM.find = _orig_pick, _orig_find
     check("النشر يأخذ من مكتبة الموضوع قبل البحث العادي", got.endswith("x.mp4") and picked == [key5], got)
     check("الحمولة تحمل المفتاح وحده (لا روابط تضخّم موجّه التخطيط)", len(key5) < 220 and "http" not in key5)
+
+    print("5b) صور مقالات الأخبار — مصدر اختياري")
+    pages = {
+        "https://news.example/a": '<html><head><meta property="og:image" content="https://cdn.news.example/fire.jpg">',
+        "https://news.example/b": '<meta content="/img/logo.png" property="og:image">',
+        "https://news.example/c": "<html>بلا صورة</html>",
+    }
+    _orig_fetch, _orig_pub = SM._fetch_page, SM._public_url
+    SM._fetch_page = lambda url, limit=600_000: pages.get(url, "")
+    SM._public_url = lambda url: url.startswith("https://")
+    try:
+        imgs = SM.news_images([{"url": u, "title": "حرائق الغابات", "source": "news.example"} for u in pages])
+    finally:
+        SM._fetch_page, SM._public_url = _orig_fetch, _orig_pub
+    check("og:image من المقال تُؤخذ، والشعار والصفحة بلا صورة تُستبعد",
+          [i["url"] for i in imgs] == ["https://cdn.news.example/fire.jpg"] and imgs[0]["source"] == "news", imgs)
+    check("الافتراضي مطفأ (حقوق الناشرين)", SM.news_media_enabled(SimpleNamespace(business_rules={})) is False)
+    topic6 = "حرائق الغابات في الجنوب"
+    SM._POOLS.pop(SM.pool_key(7, topic6), None)
+    pool6 = SM.build_pool(topic6, "طائرات إطفاء", 7, llm=_PoolLLM(), mcp=_PoolMCP())
+    pool6["items"].append(dict(imgs[0], _score=9))
+    key6 = SM.pool_key(7, topic6)
+    SM._POOLS[key6 + "#n"] = {**pool6, "items": [dict(imgs[0], _score=9)], "taken": {}}
+    check("موظف لم يفعّلها لا يأخذ صورة مقال",
+          SM.pick_from_pool(_emp("emp-n1"), "باب المندب حرائق", key6 + "#n") == "")
+    check("موظف فعّلها يأخذها، ويُذكر الموقع في الإشعار",
+          SM.pick_from_pool(_emp("emp-n2", {"news_media": True}), "باب المندب حرائق", key6 + "#n")
+          == "https://cdn.news.example/fire.jpg")
+    check("عناوين داخلية مرفوضة (SSRF): localhost و10.x و169.254",
+          not any(SM._public_url(u) for u in ("http://127.0.0.1/x", "http://10.0.0.5/a", "http://169.254.169.254/",
+                                              "file:///etc/passwd", "http://localhost:8000/api")))
 finally:
     SM.available, SM._USED_PATH, SM._vision_ok = _saved5
 

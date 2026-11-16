@@ -246,8 +246,94 @@ def _pool_ctx(llm: Any, mcp: Any) -> Any:
                            mcp=mcp, llm=llm, scratch={}, emit_progress=lambda *a, **k: None)
 
 
+def news_media_enabled(config) -> bool:
+    """مصدر اختياري (إعداد الموظف ``news_media``، مطفأ افتراضياً): صور مقالات الأخبار نفسها — أقرب
+    للخبر من المخزون، لكن حقوقها لناشريها؛ المالك يقرّر."""
+    return bool((getattr(config, "business_rules", None) or {}).get("news_media", False))
+
+
+_OG_RE = re.compile(r"""<meta[^>]+(?:property|name)\s*=\s*["'](?:og:image(?::secure_url)?|twitter:image(?::src)?)["']"""
+                    r"""[^>]*?content\s*=\s*["']([^"']+)["']|<meta[^>]+content\s*=\s*["']([^"']+)["'][^>]*?"""
+                    r"""(?:property|name)\s*=\s*["'](?:og:image|twitter:image)["']""", re.I)
+_WEAK_NEWS_IMG = re.compile(r"(?i)logo|favicon|placeholder|default[-_]|sprite|avatar|/icons?/|share[-_]?image|\.svg(?:$|\?)")
+
+
+def _public_url(url: str) -> bool:
+    """رابط http(s) لعنوان عام فقط: صفحات الأخبار تأتي من نتائج بحث، وصفحة خبيثة قد توجّه الجالب إلى
+    عنوان داخلي في الخادم (SSRF) عبر og:image أو التحويل."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+
+    try:
+        u = urlsplit(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            return False
+        for info in socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80)):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _fetch_page(url: str, limit: int = 600_000) -> str:
+    import requests
+
+    for _ in range(3):                                   # تحويلان كحد أقصى، كلٌّ يُفحص من جديد
+        if not _public_url(url):
+            return ""
+        r = requests.get(url, timeout=8, allow_redirects=False, stream=True,
+                         headers={"User-Agent": "Mozilla/5.0 (compatible; MojAgenticAI/1.0)"})
+        if r.is_redirect and r.headers.get("Location"):
+            from urllib.parse import urljoin
+
+            url = urljoin(url, r.headers["Location"])
+            r.close()
+            continue
+        if r.status_code != 200 or "html" not in (r.headers.get("Content-Type") or ""):
+            return ""
+        chunks, size = [], 0
+        for chunk in r.iter_content(65536):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= limit:                            # og:image في الرأس — لا نقرأ الصفحة كلها
+                break
+        r.close()
+        return b"".join(chunks).decode(r.encoding or "utf-8", errors="ignore")
+    return ""
+
+
+def news_images(sources: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:
+    """صورة المقال الرئيسية (og:image) لكل مصدر في الرسالة الإعلامية — بالتوازي، بحد زمني."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+    from html import unescape
+    from urllib.parse import urljoin, urlsplit
+
+    srcs = [s for s in sources or [] if str(s.get("url") or "").startswith("http")][:limit]
+
+    def one(s: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            m = _OG_RE.search(_fetch_page(s["url"]))
+            img = unescape(urljoin(s["url"], (m.group(1) or m.group(2)) if m else "")).strip()
+            if not m or _WEAK_NEWS_IMG.search(img) or not _public_url(img):
+                return None
+            site = s.get("site") or s.get("source") or (urlsplit(s["url"]).hostname or "").removeprefix("www.")
+            return {"id": "n" + hashlib.sha1(img.encode()).hexdigest()[:12], "kind": "image", "url": img,
+                    "preview": img, "tags": f"{site}: {(s.get('title') or '')[:120]}", "page_url": s["url"],
+                    "source": "news", "site": site}
+        except Exception:  # noqa: BLE001 - مصدر لا يُجلب لا يوقف المكتبة
+            return None
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        out = [x for x in ex.map(one, srcs) if x]
+    return list({x["url"]: x for x in out}.values())
+
+
 def build_pool(topic: str, message: str, user_id: Optional[int], llm: Any = None,
-               mcp: Any = None) -> Dict[str, Any]:
+               mcp: Any = None, news_sources: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """صور وفيديوهات للموضوع والرسالة الإعلامية: كلمات بحث من الرسالة، فيديو وصور معاً، تقييم أولي
     للمطابقة مع الرسالة (≥7) — والمطابقة النهائية مع كل تغريدة عند الاختيار. يعيد {"items": [...]}."""
     key = pool_key(user_id, topic)
@@ -256,6 +342,9 @@ def build_pool(topic: str, message: str, user_id: Optional[int], llm: Any = None
     with lk:                                   # موظفو الحملة يصلون معاً: بناء واحد لا عشرة
         hit = _POOLS.get(key)
         if hit and time.time() - hit["at"] < _POOL_TTL:
+            if news_sources and not hit.get("news_done"):   # أول موظف فعّل صور الأخبار يضيفها للحملة
+                hit["news_done"] = True
+                hit["items"] = hit["items"] + news_images(news_sources)
             return hit
         if llm is None or mcp is None:
             from app.aeos.bootstrap import get_platform
@@ -274,7 +363,10 @@ def build_pool(topic: str, message: str, user_id: Optional[int], llm: Any = None
                 keep = ("id", "kind", "url", "preview", "tags", "page_url", "duration", "_score")
                 items = [{k: c.get(k) for k in keep}
                          for c in _choose(ctx, text, cands, plan["avoid"], _VIDEO_BONUS)[:_POOL_SIZE]]
-        pool = {"at": time.time(), "topic": topic, "items": items, "taken": {}, "announced": False}
+        if news_sources:
+            items += news_images(news_sources)
+        pool = {"at": time.time(), "topic": topic, "items": items, "taken": {}, "announced": False,
+                "news_done": bool(news_sources)}
         _POOLS[key] = pool
         return pool
 
@@ -286,9 +378,11 @@ def get_pool(key: str) -> Optional[Dict[str, Any]]:
 
 def pool_line(pool: Dict[str, Any]) -> str:
     items = pool.get("items") or []
+    news = sum(1 for i in items if i.get("source") == "news")
     vids = sum(1 for i in items if i.get("kind") == "video")
-    return (f"🎞️ **مكتبة ميديا الموضوع جاهزة:** {len(items) - vids} صورة و{vids} فيديو من Pixabay — "
-            "كل موظف يختار منها ما يناسب تغريدته بعد كتابتها، بلا تكرار بين الزملاء.")
+    return (f"🎞️ **مكتبة ميديا الموضوع جاهزة:** {len(items) - vids - news} صورة و{vids} فيديو من Pixabay"
+            + (f" و{news} صورة من مقالات الأخبار (حقوقها لناشريها)" if news else "") +
+            " — كل موظف يختار منها ما يناسب تغريدته بعد كتابتها، بلا تكرار بين الزملاء.")
 
 
 def pick_from_pool(context: "ExecutionContext", text: str, key: str) -> str:
@@ -301,8 +395,10 @@ def pick_from_pool(context: "ExecutionContext", text: str, key: str) -> str:
     mine = set((_used().get(context.config.id) or {}).keys())
     with _lock:
         taken = set(pool["taken"])
+    news_ok = news_media_enabled(context.config)
     cands = [dict(c) for c in pool["items"]
-             if f"{c['kind']}:{c['id']}" not in mine | taken and (want not in ("image", "video") or c["kind"] == want)]
+             if f"{c['kind']}:{c['id']}" not in mine | taken and (want not in ("image", "video") or c["kind"] == want)
+             and (c.get("source") != "news" or news_ok)]
     if not cands:
         return ""
     trail: List[str] = []
@@ -320,8 +416,10 @@ def pick_from_pool(context: "ExecutionContext", text: str, key: str) -> str:
         return ""
     _mark_used(context.config.id, ref)
     try:
+        where = f"صورة مقال {pick.get('site', '')}" if pick.get("source") == "news" else (
+            "فيديو" if pick["kind"] == "video" else "صورة")
         context.emit_progress(
-            f"🖼️ اختار {'فيديو' if pick['kind'] == 'video' else 'صورة'} من مكتبة ميديا الموضوع لتغريدته "
+            f"🖼️ اختار {where} من مكتبة ميديا الموضوع لتغريدته "
             f"(«{(pick.get('tags') or '')[:60]}»): {pick.get('page_url', '')}", intent="aeos_cycle_media")
     except Exception:  # noqa: BLE001
         pass

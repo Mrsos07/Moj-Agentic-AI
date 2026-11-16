@@ -297,7 +297,9 @@ def _attach_media_pool(platform, cfg, payload: Dict[str, Any]) -> None:
         return
     try:
         message = str(payload.get("media_brief") or "")[:900]
-        pool = SM.build_pool(topic, message, getattr(cfg, "user_id", None))
+        # صور مقالات الأخبار مصدر اختياري (حقوقها لناشريها): تُجلب فقط إن فعّلها هذا الموظف
+        news = list(payload.get("media_brief_items") or []) if SM.news_media_enabled(cfg) else None
+        pool = SM.build_pool(topic, message, getattr(cfg, "user_id", None), news_sources=news)
         if not pool.get("items"):
             return
         payload["media_pool_key"] = SM.pool_key(getattr(cfg, "user_id", None), topic)
