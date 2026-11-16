@@ -209,6 +209,125 @@ def _vision_ok(text: str, cand: Dict[str, Any]) -> Optional[bool]:
         return None
 
 
+def _verify(text: str, ranked: List[Dict[str, Any]], trail: List[str]) -> Optional[Dict[str, Any]]:
+    """فحص رؤية لأفضل اثنين، ثم لأفضل مرشّح من النوع الآخر: رفضُ فيديوهين متصدّرَين كان يترك المنشور
+    بلا ميديا رغم صورة مطابقة خلفهما (حكم الرؤية متذبذب: True/False/True لنفس اللقطة)."""
+    checks = ranked[:2]
+    other = next((c for c in ranked[2:] if c["kind"] not in {x["kind"] for x in checks}), None)
+    for cand in checks + ([other] if other else []):
+        seen = _vision_ok(text, cand)
+        # فيديو مطابق الوسوم بقوة (≥9) ورُفض: لقطة واحدة من مقطع حكمٌ جزئي ومتذبذب، فرأي ثانٍ
+        if seen is False and cand.get("kind") == "video" and cand["_score"] >= 9:
+            seen = _vision_ok(text, cand)
+        trail.append(f"{cand['kind']}:{cand['id']}:{cand['_score']:g}:{seen}")
+        if seen is True or (seen is None and cand["_score"] >= 8):
+            return cand
+    return None
+
+
+# ─────────────── مكتبة ميديا الموضوع (التوجيه الإعلامي → كل موظفي الحملة) ───────────────
+#: تُبنى مرة لكل (مالك، موضوع) من الرسالة الإعلامية، ويختار منها كل موظف بعد أن يكتب تغريدته ما
+#: يناسب نصّه هو — ولا يأخذ ملفاً أخذه زميله في الحملة نفسها (منشورات الفريق لا تتشابه بصرياً).
+_POOL_TTL = 30 * 60
+_POOL_SIZE = 10
+_POOLS: Dict[str, Dict[str, Any]] = {}
+_POOL_LOCKS: Dict[str, threading.Lock] = {}
+
+
+def pool_key(user_id: Optional[int], topic: str) -> str:
+    norm = re.sub(r"\s+", " ", (topic or "").strip().lower())[:200]
+    return f"{user_id or 0}|{norm}"
+
+
+def _pool_ctx(llm: Any, mcp: Any) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(config=SimpleNamespace(id="media_pool", business_rules={}, mcp_servers=["pixabay"]),
+                           mcp=mcp, llm=llm, scratch={}, emit_progress=lambda *a, **k: None)
+
+
+def build_pool(topic: str, message: str, user_id: Optional[int], llm: Any = None,
+               mcp: Any = None) -> Dict[str, Any]:
+    """صور وفيديوهات للموضوع والرسالة الإعلامية: كلمات بحث من الرسالة، فيديو وصور معاً، تقييم أولي
+    للمطابقة مع الرسالة (≥7) — والمطابقة النهائية مع كل تغريدة عند الاختيار. يعيد {"items": [...]}."""
+    key = pool_key(user_id, topic)
+    with _lock:
+        lk = _POOL_LOCKS.setdefault(key, threading.Lock())
+    with lk:                                   # موظفو الحملة يصلون معاً: بناء واحد لا عشرة
+        hit = _POOLS.get(key)
+        if hit and time.time() - hit["at"] < _POOL_TTL:
+            return hit
+        if llm is None or mcp is None:
+            from app.aeos.bootstrap import get_platform
+            from app.aeos.mcp.registry import MCPRegistry
+
+            plat = get_platform()
+            llm = llm or plat.llm
+            mcp = mcp or plat.container.resolve(MCPRegistry)
+        ctx = _pool_ctx(llm, mcp)
+        items: List[Dict[str, Any]] = []
+        if available(ctx):
+            text = f"{topic}\n{message}".strip()
+            plan = _plan(ctx, text[:600], topic)
+            if plan and plan["queries"]:
+                cands = _collect(ctx, plan["queries"], ["video", "image"], set())
+                keep = ("id", "kind", "url", "preview", "tags", "page_url", "duration", "_score")
+                items = [{k: c.get(k) for k in keep}
+                         for c in _choose(ctx, text, cands, plan["avoid"], _VIDEO_BONUS)[:_POOL_SIZE]]
+        pool = {"at": time.time(), "topic": topic, "items": items, "taken": {}, "announced": False}
+        _POOLS[key] = pool
+        return pool
+
+
+def get_pool(key: str) -> Optional[Dict[str, Any]]:
+    hit = _POOLS.get(key or "")
+    return hit if hit and time.time() - hit["at"] < _POOL_TTL else None
+
+
+def pool_line(pool: Dict[str, Any]) -> str:
+    items = pool.get("items") or []
+    vids = sum(1 for i in items if i.get("kind") == "video")
+    return (f"🎞️ **مكتبة ميديا الموضوع جاهزة:** {len(items) - vids} صورة و{vids} فيديو من Pixabay — "
+            "كل موظف يختار منها ما يناسب تغريدته بعد كتابتها، بلا تكرار بين الزملاء.")
+
+
+def pick_from_pool(context: "ExecutionContext", text: str, key: str) -> str:
+    """ميديا تغريدة هذا الموظف من مكتبة الموضوع: تقييم المطابقة مع **نصّه** + فحص الرؤية، بلا ملف
+    أخذه زميل أو استخدمه هو خلال 30 يوماً. "" = لا مناسب (فيُكمل بالبحث العادي ثم التوليد)."""
+    pool = get_pool(key)
+    if not pool or not pool.get("items") or not available(context) or not (text or "").strip():
+        return ""
+    want = str((context.config.business_rules or {}).get("stock_media_kind", "auto")).lower()
+    mine = set((_used().get(context.config.id) or {}).keys())
+    with _lock:
+        taken = set(pool["taken"])
+    cands = [dict(c) for c in pool["items"]
+             if f"{c['kind']}:{c['id']}" not in mine | taken and (want not in ("image", "video") or c["kind"] == want)]
+    if not cands:
+        return ""
+    trail: List[str] = []
+    pick = _verify(text, _choose(context, text, cands, [], 0.0 if want == "image" else _VIDEO_BONUS), trail)
+    ref = f"{pick['kind']}:{pick['id']}" if pick else ""
+    with _lock:
+        if pick and ref in pool["taken"]:      # زميل سبقه إليه أثناء التقييم
+            pick = None
+        elif pick:
+            pool["taken"][ref] = context.config.id
+    context.scratch["stock_media"] = {"from_pool": True, "candidates": len(cands), "checked": trail,
+                                      **({"kind": pick["kind"], "id": pick["id"], "tags": pick.get("tags", ""),
+                                          "page_url": pick.get("page_url", "")} if pick else {"picked": None})}
+    if not pick:
+        return ""
+    _mark_used(context.config.id, ref)
+    try:
+        context.emit_progress(
+            f"🖼️ اختار {'فيديو' if pick['kind'] == 'video' else 'صورة'} من مكتبة ميديا الموضوع لتغريدته "
+            f"(«{(pick.get('tags') or '')[:60]}»): {pick.get('page_url', '')}", intent="aeos_cycle_media")
+    except Exception:  # noqa: BLE001
+        pass
+    return pick["url"]
+
+
 def _collect(context: "ExecutionContext", queries: List[str], kinds: List[str],
              used: set) -> List[Dict[str, Any]]:
     """حتى 6 مرشّحين لكل نوع، متناوبين (فيديو، صورة، فيديو…) فيصل الاثنان للتقييم."""
@@ -246,20 +365,7 @@ def find(context: "ExecutionContext", text: str, topic: str = "") -> str:
         for kinds in rounds:
             cands = _collect(context, plan["queries"], kinds, used)
             bonus = _VIDEO_BONUS if want != "image" else 0.0
-            ranked = _choose(context, text, cands, plan["avoid"], bonus)
-            # فحص رؤية لأفضل اثنين، ثم لأفضل مرشّح من النوع الآخر: رفضُ فيديوهين متصدّرَين كان يترك
-            # المنشور بلا ميديا رغم صورة مطابقة خلفهما (حكم الرؤية متذبذب: True/False/True لنفس اللقطة)
-            checks = ranked[:2]
-            other = next((c for c in ranked[2:] if c["kind"] not in {x["kind"] for x in checks}), None)
-            for cand in checks + ([other] if other else []):
-                seen = _vision_ok(text, cand)
-                # فيديو مطابق الوسوم بقوة (≥9) ورُفض: لقطة واحدة من مقطع حكمٌ جزئي ومتذبذب، فرأي ثانٍ
-                if seen is False and cand.get("kind") == "video" and cand["_score"] >= 9:
-                    seen = _vision_ok(text, cand)
-                trail.append(f"{cand['kind']}:{cand['id']}:{cand['_score']:g}:{seen}")
-                if seen is True or (seen is None and cand["_score"] >= 8):
-                    pick = cand
-                    break
+            pick = _verify(text, _choose(context, text, cands, plan["avoid"], bonus), trail)
             if pick:
                 break
         if not pick:

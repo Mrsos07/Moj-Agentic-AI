@@ -183,6 +183,93 @@ try:
 finally:
     SM.available, SM._USED_PATH, SM._vision_ok = _saved
 
+print("5) مكتبة ميديا الموضوع من التوجيه الإعلامي ← كل موظف يختار لتغريدته")
+calls5 = []
+
+
+class _PoolMCP:
+    def has(self, name):
+        return name == "pixabay"
+
+    def call(self, req):
+        calls5.append(req.tool)
+        if req.tool == "search_videos":
+            return MCPResponse.ok(results=[
+                {"id": 501, "kind": "video", "url": "https://cdn.pixabay.com/ship.mp4", "tags": "warship, navy, sea",
+                 "duration": 20, "size": 5_000_000, "preview": "p"},
+                {"id": 502, "kind": "video", "url": "https://cdn.pixabay.com/jet.mp4", "tags": "fighter jet, takeoff",
+                 "duration": 15, "size": 4_000_000, "preview": "p"}])
+        return MCPResponse.ok(results=[
+            {"id": 601, "kind": "image", "url": "https://pixabay.com/get/port.jpg", "tags": "cargo port, cranes, sea",
+             "width": 1920, "preview": "p"},
+            {"id": 602, "kind": "image", "url": "https://pixabay.com/get/ufo.jpg", "tags": "ufo, science fiction",
+             "width": 1920, "preview": "p"}])
+
+
+class _PoolLLM:
+    available = True
+
+    def complete_json(self, system, prompt, temperature=0.2):
+        if "queries" in system:
+            return {"queries": ["red sea navy", "cargo port"], "kind": "video", "avoid": []}
+        lines = [ln for ln in prompt.splitlines() if ln[:1].isdigit() and ". [" in ln]
+        post = prompt.split("مرشّحو المخزون")[0]
+        def sc(ln):
+            if "سفن" in post and ("warship" in ln or "port" in ln):
+                return 9
+            if "مقاتلات" in post and "jet" in ln:
+                return 9
+            return 8 if "باب المندب" in post else 3
+        return {"scores": [{"n": i + 1, "score": sc(ln)} for i, ln in enumerate(lines)]}
+
+
+_saved5 = (SM.available, SM._USED_PATH, SM._vision_ok)
+SM.available = lambda c: bool((getattr(c.config, "business_rules", {}) or {}).get("stock_media", "auto") != "off")
+SM._vision_ok = lambda text, cand: True
+SM._USED_PATH = Path(tempfile.mkdtemp()) / "used5.json"
+try:
+    topic5 = "تصعيد في باب المندب"
+    pool = SM.build_pool(topic5, "الرسالة: تحركات بحرية وجوية حول باب المندب", 7, llm=_PoolLLM(), mcp=_PoolMCP())
+    kinds = {i["kind"] for i in pool["items"]}
+    check("المكتبة تُبنى من الرسالة: فيديو وصور معاً، والوسوم الخيالية مُسقطة",
+          kinds == {"video", "image"} and all("ufo" not in (i["tags"] or "") for i in pool["items"]), pool["items"])
+    n_calls = len(calls5)
+    again = SM.build_pool(topic5, "…", 7, llm=_PoolLLM(), mcp=_PoolMCP())
+    check("موظفو الحملة الآخرون يأخذون المكتبة نفسها (لا بحث ثانٍ)", again is pool and len(calls5) == n_calls)
+    key5 = SM.pool_key(7, topic5)
+
+    def _emp(eid, rules=None):
+        return SimpleNamespace(config=SimpleNamespace(id=eid, business_rules=rules or {}), llm=_PoolLLM(),
+                               scratch={}, emit_progress=lambda *a, **k: None)
+
+    a, b = _emp("emp-a"), _emp("emp-b")
+    url_a = SM.pick_from_pool(a, "سفن حربية تعبر قرب باب المندب", key5)
+    url_b = SM.pick_from_pool(b, "مقاتلات تقلع لتأمين أجواء باب المندب", key5)
+    check("كل موظف يختار ما يناسب تغريدته هو (سفن ← سفينة، مقاتلات ← مقاتلة)",
+          url_a.endswith("ship.mp4") and url_b.endswith("jet.mp4"), (url_a, url_b))
+    url_c = SM.pick_from_pool(_emp("emp-c"), "سفن حربية تعبر قرب باب المندب", key5)
+    check("ملف أخذه زميل لا يتكرر في الحملة", url_c and url_c != url_a and url_c != url_b, url_c)
+    check("الاختيار مسجّل في سجل الدورة (من المكتبة + ما فُحص)",
+          a.scratch["stock_media"].get("from_pool") and a.scratch["stock_media"].get("checked"))
+    check("موظف أطفأ ميديا المخزون لا يأخذ من المكتبة",
+          SM.pick_from_pool(_emp("emp-d", {"stock_media": "off"}), "سفن حربية", key5) == "")
+    check("مفتاح مكتبة منتهٍ/مجهول (بعد إعادة تشغيل) ⇒ لا شيء، فيكمل بالبحث العادي",
+          SM.pick_from_pool(_emp("emp-e"), "سفن حربية", "0|غير موجود") == "")
+    picked = []
+    _orig_pick, _orig_find = SM.pick_from_pool, SM.find
+    SM.pick_from_pool = lambda ctx, text, key: picked.append(key) or "https://cdn.pixabay.com/x.mp4"
+    SM.find = lambda *a, **k: "should-not-be-called"
+    try:
+        hctx = SimpleNamespace(config=SimpleNamespace(id="emp-h", business_rules={}),
+                               event=SimpleNamespace(payload={"directed_topic": topic5, "media_pool_key": key5}))
+        got = H._stock_media(hctx, "نص", "", SimpleNamespace(params={}))
+    finally:
+        SM.pick_from_pool, SM.find = _orig_pick, _orig_find
+    check("النشر يأخذ من مكتبة الموضوع قبل البحث العادي", got.endswith("x.mp4") and picked == [key5], got)
+    check("الحمولة تحمل المفتاح وحده (لا روابط تضخّم موجّه التخطيط)", len(key5) < 220 and "http" not in key5)
+finally:
+    SM.available, SM._USED_PATH, SM._vision_ok = _saved5
+
 print(f"\n{'❌ فشل ' + str(len(FAILED)) if FAILED else '✅ كل الفحوص نجحت'}")
 for n in FAILED:
     print("  -", n)

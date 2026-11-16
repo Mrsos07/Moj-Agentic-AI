@@ -1543,7 +1543,13 @@ def _stock_media(context: "ExecutionContext", text: str, media_url: str,
     try:
         if media_url and stock_media.policy(context.config) != "prefer":
             return media_url
-        topic = str(request.params.get("topic") or (context.event.payload or {}).get("directed_topic") or "")
+        payload = context.event.payload or {}
+        # حملة بتوجيه إعلامي: مكتبة ميديا الموضوع أولاً (يختار منها ما يناسب تغريدته هو)
+        if payload.get("media_pool_key"):
+            picked = stock_media.pick_from_pool(context, text, str(payload["media_pool_key"]))
+            if picked:
+                return picked
+        topic = str(request.params.get("topic") or payload.get("directed_topic") or "")
         return stock_media.find(context, text, topic) or media_url
     except Exception:  # noqa: BLE001 - الميديا تحسين لا شرط للنشر
         logger.exception("stock media step failed")

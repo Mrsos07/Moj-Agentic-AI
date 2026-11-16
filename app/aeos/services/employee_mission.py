@@ -287,6 +287,27 @@ def _close_order(oid: str, status: str, reason: str) -> None:
     TC.finish(oid, status, reason)
 
 
+def _attach_media_pool(platform, cfg, payload: Dict[str, Any]) -> None:
+    """مكتبة صور وفيديوهات للموضوع من الرسالة الإعلامية (مرة للحملة، يُعلنها للمالك مرة). الحمولة
+    تحمل المفتاح وحده: الحمولة تُطبع في موجّه التخطيط، وروابط عشرة ملفات تضخّمه بلا فائدة."""
+    from ..employee import stock_media as SM
+
+    topic = str(payload.get("directed_topic") or "").strip()
+    if not topic:
+        return
+    try:
+        message = str(payload.get("media_brief") or "")[:900]
+        pool = SM.build_pool(topic, message, getattr(cfg, "user_id", None))
+        if not pool.get("items"):
+            return
+        payload["media_pool_key"] = SM.pool_key(getattr(cfg, "user_id", None), topic)
+        if not pool.get("announced"):
+            pool["announced"] = True
+            platform.notify_owner(cfg.id, SM.pool_line(pool), "aeos_cycle_thinking")
+    except Exception:  # noqa: BLE001 - الميديا تحسين: الحملة تنشر بالبحث العادي ثم التوليد
+        logger.exception("media pool failed for %s", getattr(cfg, "account_username", "?"))
+
+
 def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
                       label: str, resume_of: Optional[str] = None) -> None:
     """نفّذ أمر المالك على X فعلاً، ولا تتركه بلا خبر مهما حدث.
@@ -344,6 +365,9 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
                 f"({'، '.join(s['site'] for s in (brief.get('sources') or [])[:4])}).",
                 "aeos_cycle_thinking",
             )
+
+    if payload.get("media_brief") and not payload.get("media_pool_key"):
+        _attach_media_pool(platform, cfg, payload)
 
     # الرسالة الإعلامية مرفقة الآن: الاستئناف يكتب منها بلا بحث جديد
     TC.set_request(oid, {"event_type": "manual", "payload": payload,
