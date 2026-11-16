@@ -839,7 +839,7 @@ class _Tools:
 
             platform = _platform()
             try:
-                # عيّنة: حتى 70 منشوراً أصلياً (بلا ردود) → بصمة نواه → برسونا
+                # عيّنة: منشورات أصلية + ردود (persona_clone.SAMPLE) → بصمة نواه + هوية → برسونا
                 res = clone_persona(cfg.account_username, target, platform.llm)
                 fresh = platform.repository.get(cfg.id) or cfg
                 apply_to_employee(fresh, res["persona"], res["voice_profile"], platform.repository)
@@ -847,7 +847,7 @@ class _Tools:
                 a = (res["voice_profile"].get("analysis") or {})
                 cov = t.get("coverage") or {}
                 msg = (f"🧬 **استنسخت هوية @{target} إلى @{cfg.account_username}**\n"
-                       f"العيّنة: {t.get('tweet_count', 0)} منشوراً أصلياً (بلا ردود) "
+                       f"العيّنة: {t.get('tweet_count', 0)} منشوراً أصلياً و{t.get('reply_count', 0)} رداً "
                        f"من {cov.get('from', '?')} إلى {cov.get('to', '?')} على {cov.get('days', '?')} يوماً."
                        + (f"\nالصوت: {a['voice_summary'][:300]}" if a.get("voice_summary") else "")
                        + (f"\nدرجة المطابقة في الاختبار: **{fid['score']}%**" if fid.get("score") is not None else "")

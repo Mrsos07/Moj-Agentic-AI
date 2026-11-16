@@ -485,10 +485,13 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
         const score = res.data?.fidelity?.score
         const cov = tgt.coverage || {}
         onNotify?.(
-          `🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} منشوراً أصلياً (بلا ردود)` +
+          `🧬 تم استنساخ هوية @${handle}: ${tgt.tweet_count ?? '?'} منشوراً أصلياً و${tgt.reply_count ?? 0} رداً` +
           (cov.from ? ` من ${cov.from} إلى ${cov.to} على ${cov.days} يوماً` : '') +
           (tgt.scrape_seconds ? ` · السحب ${tgt.scrape_seconds} ثانية` : '') +
-          (res.data?.source === 'ai' ? '' : ' — تحليل إحصائي فقط (LLM غير متاح)') +
+          // الخادم يعيد nawah (بصمة نواه) أو llm أو ai — كلها بنموذج؛ heuristic وحده إحصائي
+          (['nawah', 'llm', 'ai'].includes(res.data?.source)
+            ? (res.data?.source === 'nawah' ? ' — بصمة نواه' : ' — تحليل بالنموذج')
+            : ' — تحليل إحصائي فقط (النموذج لم يُستخدم)') +
           (score != null ? ` · درجة المطابقة ${score}%` : '') +
           '. راجع بصمة الصوت والعيّنات ثم اضغط حفظ.'
         )

@@ -576,7 +576,7 @@ def persona_clone(body: PersonaCloneIn,
     label_or_404(body.account_username.strip(), current_user)
     cfg = _employee_or_404(body.employee_id, current_user) if body.apply else None
 
-    # عيّنة الاستنساخ: حتى 70 منشوراً أصلياً (قرار المالك) — لا ردود ولا بحث تاريخي
+    # عيّنة الاستنساخ: persona_clone.SAMPLE (200 منشور + 150 رداً، طلب المالك 2026-11-16) — بلا بحث تاريخي
     limit = max(20, min(int(body.limit or PC.SAMPLE["limit"]), PC.SAMPLE["limit"]))
 
     def run(progress) -> Dict[str, Any]:
