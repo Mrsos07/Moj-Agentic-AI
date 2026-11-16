@@ -98,6 +98,22 @@
        the drone interception got nothing, because the military stock looked like another country's
        (that is correct: it falls back to a generated image).
   4. The same file is not reused per employee for 30 days.
+  5. Video as well as images (2026-11-16, owner request). Before this, stock media was always an image:
+     the planner only said `video` for "kinetic" scenes, and the search used ONE kind, so a video was never
+     ranked against images.
+     - In `auto`, `_collect` interleaves up to 6 videos and 6 images into ONE ranking.
+     - `_VIDEO_BONUS` (1.0) is added for ranking only: a video wins ties and a one-point gap. The ≥7
+       acceptance threshold is on the raw score.
+     - Vision checks the top 2, then the best candidate of the other kind. Before, two rejected videos left
+       the post with no media even when a matching image was behind them.
+     - A video frame is judged as "one frame of a clip" (the same kind of scene, not every detail of the
+       post). A strong (≥9) video that fails gets ONE re-check, because verdicts on the same frame were
+       measured flipping True/False/True/True.
+     - `scratch["stock_media"]["checked"]` logs `kind:id:score:vision` for every candidate tried.
+     - `stock_media_kind=image` never searches videos. `video` means videos first, with images as a fallback.
+     - Live runs vary run to run because the vision verdict is non-deterministic. That is the safety gate
+       (a wrong video is worse than none), so don't loosen it to force videos.
+     - Test: section 4 of `verify_cycle_quality.py`.
   Policy is `business_rules.stock_media` = `auto` (default: only when the source has no media) | `prefer` | `off`,
   and `stock_media_kind` = `auto` | `image` | `video`. Test: section 5g7 of `verify_creator.py`.
 

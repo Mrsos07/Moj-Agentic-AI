@@ -96,7 +96,9 @@ def _plan(context: "ExecutionContext", text: str, topic: str) -> Optional[Dict[s
                 "مكتبة صور مخزون (مثل: air defense missile night, oil refinery desert). صِف **الشيء المادي** "
                 "نفسه لا المفهوم: لا charts ولا graphs ولا concept (خبر أسعار النفط ← oil pump jack, oil "
                 "tanker — قيس: «oil prices chart» أعاد رسوم فوركس رفضها فحص الرؤية). لا أسماء أشخاص ولا "
-                "رموز سياسية. kind=video فقط إن كان المشهد حركياً بطبيعته"
+                "رموز سياسية. صِغ الكلمات بحيث تصلح لصورة **ولفيديو** معاً (نبحث في الاثنين). "
+                "kind=video إن كان للموضوع مشهد حركي يُصوَّر (طائرات، سفن، صواريخ، حرائق، حشود، طقس، "
+                "مركبات، منشآت تعمل، رياضة)، وإلا image"
                 + (f" (المالك يفضّل: {want})" if want in ("image", "video") else "") +
                 ". avoid: ما يجعل صورة مخزون مضلِّلة هنا (أعلام دول أخرى، رموز دينية، أشخاص بعينهم). "
                 "skip=true ما لم يكن المنشور عن **شيء ملموس يمكن تصويره** (حدث، مكان، سلعة، آلة، منشأة): "
@@ -107,6 +109,7 @@ def _plan(context: "ExecutionContext", text: str, topic: str) -> Optional[Dict[s
     queries = [re.sub(r"[^A-Za-z0-9 \-]", " ", str(q)).strip()[:60] for q in out.get("queries") or []]
     kind = want if want in ("image", "video") else ("video" if out.get("kind") == "video" else "image")
     return {"queries": [q for q in queries if q][:2], "kind": kind,
+            "want": want if want in ("image", "video") else "auto",
             "avoid": [str(a)[:40] for a in out.get("avoid") or []][:6]}
 
 
@@ -136,12 +139,16 @@ _FAKE_TAGS = re.compile(r"(?i)\b(ufo|alien|fantasy|science fiction|sci-fi|scifi|
                         r"illustration|3d|render|rendering|cgi|vector|clipart|drawing|toy|lego|miniature|"
                         r"halloween|christmas|zombie|video game|gaming|chalk|blackboard|meme|emoji)\b")
 _MIN_SCORE = 7
+#: أفضلية الفيديو في الترتيب: يفوز عند التعادل أو الفارق الصغير (المالك يريد فيديو لا صوراً فقط)،
+#: وصورة أوضح مطابقةً بنقطة كاملة تبقى أولى — فيديو بعيد عن الموضوع أسوأ من صورة دقيقة
+_VIDEO_BONUS = 1.0
 
 
 def _choose(context: "ExecutionContext", text: str, cands: List[Dict[str, Any]],
-            avoid: List[str]) -> List[Dict[str, Any]]:
-    """المرشّحون المقبولون مرتّبين (درجة ≥ 7 من 10)، بعد إسقاط الوسوم الخيالية/المفاهيمية حتمياً."""
-    cands = [c for c in cands if not _FAKE_TAGS.search(c.get("tags") or "")][:8]
+            avoid: List[str], video_bonus: float = 0.0) -> List[Dict[str, Any]]:
+    """المرشّحون المقبولون مرتّبين (درجة ≥ 7 من 10)، بعد إسقاط الوسوم الخيالية/المفاهيمية حتمياً.
+    ``video_bonus`` يرجّح الفيديو في الترتيب فقط — حدّ القبول على الدرجة الخام."""
+    cands = [c for c in cands if not _FAKE_TAGS.search(c.get("tags") or "")][:12]
     if not cands:
         return []
     llm = getattr(context, "llm", None)
@@ -158,8 +165,11 @@ def _choose(context: "ExecutionContext", text: str, cands: List[Dict[str, Any]],
                   if str(s.get("n", "")).isdigit()}
     except Exception:  # noqa: BLE001 - بلا تقييم لا نختار (صورة مضلِّلة أسوأ من لا صورة)
         return []
+    def rank(n: int) -> float:
+        return scores[n] + (video_bonus if cands[n - 1].get("kind") == "video" else 0.0)
+
     ranked = sorted((n for n, s in scores.items() if s >= _MIN_SCORE and 0 < n <= len(cands)),
-                    key=lambda n: -scores[n])
+                    key=lambda n: -rank(n))
     return [dict(cands[n - 1], _score=scores[n]) for n in ranked]
 
 
@@ -177,12 +187,17 @@ def _vision_ok(text: str, cand: Dict[str, Any]) -> Optional[bool]:
         ep = resolve_llm()
         if not ep.available:
             return None
+        # معاينة الفيديو لقطة واحدة منه: قيس حيّاً أن لقطة «دخان فوق جبال» من مقطع حريق غابات رُفضت
+        # لأنها «لا تُظهر طائرات الإطفاء» المذكورة في المنشور — فيُحكم على نوع المشهد لا على كل تفصيل
+        frame = ("This is ONE frame (thumbnail) of a short stock video clip: judge whether the clip is the "
+                 "same kind of scene/event as the post, not whether this single frame shows every detail. "
+                 if cand.get("kind") == "video" else "")
         r = OpenAI(**ep.client_kwargs(), timeout=45).chat.completions.create(
             model=ep.model, temperature=0, max_tokens=120,
             messages=[{"role": "system", "content": (
                 "You check stock media for a news post on X. Reply JSON only: "
-                '{"match": true|false, "reason": "short"}. match=true ONLY if the image literally shows '
-                "the post's subject (same kind of object/event/place) and would not mislead a reader: "
+                '{"match": true|false, "reason": "short"}. ' + frame + "match=true ONLY if the media literally "
+                "shows the post's subject (same kind of object/event/place) and would not mislead a reader: "
                 "no fantasy/sci-fi, no unrelated country's flag or symbols, no staged concept art.")},
                 {"role": "user", "content": [
                     {"type": "text", "text": f"Post: {text[:500]}"},
@@ -194,6 +209,24 @@ def _vision_ok(text: str, cand: Dict[str, Any]) -> Optional[bool]:
         return None
 
 
+def _collect(context: "ExecutionContext", queries: List[str], kinds: List[str],
+             used: set) -> List[Dict[str, Any]]:
+    """حتى 6 مرشّحين لكل نوع، متناوبين (فيديو، صورة، فيديو…) فيصل الاثنان للتقييم."""
+    per_kind: Dict[str, List[Dict[str, Any]]] = {}
+    for kind in kinds:
+        got: List[Dict[str, Any]] = []
+        for q in queries:
+            got += [c for c in _search(context, q, kind) if f"{c['kind']}:{c['id']}" not in used
+                    and c["id"] not in {x["id"] for x in got}]
+            if len(got) >= 6:
+                break
+        per_kind[kind] = got[:6]
+    out: List[Dict[str, Any]] = []
+    for i in range(6):
+        out += [per_kind[k][i] for k in kinds if i < len(per_kind[k])]
+    return out
+
+
 def find(context: "ExecutionContext", text: str, topic: str = "") -> str:
     """رابط صورة/فيديو Pixabay مناسب للمنشور، أو "" (فيُترك لتوليد صورة أصلية أو نص فقط)."""
     if not available(context) or not (text or "").strip():
@@ -203,29 +236,40 @@ def find(context: "ExecutionContext", text: str, topic: str = "") -> str:
         if not plan or not plan["queries"]:
             return ""
         used = set((_used().get(context.config.id) or {}).keys())
+        want = plan.get("want", "auto")
+        # auto: فيديو وصور في ترتيب واحد (كان البحث بنوع واحد يختاره المخطِّط، فلا يُرى فيديو جيد
+        # بجانب الصور أبداً — قيس: كل ميديا المخزون في السجلات صور). video: فيديو ثم صورة احتياطاً.
+        rounds = {"image": [["image"]], "video": [["video"], ["image"]]}.get(want, [["video", "image"]])
         cands: List[Dict[str, Any]] = []
-        for q in plan["queries"]:
-            cands += [c for c in _search(context, q, plan["kind"]) if f"{c['kind']}:{c['id']}" not in used
-                      and c["id"] not in {x["id"] for x in cands}]
-            if len(cands) >= 6:
-                break
-        if not cands and plan["kind"] == "video":                  # لا فيديو مناسب ← صورة
-            cands = [c for q in plan["queries"] for c in _search(context, q, "image")
-                     if f"{c['kind']}:{c['id']}" not in used][:8]
         pick = None
-        for cand in _choose(context, text, cands, plan["avoid"])[:2]:     # فحص رؤية لأفضل اثنين
-            seen = _vision_ok(text, cand)
-            if seen is True or (seen is None and cand["_score"] >= 8):
-                pick = cand
+        trail: List[str] = []          # لسجل الدورة: لماذا اختير هذا النوع (أو لا شيء)
+        for kinds in rounds:
+            cands = _collect(context, plan["queries"], kinds, used)
+            bonus = _VIDEO_BONUS if want != "image" else 0.0
+            ranked = _choose(context, text, cands, plan["avoid"], bonus)
+            # فحص رؤية لأفضل اثنين، ثم لأفضل مرشّح من النوع الآخر: رفضُ فيديوهين متصدّرَين كان يترك
+            # المنشور بلا ميديا رغم صورة مطابقة خلفهما (حكم الرؤية متذبذب: True/False/True لنفس اللقطة)
+            checks = ranked[:2]
+            other = next((c for c in ranked[2:] if c["kind"] not in {x["kind"] for x in checks}), None)
+            for cand in checks + ([other] if other else []):
+                seen = _vision_ok(text, cand)
+                # فيديو مطابق الوسوم بقوة (≥9) ورُفض: لقطة واحدة من مقطع حكمٌ جزئي ومتذبذب، فرأي ثانٍ
+                if seen is False and cand.get("kind") == "video" and cand["_score"] >= 9:
+                    seen = _vision_ok(text, cand)
+                trail.append(f"{cand['kind']}:{cand['id']}:{cand['_score']:g}:{seen}")
+                if seen is True or (seen is None and cand["_score"] >= 8):
+                    pick = cand
+                    break
+            if pick:
                 break
         if not pick:
             context.scratch["stock_media"] = {"queries": plan["queries"], "picked": None,
-                                              "candidates": len(cands)}
+                                              "candidates": len(cands), "checked": trail}
             return ""
         _mark_used(context.config.id, f"{pick['kind']}:{pick['id']}")
         context.scratch["stock_media"] = {"queries": plan["queries"], "kind": pick["kind"],
                                           "id": pick["id"], "tags": pick.get("tags", ""),
-                                          "page_url": pick.get("page_url", "")}
+                                          "page_url": pick.get("page_url", ""), "checked": trail}
         try:
             context.emit_progress(
                 f"🖼️ اختار {'فيديو' if pick['kind'] == 'video' else 'صورة'} من Pixabay للمنشور "

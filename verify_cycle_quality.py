@@ -118,6 +118,71 @@ for raw in ("خاص: باب المندب مو ممر بحري بس، والتح�
 check("كلمة «خاص» داخل الجملة لا تُمس",
       "بشكل خاص" in H._normalize_post_text("الملف يهم الخليج بشكل خاص لأن الممر شريان التجارة."))
 
+print("4) ميديا المخزون: فيديو أيضاً لا صور فقط")
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from app.aeos.employee import stock_media as SM  # noqa: E402
+from app.aeos.mcp.base import MCPResponse  # noqa: E402
+
+
+def _media_ctx(video_tags, image_tags, kind_rule=None, scores=None):
+    calls = []
+
+    class _MCP:
+        def has(self, name):
+            return name == "pixabay"
+
+        def call(self, req):
+            calls.append(req.tool)
+            if req.tool == "search_videos":
+                return MCPResponse.ok(results=[{"id": 90, "kind": "video", "url": "https://cdn.pixabay.com/v.mp4",
+                                                "tags": video_tags, "duration": 20, "size": 5_000_000}])
+            return MCPResponse.ok(results=[{"id": 10, "kind": "image", "url": "https://pixabay.com/get/i.jpg",
+                                            "tags": image_tags, "width": 1920}])
+
+    class _LLM:
+        available = True
+
+        def complete_json(self, system, prompt, temperature=0.2):
+            if "queries" in system:
+                return {"queries": ["warship red sea"], "kind": "image", "avoid": []}
+            lines = [ln for ln in prompt.splitlines() if ln[:1].isdigit() and ". [" in ln]
+            return {"scores": [{"n": i + 1, "score": (scores or {}).get("video" if "[video]" in ln else "image", 9)}
+                               for i, ln in enumerate(lines)]}
+
+    rules = {} if kind_rule is None else {"stock_media_kind": kind_rule}
+    cfg = SimpleNamespace(id=f"emp-{len(FAILED)}-{id(calls)}", business_rules=rules)
+    return SimpleNamespace(config=cfg, mcp=_MCP(), llm=_LLM(), scratch={}, emit_progress=lambda *a, **k: None), calls
+
+
+_saved = (SM.available, SM._USED_PATH, SM._vision_ok)
+SM.available = lambda c: True
+SM._vision_ok = lambda text, cand: True
+SM._USED_PATH = Path(tempfile.mkdtemp()) / "used.json"
+try:
+    ctx, calls = _media_ctx("warship, navy, sea", "warship, navy, sea")
+    url = SM.find(ctx, "تحرك قطع بحرية في البحر الأحمر")
+    check("auto: يبحث في الفيديو والصور معاً حتى لو اقترح المخطِّط صورة",
+          {"search_videos", "search_images"} <= set(calls), calls)
+    check("auto: تعادل المطابقة ⇒ الفيديو يُختار", url.endswith(".mp4") and ctx.scratch["stock_media"]["kind"] == "video",
+          url)
+    ctx, _ = _media_ctx("warship, navy", "warship, navy, red sea", scores={"video": 7, "image": 9})
+    check("auto: صورة أدق بفارق واضح تبقى أولى (فيديو بعيد أسوأ من صورة دقيقة)",
+          SM.find(ctx, "تحرك قطع بحرية في البحر الأحمر").endswith(".jpg"))
+    ctx, calls = _media_ctx("warship", "warship", kind_rule="image")
+    check("stock_media_kind=image ⇒ لا بحث فيديو أصلاً",
+          SM.find(ctx, "تحرك بحري").endswith(".jpg") and "search_videos" not in calls, calls)
+    ctx, calls = _media_ctx("warship", "warship", kind_rule="video", scores={"video": 3, "image": 9})
+    url = SM.find(ctx, "تحرك بحري")
+    check("stock_media_kind=video ⇒ فيديو أولاً، وصورة احتياطاً إن لم يطابق فيديو",
+          calls[0] == "search_videos" and url.endswith(".jpg"), (calls, url))
+    ctx, _ = _media_ctx("warship", "warship", scores={"video": 6, "image": 6})
+    check("حدّ القبول على الدرجة الخام: أفضلية الفيديو لا ترفع مرشّحاً ضعيفاً فوق 7",
+          SM.find(ctx, "تحرك بحري") == "")
+finally:
+    SM.available, SM._USED_PATH, SM._vision_ok = _saved
+
 print(f"\n{'❌ فشل ' + str(len(FAILED)) if FAILED else '✅ كل الفحوص نجحت'}")
 for n in FAILED:
     print("  -", n)
