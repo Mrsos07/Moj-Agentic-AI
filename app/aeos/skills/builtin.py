@@ -615,21 +615,50 @@ def _editorial_pick(context: "ExecutionContext") -> "dict | None":
         out = llm.complete_json(
             system=(
                 "أنت رئيس تحرير محترف لحساب X متخصص. "
-                'أعد JSON فقط: {"choice": رقم, "angle": "زاوية المعالجة", '
-                '"hook": "السطر الأول المقترح", "why": "لماذا هذا الموضوع بجملة"}'
+                'أعد JSON فقط: {"choice": رقم, "title": "عنوان الموضوع المختار منسوخاً من القائمة", '
+                '"angle": "زاوية المعالجة", "hook": "السطر الأول المقترح", "why": "لماذا هذا الموضوع بجملة"}'
             ),
             prompt=prompt,
         ) or {}
         idx = int(out.get("choice", 0)) - 1
         if not (0 <= idx < len(shortlist)):
             return best
+        idx, consistent = _reconcile_pick(shortlist, idx, out)
         picked = _format_candidate(shortlist[idx])
-        picked["angle"] = str(out.get("angle") or "").strip()[:200]
-        picked["hook"] = str(out.get("hook") or "").strip()[:140]
-        picked["why"] = str(out.get("why") or "").strip()[:200]
+        if consistent:
+            picked["angle"] = str(out.get("angle") or "").strip()[:200]
+            picked["hook"] = str(out.get("hook") or "").strip()[:140]
+            picked["why"] = str(out.get("why") or "").strip()[:200]
         return picked
     except Exception:  # noqa: BLE001
         return best
+
+
+def _reconcile_pick(shortlist: List[dict], idx: int, out: dict) -> tuple:
+    """طابِق رقم اختيار رئيس التحرير مع ما كتبه فعلاً. قيس في سجلات الدورات: «choice» يشير لخبر
+    عن الكنيست بينما «why» يتكلم عن «توازنات العراق مع إيران» — فبُحث في الخبر الأول وكُتب المنشور
+    عن الثاني (بحث وصياغة وصورة عن موضوعين مختلفين). يعيد (الفهرس الصحيح، هل الزاوية متّسقة معه).
+    """
+    from ..employee.persona_templates import normalize_topic_words
+
+    words = [set(normalize_topic_words(f"{c['title']} {c.get('summary', '')}")) for c in shortlist]
+    title = set(normalize_topic_words(str(out.get("title") or "")))
+    if title:
+        hits = [len(title & w) / max(1, len(title)) for w in words]
+        best = max(range(len(shortlist)), key=hits.__getitem__)
+        # العنوان المنسوخ يحسم: الرقم أسهل ما يخطئ فيه النموذج
+        if best != idx and hits[best] >= 0.5 and hits[best] > hits[idx]:
+            idx = best
+    reason = set(normalize_topic_words(" ".join(str(out.get(k) or "") for k in ("angle", "hook", "why"))))
+    if not reason:
+        return idx, True
+    overlap = [len(reason & w) for w in words]
+    top = max(range(len(shortlist)), key=overlap.__getitem__)
+    if overlap[idx] == 0 and overlap[top] >= 2:
+        if not title:
+            return top, True            # بلا عنوان: الزاوية تدلّ على الموضوع المقصود
+        return idx, False               # العنوان والزاوية متناقضان: الموضوع المؤكد بلا زاوية مضلِّلة
+    return idx, True
 
 
 # ─────────────────── «في مثل هذا اليوم» — محتوى تاريخي يومي ───────────────────

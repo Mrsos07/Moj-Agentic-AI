@@ -417,7 +417,9 @@ const ChatInterface = ({ darkMode, setDarkMode, user }) => {
       const open = localStorage.getItem('session_id')
       setIsTyping(list.some(t => t.kind === 'chat' && t.status === 'running' && t.session_id === open))
     } else if (data.type === 'task_update') {
-      handleTaskUpdate(data.task)
+      // أمر انتظار تسلّمته دورته: يختفي من السجل وتحلّ محله الدورة
+      if (data.removed && data.task) setTasks(prev => prev.filter(x => x.id !== data.task.id))
+      else handleTaskUpdate(data.task)
     } else if (data.type === 'typing') {
       setIsTyping(data.status)
     } else if (data.type === 'assistant_message') {

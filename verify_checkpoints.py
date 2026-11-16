@@ -313,6 +313,106 @@ check("تعذّر الاستئناف ← تعود «مقطوعة» مع السب
       TC.get(busy_id)["status"] == TC.INTERRUPTED and "منتصف دورة" in (TC.get(busy_id)["error"] or "")
       and notes and "تعذّر استئناف" in notes[0], (TC.get(busy_id), notes))
 TC.finish(busy_id, TC.CANCELLED)
+
+print("4b) الاستئناف يعيد سجلات التعلّم، والأفعال الموروثة لا تُنسى")
+from app.aeos.employee import interaction_ledger as IL  # noqa: E402
+from app.aeos.employee import strategy as ST  # noqa: E402
+
+repo = BOOT._platform.repository
+today = local_now(cfg).strftime("%Y-%m-%d")
+cut2 = TC.cycle_task_id("rep" + uuid.uuid4().hex[:10])
+TC.begin(cut2, "cycle", A, employee_id=cfg.id, request={"event_type": "manual", "payload": {}})
+TC.record_action(cut2, "like_post:https://x.com/edu/status/71", {
+    "capability": "like_post", "day": today, "target": "https://x.com/edu/status/71",
+    "handle": "@edu", "arm": "like_post:verify", "text": "تغريدة"})
+TC.record_action(cut2, "publish", {
+    "capability": "publish_content", "day": today, "url": "https://x.com/me/status/99",
+    "text": "منشور قبل الانقطاع", "pillar": "politics", "format": "post"})
+TC.mark_interrupted_on_boot()
+TC.claim_resume(cut2, A, TC.RESUMED)
+executed.clear()
+plan["decisions"] = [like(72)]
+r3 = runtime.run_cycle(cfg.id, Event(EventType.MANUAL, employee_id=cfg.id, payload={},
+                                     source=RuntimeManager.resume_source(cut2)))
+after_cfg = repo.get(cfg.id)
+check("سجل التفاعلات يحوي الإعجاب الذي سبق الانقطاع (التعلّم لا يفقده)",
+      "https://x.com/edu/status/71" in (IL._ledger(after_cfg).get("entries") or {}))
+check("سجل الأداء يحوي المنشور الذي سبق الانقطاع",
+      "https://x.com/me/status/99" in (ST._ledger(after_cfg).get("posts") or {}))
+check("الرابط يُعلَّم متفاعَلاً معه (لا يُعاد الإعجاب به لاحقاً)",
+      "https://x.com/edu/status/71" in (after_cfg.runtime_state.flags.get("engaged_urls") or []))
+new_task = TC.get(TC.cycle_task_id(r3["cycle_id"]), with_internals=True)
+check("نقطة الدورة الجديدة ترث أفعال المقطوعة (انقطاع ثانٍ لا يُنسي الأولى)",
+      {"like_post:https://x.com/edu/status/71", "publish"} <= set(TC.done_action_keys(new_task)),
+      TC.done_action_keys(new_task))
+check("الدورة المحفوظة تُعلَّم persisted", (new_task.get("state") or {}).get("persisted") is True)
+
+cut3 = TC.cycle_task_id("per" + uuid.uuid4().hex[:10])
+TC.begin(cut3, "cycle", A, employee_id=cfg.id, request={"event_type": "manual", "payload": {}})
+TC.record_action(cut3, "like_post:https://x.com/edu/status/81",
+                 {"capability": "like_post", "day": today, "target": "https://x.com/edu/status/81"})
+TC.mark(cut3, persisted=True)
+TC.mark_interrupted_on_boot()
+TC.claim_resume(cut3, A, TC.RESUMED)
+likes_before = repo.get(cfg.id).runtime_state.counters.get("likes_today", 0)
+executed.clear()
+plan["decisions"] = [like(81)]
+runtime.run_cycle(cfg.id, Event(EventType.MANUAL, employee_id=cfg.id, payload={},
+                                source=RuntimeManager.resume_source(cut3)))
+check("دورة حُفظت قبل الانقطاع ⇒ لا احتساب مرتين، والفعل لا يتكرر",
+      repo.get(cfg.id).runtime_state.counters.get("likes_today", 0) == likes_before and executed == [],
+      (likes_before, repo.get(cfg.id).runtime_state.counters, executed))
+
+print("4c) أوامر المالك المنتظرة لها نقطة استعادة")
+from app.aeos.services import employee_mission as EM  # noqa: E402
+
+
+def _run_now(eid, et="manual", payload=None, source="api_sync"):
+    return runtime.run_cycle(eid, Event(EventType(et), employee_id=eid, payload=payload or {}, source=source))
+
+
+BOOT._platform.run_cycle_now = _run_now
+executed.clear()
+plan["decisions"] = [like(91)]
+EM.dispatch_directed(cfg, {"directed_mission": {"source": "timeline"}}, ["like_post"], "أعجب بتغريدة")
+mine = TC.for_user(A, limit=80)
+waiting = [t for t in mine if t["id"].startswith("order_") and t["title"].endswith("أعجب بتغريدة")]
+cyc = [t for t in mine if t["id"].startswith("cycle_") and t["title"].endswith("أعجب بتغريدة")]
+check("الأمر يُنفَّذ والدورة تتسلّم نقطته (لا نقطتان لأمر واحد)",
+      executed == ["https://x.com/edu/status/91"] and not waiting and cyc and cyc[0]["status"] == TC.SUCCEEDED,
+      (executed, waiting, cyc))
+check("نقطة الدورة تحمل بيانات إعادة الأمر (يُستأنف عبر المُرسِل لا كدورة عادية)",
+      cyc and ((TC.get(cyc[0]["id"], with_internals=True).get("request") or {}).get("order") or {})
+      .get("label") == "أعجب بتغريدة")
+
+saved_retry = (EM._RETRY_ATTEMPTS, EM._RETRY_WAIT_SEC)
+EM._RETRY_ATTEMPTS, EM._RETRY_WAIT_SEC = 1, 0
+BOOT._platform.run_cycle_now = lambda *a, **k: {"skipped": True, "reason": "cycle_already_running"}
+EM.dispatch_directed(cfg, {}, ["like_post"], "أمر مشغول")
+busy_o = [t for t in TC.for_user(A, limit=80) if t["title"].endswith("أمر مشغول")]
+check("موظف بقي مشغولاً ⇒ نقطة الأمر تُغلق failed بسببها (لا تبقى «جارية» للأبد)",
+      busy_o and busy_o[0]["status"] == TC.FAILED and "مشغول" in (busy_o[0].get("error") or ""), busy_o)
+EM._RETRY_ATTEMPTS, EM._RETRY_WAIT_SEC = saved_retry
+BOOT._platform.run_cycle_now = _run_now
+
+oid = EM._begin_order(cfg, {}, ["like_post"], "أمر مقطوع")
+interrupted = TC.mark_interrupted_on_boot()
+check("إعادة تشغيل أثناء الانتظار ⇒ الأمر «مقطوع» لا ضائع",
+      TC.get(oid)["status"] == TC.INTERRUPTED and TC.get(oid)["phase"] == "research")
+BOOT._platform.notified.clear()
+MAIN._announce_interrupted([t for t in interrupted if t["id"] == oid])
+check("إشعار الإقلاع يقول إن الأمر لم يُنفَّذ منه شيء على X",
+      any("قبل أن تبدأ دورته" in text for _, text, _ in BOOT._platform.notified), BOOT._platform.notified)
+claimed_o = TC.claim_resume(oid, A, TC.RESUMED)
+executed.clear()
+plan["decisions"] = [like(92)]
+BOOT.AEOSPlatform.resume_cycle(SimpleNamespace(_repo=repo, _runtime=runtime,
+                                               notify_owner=BOOT._platform.notify_owner), claimed_o)
+resumed_cyc = [t for t in TC.for_user(A, limit=80) if t["id"].startswith("cycle_")
+               and t["title"].endswith("أمر مقطوع")]
+check("الاستئناف يعيد الأمر عبر المُرسِل وينفّذه",
+      executed == ["https://x.com/edu/status/92"] and resumed_cyc and resumed_cyc[0]["status"] == TC.SUCCEEDED
+      and TC.get(oid)["status"] == TC.RESUMED, (executed, resumed_cyc, TC.get(oid)))
 realtime_bus.register_sink(None)
 
 # ─────────────────────────────────────────────────────────────────────

@@ -141,7 +141,10 @@ def _record_interaction(
 #: كبيان رسمي: «مُطلعة:»، «تغريدة:»، «منشور:» ...). نزيلها لتبدأ بالمحتوى مباشرة.
 _LABEL_PREFIX_RE = re.compile(
     r"^\s*(?:مُطلعة|مطلعة|تمهيد|مقدمة|تغريدة|التغريدة|منشور|المنشور|بوست|"
-    r"البوست|عنوان|العنوان|ملخّص|ملخص|تعليق)\s*[:：\-–—]\s*"
+    r"البوست|عنوان|العنوان|ملخّص|ملخص|تعليق|"
+    # ادعاء انفراد كاذب: المنشور مكتوب من أخبار منشورة للعامة. قيس: «خاص: باب المندب…» مرتين
+    # في يومين لخبر نشرته كل الوكالات — شخصية «توحي باطلاع على الكواليس» لا تجيز اختلاق سبق
+    r"خاص|خاصّ|حصري|حصريّ|حصرياً|حصريا)\s*[:：\-–—]\s*"
 )
 
 
@@ -251,15 +254,74 @@ def _quality_issues(text: str, context: "ExecutionContext", brief: str = "") -> 
             if " ".join(str(prev).split()[:3]).lower() == opening:
                 issues.append("repeated_opening")
                 break
+    # لازمة مستهلكة: نفس كاشف الردود على آخر المنشورات. قيس: «يا خبل» ختمت 5 من 9 منشورات
+    # و«هيا خذها» 4 — الشخصية تطلب «تطعيم» النص بها أحياناً، لا ختم كل منشور بها
+    if _overused_in_post(t, context, brief):
+        issues.append("repeated_signature")
     # علامات الكتابة الآلية (مهارة unslop): إعادة توليد بتصحيح محدد، لا منع للنشر
     if unslop.enabled(context.config) and unslop.needs_fix(unslop.scan(t)):
         issues.append("ai_slop")
     return issues
 
 
+def _recent_post_texts(context: "ExecutionContext", limit: int = 20) -> List[str]:
+    """نصوص المنشورات الأخيرة كاملةً، الأقدم أولاً. من سجل الأداء (حتى 280 حرفاً): ذاكرة
+    «Published post» تقطع عند 200 حرف فتسقط الخاتمة — وهي موضع اللازمة بالذات."""
+    try:
+        from ..employee import strategy
+
+        posts = list((strategy._ledger(context.config).get("posts") or {}).values())
+        posts.sort(key=lambda p: int(p.get("seq", 0) or 0))
+        texts = [str(p.get("text") or "") for p in posts if p.get("text")]
+    except Exception:  # noqa: BLE001
+        texts = []
+    if not texts:
+        texts = [str(p) for p in reversed(context.scratch.get("recent_posts") or []) if p]
+    return texts[-limit:]
+
+
+def _post_grams(text: str) -> set:
+    """عبارات من كلمتين/ثلاث تصلح لازمةً: يُسمح أن تبدأ بأداة («يا خبل»، «هيا خذها») لكن لا
+    أن تكون كلها أدوات/ألفاظ دعاء («إن شاء الله»، «اللي هو»). كاشف الردود يُسقط ما يبدأ بأداة
+    (فلم يرَ «يا خبل» في 5 من 9 منشورات) ويحظر كلمات مفردة شائعة مثل «اللي» — لا يصلح للمنشورات."""
+    from ..employee import voice_profile as V
+
+    stop = ({V.norm_ar(s) for s in V._STOP} | set(V._FORMULA_WORDS)
+            | {V.norm_ar(s) for s in ("شاء", "إن", "إذا", "اللي", "اللى", "هذا", "هذي", "هذه")})
+    ws = [w.strip("،,.:؛;!؟?\"'«»()[]—–-…") for w in V._words(V.norm_ar(V._clean(text)))]
+    ws = [w for w in ws if w]
+    out = set()
+    for n in (2, 3):
+        for j in range(len(ws) - n + 1):
+            g = ws[j:j + n]
+            if g[-1] not in stop and any(w not in stop and len(w) >= 3 for w in g):
+                out.add(" ".join(g))
+    return out
+
+
+def _overused_in_post(text: str, context: "ExecutionContext", brief: str = "") -> List[str]:
+    """عبارات هذا المنشور التي تكررت في ≥2 من آخر 5 منشورات أو ≥3 من آخر 20. ما ورد في التوجيه
+    نفسه (اسم الموضوع/الوسم) ليس لازمة."""
+    from ..employee import voice_profile as V
+
+    recent = _recent_post_texts(context)
+    if len(recent) < 3:
+        return []
+    ref = " ".join(V._words(V.norm_ar(V._clean(brief or ""))))
+    grams = [_post_grams(r) for r in recent]
+    out: List[str] = []
+    for g in sorted(_post_grams(text), key=len, reverse=True):
+        if g in ref or any(g in o for o in out):
+            continue
+        if sum(g in s for s in grams[-5:]) >= 2 or sum(g in s for s in grams) >= 3:
+            out.append(g)
+    return out
+
+
 #: عيوب تستحق إعادة توليد
 _HARD_QUALITY_ISSUES = {"empty", "cliche", "meta", "too_short", "echo_brief",
-                        "repeated_opening", "question_ending", "copied_exemplar", "ai_slop"}
+                        "repeated_opening", "question_ending", "copied_exemplar", "ai_slop",
+                        "repeated_signature"}
 
 #: عيوب تمنع النشر نهائياً لو بقيت بعد إعادة التوليد. تكرار المطلع ليس منها:
 #: شخصية تبدأ منشوراتها دائماً بنمط واحد (مثل «عاجل:») كانت ستُمنع من النشر
@@ -611,6 +673,12 @@ def _generate_quality_post(brief: str, context: "ExecutionContext",
     if "ai_slop" in hard:
         # تصحيح بالعبارات الفعلية التي ظهرت في هذا النص (لا توجيه عام)
         hints = (hints + "\n" if hints else "") + unslop.fix_hint(unslop.scan(text))
+    if "repeated_signature" in hard:
+        used = _overused_in_post(text, context, ref)
+        hints = (hints + "\n" if hints else "") + (
+            "- عبارات كررتها في منشوراتك الأخيرة وممنوعة هذه المرة: "
+            + "، ".join(f"«{u}»" for u in used)
+            + ". اختم بجملة جديدة نابعة من هذا الموضوع نفسه؛ اللازمة الأسلوبية تُستعمل أحياناً لا في كل منشور.")
     logger.info("post quality retry (issues=%s)", hard)
     retry = _autofix_post_text(_generate_post_text(brief, context, hints))
     if not retry:

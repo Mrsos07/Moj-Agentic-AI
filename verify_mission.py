@@ -184,7 +184,7 @@ class FakePlatform:
                                     account_username="acc", user_id=1)
         self.repository = SimpleNamespace(get=lambda _id: self._cfg)
 
-    def run_cycle_now(self, eid, event_type, payload):
+    def run_cycle_now(self, eid, event_type, payload, source="api_sync"):
         self.calls += 1
         return self.reports.pop(0) if self.reports else {}
 

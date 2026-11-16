@@ -20,7 +20,7 @@ import logging
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.db.database import SessionLocal
 from app.db.models import ExecutionLogRecord
@@ -277,7 +277,8 @@ class RuntimeManager(IRuntimeManager):
             return {"skipped": True, "reason": f"status={config.status.value}"}
 
         self._reset_daily_counters(config)
-        resume_skip = self._apply_resume(config, event)
+        inherited = self._apply_resume(config, event)
+        resume_skip = [a["key"] for a in inherited]
         task_id = TC.cycle_task_id(cycle_id)
 
         # 2) BUILD temporary context
@@ -307,7 +308,7 @@ class RuntimeManager(IRuntimeManager):
         # 3) RUN one cognitive cycle
         cycle: CognitiveCycle = self._cycle_factory()
         # نقطة الاستعادة قبل أي فعل مباشرةً، فإن انقطعت الدورة (إعادة تشغيل) عرف المالك ذلك
-        self._begin_checkpoint(config, event, task_id)
+        self._begin_checkpoint(config, event, task_id, inherited)
         # كل نداءات LLM في هذه الدورة تذهب لنموذج «الموظفين» الذي اختاره مالكه (إن اختار)
         from app.core.llm_provider import LLM_OWNER
 
@@ -325,6 +326,7 @@ class RuntimeManager(IRuntimeManager):
         # 4) PERSIST
         try:
             self._persist(config, report)
+            TC.mark(task_id, persisted=True)
         except Exception:  # noqa: BLE001
             logger.exception("failed to persist cycle for %s", employee_id)
         # تُغلق نقطة الاستعادة بعد الحفظ لا قبله: انقطاع بينهما يعني أن العدّادات لم تُحفظ،
@@ -337,35 +339,95 @@ class RuntimeManager(IRuntimeManager):
         return report
 
     # ---- checkpoints (task_checkpoints) ---------------------------------
+    # مصدر الحدث يحمل الربط بنقاط الاستعادة (لا الـpayload: يُطبع في موجّه التخطيط):
+    #   resume:<id>  تستأنف مهمة مقطوعة   |   order:<id>  تنفّذ أمر مالك كان في الانتظار
     @staticmethod
     def resume_source(task_id: str) -> str:
         return f"resume:{task_id}"
 
+    @staticmethod
+    def order_source(order_id: str, resume_of: Optional[str] = None) -> str:
+        return ";".join([f"order:{order_id}"] + ([f"resume:{resume_of}"] if resume_of else []))
+
+    @staticmethod
+    def _source_tags(event: Event) -> Dict[str, str]:
+        tags: Dict[str, str] = {}
+        for part in str(getattr(event, "source", "") or "").split(";"):
+            key, sep, value = part.partition(":")
+            if sep and key in ("order", "resume") and value:
+                tags[key] = value
+        return tags
+
     def _apply_resume(self, config, event: Event) -> list:
-        """دورة تستأنف دورة مقطوعة: الأفعال التي نجحت قبل الانقطاع لا تتكرر، وتُحتسب في
-        ميزانية اليوم (الدورة المقطوعة لم تصل لمرحلة الحفظ)."""
-        source = str(getattr(event, "source", "") or "")
-        if not source.startswith("resume:"):
+        """دورة تستأنف مهمة مقطوعة: الأفعال التي نجحت قبل الانقطاع لا تتكرر، وتُعاد إلى ميزانية
+        اليوم **وسجلات التعلّم** (التفاعلات، الأداء، الأذرع، الروابط المتفاعَل معها) — الدورة
+        المقطوعة لم تصل للحفظ. يعيد الأفعال الموروثة لتُحمل في نقطة الدورة الجديدة."""
+        rid = self._source_tags(event).get("resume")
+        if not rid:
             return []
-        prior = TC.get(source[len("resume:"):], with_internals=True)
+        prior = TC.get(rid, with_internals=True)
         if not prior or prior.get("employee_id") != config.id:
             return []
+        actions = TC.done_actions(prior)
+        # حُفظت الدورة قبل الانقطاع (بين الحفظ وإغلاق المهمة) ⇒ لا احتساب مرتين
+        if not (prior.get("state") or {}).get("persisted"):
+            self._replay_learning(config, actions)
+        return actions
+
+    @staticmethod
+    def _replay_learning(config, actions: list) -> None:
+        from ..cognition import learning
         from ..cognition.phases import count_success
+        from ..decision.engine import PUBLISHING_CAPABILITIES
+        from ..employee import interaction_ledger, strategy
 
-        today = config.runtime_state.flags.get("counters_day")
-        for action in (prior.get("state") or {}).get("actions") or []:
-            if action.get("day") == today:
-                count_success(config, action.get("capability") or "", action.get("skill"))
-        return TC.done_action_keys(prior)
+        flags = config.runtime_state.flags
+        today = flags.get("counters_day")
+        for a in actions:
+            cap = a.get("capability") or ""
+            try:
+                if a.get("day") == today:
+                    count_success(config, cap, a.get("skill"))
+                if cap in PUBLISHING_CAPABILITIES:
+                    strategy.record_published(
+                        config, url=a.get("url") or "", text=a.get("text") or "",
+                        pillar=a.get("pillar") or "", format_id=a.get("format") or "",
+                        parts=int(a.get("parts") or 1), has_media=bool(a.get("has_media")),
+                        arm=a.get("arm") or "")
+                else:
+                    target = a.get("target") or ""
+                    if cap in interaction_ledger.INTERACTION_CAPABILITIES:
+                        interaction_ledger.record(config, capability=cap, url=target,
+                                                  handle=a.get("handle") or "", text=a.get("text") or "")
+                    if target.startswith("http"):
+                        engaged = flags.setdefault("engaged_urls", [])
+                        if target not in engaged:
+                            engaged.append(target)
+                            del engaged[:max(0, len(engaged) - 300)]
+                if a.get("arm"):
+                    learning.record(config, a["arm"], "ok")
+            except Exception:  # noqa: BLE001 - سجل واحد تالف لا يوقف الاستئناف
+                logger.exception("replaying resumed action %s failed", a.get("key"))
 
-    def _begin_checkpoint(self, config, event: Event, task_id: str) -> None:
+    def _begin_checkpoint(self, config, event: Event, task_id: str,
+                          inherited: Optional[list] = None) -> None:
         account = getattr(config, "account_username", "") or ""
+        title = f"دورة @{account or config.id}"
+        request: Dict[str, Any] = {"event_type": event.type.value, "payload": event.payload or {}}
         try:
+            # أمر مالك كان ينتظر: الدورة تتسلّمه (عنوانه + بيانات إعادته) وتُحذف نقطة الانتظار،
+            # فلا يظهر للأمر الواحد زرّا استئناف
+            oid = self._source_tags(event).get("order")
+            order = TC.get(oid, with_internals=True) if oid else None
+            if order and order.get("employee_id") == config.id:
+                title = order.get("title") or title
+                request["order"] = (order.get("request") or {}).get("order")
+                TC.discard(order["id"])
+                self._push_task(config, order, removed=True)
             view, _ = TC.begin(
                 task_id, "cycle", getattr(config, "user_id", None), employee_id=config.id,
-                session_id=f"emp_{account}" if account else None,
-                title=f"دورة @{account or config.id}",
-                request={"event_type": event.type.value, "payload": event.payload or {}})
+                session_id=f"emp_{account}" if account else None, title=title, request=request,
+                state={"actions": list(inherited)} if inherited else None)
             self._push_task(config, view)
         except Exception:  # noqa: BLE001 - الدورة تعمل ولو تعذّر تسجيل نقطة الاستعادة
             logger.exception("cycle checkpoint begin failed for %s", config.id)
@@ -384,15 +446,17 @@ class RuntimeManager(IRuntimeManager):
         return _cb
 
     @staticmethod
-    def _push_task(config, view) -> None:
+    def _push_task(config, view, removed: bool = False) -> None:
         user_id = getattr(config, "user_id", None)
         if not view or user_id is None:
             return
         try:
             from app.services import realtime_bus
 
-            realtime_bus.publish_chat(user_id, {"type": "task_update",
-                                                "task": TC.iter_payloads([view])[0]})
+            payload = {"type": "task_update", "task": TC.iter_payloads([view])[0]}
+            if removed:
+                payload["removed"] = True
+            realtime_bus.publish_chat(user_id, payload)
         except Exception:  # noqa: BLE001
             logger.debug("task push skipped", exc_info=True)
 

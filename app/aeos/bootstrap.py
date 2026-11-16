@@ -185,10 +185,12 @@ class AEOSPlatform:
         return event.event_id
 
     def run_cycle_now(self, employee_id: str, event_type: str = "manual",
-                      payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Run a single cycle synchronously (blocking) — handy for testing/API."""
+                      payload: Optional[Dict[str, Any]] = None,
+                      source: str = "api_sync") -> Dict[str, Any]:
+        """Run a single cycle synchronously (blocking) — handy for testing/API.
+        ``source``: ربط نقاط الاستعادة (``order:<id>`` / ``resume:<id>``) — انظر RuntimeManager."""
         event = Event(EventType(event_type), employee_id=employee_id,
-                      payload=payload or {}, source="api_sync")
+                      payload=payload or {}, source=source)
         return self._runtime.run_cycle(employee_id, event)
 
     def resume_cycle(self, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -199,6 +201,20 @@ class AEOSPlatform:
 
         req = task.get("request") or {}
         employee_id = task.get("employee_id") or ""
+        order = req.get("order")
+        if order:
+            # أمر مالك (انقطع قبل دورته أو أثناءها): يعود عبر المُرسِل نفسه — انتظار الدورة الجارية
+            # والإبلاغ بالنتيجة على X — ويتخطّى ما نُفّذ قبل الانقطاع (resume:<id>)
+            from .services import employee_mission
+
+            cfg = self._repo.get(employee_id)
+            if cfg is None:
+                TC.finish(task["id"], TC.CANCELLED, "الموظف لم يعد موجوداً")
+                return {"skipped": True, "reason": "employee_not_found"}
+            employee_mission.dispatch_directed(
+                cfg, dict(req.get("payload") or {}), list(order.get("expected_caps") or []),
+                str(order.get("label") or task.get("title") or ""), resume_of=task["id"])
+            return {"dispatched": True}
         try:
             etype = EventType(req.get("event_type") or "manual")
         except ValueError:

@@ -1107,6 +1107,30 @@ def count_success(config, capability: str, skill_id: Optional[str] = None) -> No
         c[key] = c.get(key, 0) + 1
 
 
+def _action_checkpoint(key: str, action, entry: Dict[str, Any], skill_id, output) -> Dict[str, Any]:
+    """ما يكفي لإعادة بناء سجلات التعلّم عند الاستئناف (الدورة المقطوعة لا تصل للحفظ).
+    لا يرمي أبداً: استثناء هنا كان سيُحسب فشلاً لفعل نجح فعلاً على X."""
+    info: Dict[str, Any] = {"key": key, "capability": action.capability,
+                            "target": entry.get("target") or "", "skill": skill_id}
+    try:
+        out = output if isinstance(output, dict) else {}
+        p = action.params or {}
+        try:
+            parts = int(out.get("parts") or 1)
+        except (TypeError, ValueError):
+            parts = 1
+        info.update(
+            arm=str(entry.get("arm") or ""),
+            url=str(out.get("tweet_url") or out.get("url") or "")[:300],
+            handle=str(p.get("handle") or "")[:80],
+            text=str(out.get("text") or out.get("reply_text") or p.get("original_text") or "")[:280],
+            pillar=str(p.get("pillar") or ""), format=str(p.get("format") or ""),
+            parts=parts, has_media=bool(out.get("media_url") or out.get("has_media")))
+    except Exception:  # noqa: BLE001
+        logger.debug("action checkpoint details skipped", exc_info=True)
+    return info
+
+
 class ExecutePhase(ICognitivePhase):
     """Execute the chosen actions through the capability layer."""
 
@@ -1186,10 +1210,8 @@ class ExecutePhase(ICognitivePhase):
                     skill_id = (action.params or {}).get("_skill")
                     count_success(context.config, action.capability, skill_id)
                     if key:
-                        out = result.output if isinstance(result.output, dict) else {}
-                        context.checkpoint("action", key=key, capability=action.capability,
-                                           target=entry["target"], skill=skill_id,
-                                           url=str(out.get("tweet_url") or out.get("url") or "")[:300])
+                        context.checkpoint("action", **_action_checkpoint(
+                            key, action, entry, skill_id, result.output))
             except Exception as exc:  # noqa: BLE001
                 logger.exception("capability execution failed")
                 results.append({

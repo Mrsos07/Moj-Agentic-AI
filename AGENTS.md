@@ -821,7 +821,50 @@ defences it forced are still in the code and still required if you set
 - `broadcast_to_user` used to fall back to EVERY open connection when the owner was offline, which pushed
   one user's employee reports to other users. Removed: the outbox delivers them when the owner reconnects.
 - File uploads (cookies/CSV) are never checkpointed: their content would land in the DB.
-- Test (temp DB, no network/LLM/X): `.\venv\Scripts\python.exe verify_checkpoints.py`.
+- Owner orders (`employee_mission.dispatch_directed`) get an `order_<emp>_<hex>` checkpoint BEFORE
+  research and the busy-wait (up to 8×20 s). Before this, a restart during the wait lost the order
+  silently. The cycle is linked through `Event.source` (`order:<id>;resume:<id>`), never through the
+  payload, because the payload is printed into the planning prompt.
+  - When the cycle starts, its checkpoint takes the order's title and `request.order` and DISCARDS the
+    order row (pushed as `task_update` with `removed: true`), so one order never shows two resume buttons.
+  - Resuming any task that has `request.order` goes back through `dispatch_directed(..., resume_of=)`,
+    keeping the busy-retry and outcome report.
+- Resume rebuilds learning, not only counters: each successful action's checkpoint stores capability,
+  target, handle, arm, url, text, pillar and format, and `_replay_learning` writes them back to the
+  interaction ledger, strategy ledger, `engaged_urls` and learning arms.
+  - Inherited actions are carried into the new cycle's checkpoint, so a second interruption still skips them.
+  - `persisted=True` (set right after `_persist`) prevents double counting when the crash hit between
+    save and finish.
+  - `_action_checkpoint` never raises: an exception inside the action's try-block would mark a
+    successful X action as failed.
+- Test (temp DB, no network/LLM/X): `.\venv\Scripts\python.exe verify_checkpoints.py` (sections 4b/4c cover the above).
+
+## Agent-cycle review 2026-11-16 (measured on 74 real cycles in execution_logs)
+- **Editorial pick choice/angle mismatch.** The editor LLM's `choice` number pointed to one candidate
+  while its `why`/`angle` described another.
+  - Logged: title «معسكر آيزنكوت بالكنيست…» with why «توازنات العراق مع إيران». Another: title
+    «#اليوم_العالمي_للتسامح» with why about the Houthis.
+  - Result: research ran on one topic (`research_query` = title) and the post was written about the other.
+  - Now the editor must echo `title`, and `builtin._reconcile_pick` maps it by word overlap. When there
+    is no title, the angle decides the candidate. When title and angle contradict, the topic is kept
+    and the misleading angle is dropped.
+- **Overused signature phrases in posts.** «يا خبل» closed 5 of 9 posts and «هيا خذها» 4. The persona
+  asks to sprinkle them, not to close every post with them.
+  - The reply detector (`voice_profile.overused_phrases`) misses them: it drops grams that start with a
+    particle, and its single-word rule would ban «اللي».
+  - Posts now use `handlers._post_grams` / `_overused_in_post`:
+    - a 2–3-gram in ≥2 of the last 5 or ≥3 of the last 20 posts counts as overused;
+    - texts come from the strategy ledger, because memory «Published post» cuts at 200 chars and drops
+      the closing;
+    - phrases that appear in the brief/topic are exempt.
+  - `repeated_signature` triggers ONE rewrite with the phrases listed. It is not blocking.
+- **False exclusivity.** «خاص:»/«حصري:» was stuck on news every agency had published. It is now
+  stripped as a label prefix in `_LABEL_PREFIX_RE`.
+- Not bugs, verified:
+  - A 68-hour cycle: the machine was asleep (no other cycle or message in that window).
+  - «—-» and «يا خبل» are the owner's cloned persona style.
+  - Pixabay works (picks are visible in chat).
+- Test: `.\venv\Scripts\python.exe verify_cycle_quality.py`.
 - **Never open a DB session with `next(get_db())` outside a FastAPI dependency.** The
   generator is finalised immediately, so its `finally: db.close()` runs on an EMPTY session;
   the first query then checks out a fresh connection that only returns to the pool when the

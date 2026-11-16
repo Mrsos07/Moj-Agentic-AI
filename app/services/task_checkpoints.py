@@ -50,6 +50,8 @@ PHASE_LABELS = {
     "decide": "القرار", "guard": "مراجعة الشخصية", "execute": "التنفيذ على X",
     "evaluate": "التقييم", "learn": "التعلّم", "critique": "النقد الذاتي",
     "graph_memory": "الذاكرة المعرفية", "support": "طلب الدعم", "save": "الحفظ",
+    # أمر المالك قبل أن تبدأ دورته (employee_mission.dispatch_directed)
+    "research": "تجهيز الرسالة الإعلامية", "queued": "بانتظار انتهاء الدورة الجارية",
 }
 
 _inserts = 0
@@ -110,7 +112,8 @@ def _view(row: TaskCheckpoint) -> Dict[str, Any]:
 # ─────────────────────────── tasks ───────────────────────────
 def begin(task_id: str, kind: str, user_id: Any, *, title: str = "",
           employee_id: Optional[str] = None, session_id: Optional[str] = None,
-          request: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], bool]:
+          request: Optional[Dict[str, Any]] = None,
+          state: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], bool]:
     """سجّل مهمة جديدة ``running``. إن وُجد المعرّف نفسه لهذا المستخدم ← (المهمة، False):
     إعادة إرسال الرسالة بعد انقطاع لا تنفّذها مرة ثانية. معرّف يخص مستخدماً آخر
     لا يكشف شيئاً: تُسجَّل المهمة بمعرّف جديد."""
@@ -124,7 +127,7 @@ def begin(task_id: str, kind: str, user_id: Any, *, title: str = "",
             task_id = uuid.uuid4().hex
         row = TaskCheckpoint(id=task_id, kind=kind, user_id=uid, employee_id=employee_id,
                              session_id=session_id, title=(title or "")[:500], status=RUNNING,
-                             request=_dumps(request or {}), state=_dumps({}))
+                             request=_dumps(request or {}), state=_dumps(state or {}))
         db.add(row)
         db.commit()
         return _view(row), True
@@ -173,6 +176,32 @@ def record_action(task_id: str, key: str, info: Optional[Dict[str, Any]] = None)
         state["actions"] = actions[-_MAX_ACTIONS:]
         row.state = _dumps(state)
     _update(task_id, fn)
+
+
+def mark(task_id: str, **flags: Any) -> None:
+    """أعلام في الحالة (``persisted``: حُفظت الدورة، فلا يُعاد احتساب أفعالها عند الاستئناف)."""
+    def fn(row):
+        state = _loads(row.state, {})
+        state.update(flags)
+        row.state = _dumps(state)
+    _update(task_id, fn)
+
+
+def set_request(task_id: str, request: Dict[str, Any]) -> None:
+    """حدّث ما يلزم لإعادة التشغيل (بعد إرفاق الرسالة الإعلامية: الاستئناف لا يعيد البحث)."""
+    def fn(row):
+        row.request = _dumps(request)
+    _update(task_id, fn)
+
+
+def discard(task_id: str) -> None:
+    """احذف نقطة انتهى دورها (أمر الانتظار بعد أن تسلّمته دورته)."""
+    db = _session()
+    try:
+        db.query(TaskCheckpoint).filter(TaskCheckpoint.id == task_id).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
 
 
 def finish(task_id: str, status: str, error: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -269,9 +298,16 @@ def mark_interrupted_on_boot() -> List[Dict[str, Any]]:
         db.close()
 
 
+def done_actions(task: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [a for a in ((task or {}).get("state") or {}).get("actions") or [] if a.get("key")]
+
+
 def done_action_keys(task: Optional[Dict[str, Any]]) -> List[str]:
-    actions = ((task or {}).get("state") or {}).get("actions") or []
-    return [a["key"] for a in actions if a.get("key")]
+    return [a["key"] for a in done_actions(task)]
+
+
+def order_task_id(employee_id: str) -> str:
+    return f"order_{employee_id[:24]}_{uuid.uuid4().hex[:16]}"
 
 
 # ─────────────────────────── outbox ───────────────────────────

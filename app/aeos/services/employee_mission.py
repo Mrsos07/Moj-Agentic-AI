@@ -258,8 +258,37 @@ _RETRY_ATTEMPTS = 8
 _RETRY_WAIT_SEC = 20
 
 
+def _begin_order(cfg, payload: Dict[str, Any], expected_caps: List[str], label: str) -> str:
+    """نقطة استعادة للأمر **قبل** البحث والانتظار: كان الأمر يعيش في خيط ينتظر (حتى 8×20ث) أن
+    تفرغ دورة جارية، فإعادة تشغيل الخادم في هذه الدقائق تُضيعه بلا خبر ولا زر استئناف. حين تبدأ
+    دورته تتسلّمه نقطة الدورة (RuntimeManager._begin_checkpoint) وتُحذف هذه."""
+    from app.services import task_checkpoints as TC
+
+    oid = TC.order_task_id(cfg.id)
+    account = getattr(cfg, "account_username", "") or ""
+    try:
+        view, _ = TC.begin(
+            oid, "cycle", getattr(cfg, "user_id", None), employee_id=cfg.id,
+            session_id=f"emp_{account}" if account else None, title=f"أمر @{account}: {label}"[:200],
+            request={"event_type": "manual", "payload": payload,
+                     "order": {"expected_caps": list(expected_caps), "label": label}})
+        TC.phase(oid, "research")
+        from ..runtime.manager import RuntimeManager
+
+        RuntimeManager._push_task(cfg, view)
+    except Exception:  # noqa: BLE001 - الأمر يُنفَّذ ولو تعذّر تسجيل نقطته
+        logger.exception("order checkpoint failed for %s", cfg.id)
+    return oid
+
+
+def _close_order(oid: str, status: str, reason: str) -> None:
+    from app.services import task_checkpoints as TC
+
+    TC.finish(oid, status, reason)
+
+
 def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
-                      label: str) -> None:
+                      label: str, resume_of: Optional[str] = None) -> None:
     """نفّذ أمر المالك على X فعلاً، ولا تتركه بلا خبر مهما حدث.
 
     ثلاث ضمانات تفصل «إنشاء تغريدة في الشات» عن «نشرها على X»:
@@ -275,8 +304,14 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
     from ..bootstrap import get_platform
     from ..employee.models import EmployeeStatus
 
+    from app.services import task_checkpoints as TC
+
+    from ..runtime.manager import RuntimeManager
+
     platform = get_platform()
     eid = cfg.id
+    oid = _begin_order(cfg, payload, expected_caps, label)
+    source = RuntimeManager.order_source(oid, resume_of)
 
     # نشر موجّه بلا رسالة إعلامية بعد (أمر الحساب المثبّت/مهمّة نشر): بحث عميق أولاً.
     # نواه أولاً (توجيه لكل الفريق + مسودة بصوت الموظف)، ثم رسالة media_brief القديمة احتياطاً معلَناً.
@@ -310,11 +345,18 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
                 "aeos_cycle_thinking",
             )
 
+    # الرسالة الإعلامية مرفقة الآن: الاستئناف يكتب منها بلا بحث جديد
+    TC.set_request(oid, {"event_type": "manual", "payload": payload,
+                         "order": {"expected_caps": list(expected_caps), "label": label}})
+    TC.phase(oid, "queued")
+
     for attempt in range(_RETRY_ATTEMPTS):
         fresh = platform.repository.get(eid)
         if fresh is None:
+            _close_order(oid, TC.CANCELLED, "الموظف لم يعد موجوداً")
             return
         if fresh.status != EmployeeStatus.ACTIVE:
+            _close_order(oid, TC.FAILED, f"الموظف {fresh.status.value}")
             platform.notify_owner(
                 eid,
                 f"⏸️ لم أستطع تنفيذ ({label}) على X لأن الموظف "
@@ -324,7 +366,7 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
             )
             return
 
-        report = platform.run_cycle_now(eid, "manual", payload) or {}
+        report = platform.run_cycle_now(eid, "manual", payload, source=source) or {}
         if report.get("skipped") and report.get("reason") == "cycle_already_running":
             if attempt == 0:
                 platform.notify_owner(
@@ -336,15 +378,18 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
             time.sleep(_RETRY_WAIT_SEC)
             continue
         if report.get("skipped"):
+            _close_order(oid, TC.FAILED, str(report.get("reason") or "")[:300])
             platform.notify_owner(
                 eid, f"⚠️ لم تُنفَّذ ({label}): {report.get('reason', 'سبب غير معروف')}.",
                 "aeos_directed_blocked",
             )
             return
 
+        # بدأت الدورة: نقطتها تسلّمت الأمر وحذفت نقطة الانتظار
         _report_outcome(platform, eid, report, expected_caps, label)
         return
 
+    _close_order(oid, TC.FAILED, "بقي الموظف مشغولاً بدورة طويلة")
     platform.notify_owner(
         eid,
         f"⚠️ لم أتمكّن من تنفيذ ({label}) لأن الموظف بقي مشغولاً بدورة طويلة. "

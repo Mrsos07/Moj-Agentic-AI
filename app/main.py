@@ -910,6 +910,14 @@ def _announce_interrupted(tasks: List[Dict[str, Any]]) -> None:
         uid = t.get("user_id")
         if uid is None:
             continue
+        if str(t.get("id", "")).startswith("order_"):
+            plat.notify_owner(
+                t.get("employee_id") or "",
+                f"⚠️ انقطع أمرك «{t.get('title') or ''}» قبل أن تبدأ دورته (كان في مرحلة "
+                f"«{t.get('phase_label') or 'البدء'}») بسبب إعادة تشغيل الخادم — لم يُنفَّذ منه شيء على X. "
+                "اضغط «استئناف» من سجل التنفيذ لتنفيذه، أو «تجاهل».",
+                intent="aeos_directed_interrupted")
+            continue
         if t["kind"] == "cycle":
             done = t.get("done_actions") or 0
             plat.notify_owner(
