@@ -14,8 +14,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Riyadh
 
 # أدوات البناء لمكتبات بايثون ذات الامتدادات + curl لفحص الصحة + tini لإنهاء العمليات الفرعية بنظافة
+# + nodejs (≥20، من مستودع Debian): خادما نواه (الاستنساخ والتوجيه الإعلامي) MCP عبر stdio يُشغَّلان بـ
+#   «node <ملف .mjs مجمّع>» — بدونه في الإنتاج: «Node.js غير مثبّت» (قيس 2026-11-16)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential curl ca-certificates tini tzdata lsof fonts-noto-core fonts-noto-color-emoji \
+        build-essential curl ca-certificates tini tzdata lsof fonts-noto-core fonts-noto-color-emoji nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

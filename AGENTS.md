@@ -66,7 +66,8 @@
   backend volumes via `--volumes-from`, and copies `.env`. `scripts/restore.sh <dir>` asks for confirmation
   and replaces everything. Both were verified live: a user created after the backup is gone after the
   restore, and login still works.
-- Identity (5990) is skipped without `GEMINI_API_KEY`, by design. With any key it boots (verified, HTTP 200).
+- Identity (5990) is skipped without `GEMINI_API_KEY`, by design.
+- Node.js (Debian `nodejs` 20.19, in Dockerfile.backend) is REQUIRED: the Nawah clone + brief MCP servers are stdio `node <bundled .mjs>` (no npm install needed, the bundles are self-contained). Production said «Node.js غير مثبّت» until 2026-11-16. Verified in the image: both servers list their tools as the non-root `moj` user. With any key it boots (verified, HTTP 200).
 - Gotchas found by the 2026-11-09 smoke run:
   - The old healthcheck hit `/api/health`, which doesn't exist; it is `/health`.
   - `.dockerignore` excluded `*.md`, which dropped every `system/skills/*/SKILL.md`, so the image had no skills.
