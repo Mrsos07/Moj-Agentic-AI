@@ -9,6 +9,10 @@
   secrets files) or a secret-key pattern is in the diff. Never bypass it; move the value to
   `.env`/`data/` instead. Exit code 2 = the three copies disagree — investigate.
 - Do NOT publish half-done or failing work just to "keep it synced".
+- `publish.ps1` stages EVERYTHING (`git add -A`). Run `git status` in a separate step BEFORE publishing,
+  and `git stash push -- <file>` any file you did not change (the owner often has work in progress in the
+  same tree). On 2026-11-16, a publish swept in the owner's uncommitted identity-preview fix
+  (`identity_service.py`, `vite.config.js`, `verify_identity.py`) because status and publish ran in one batch.
 
 ## Security rules (review 2026-11-08)
 - X session cookies were tracked in Git despite `.gitignore`: 6 JSON files with `auth_token`/`ct0` in
