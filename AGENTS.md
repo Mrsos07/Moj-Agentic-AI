@@ -512,6 +512,21 @@ defences it forced are still in the code and still required if you set
   `pending.json`. The apply uploads those bytes as multipart (`x_bridge.update_profile(avatar_path=…)`
   → `avatar_file`), never a URL. The identity server deletes previews after 1h → approval fails with
   «أعد توليد المعاينة» (HTTP 400; the card keeps the preview) instead of applying something else.
+- Preview images are served by the BACKEND itself (2026-11-17). In production the card showed name and bio
+  plus two broken images: `identity_service` turned the generator's `/static/generated/<32hex>.<ext>` into
+  `http://127.0.0.1:5990/…`, the identity server's address inside the server, so the owner's browser requested
+  it from ITS OWN machine. It only worked locally because the browser and the server were the same PC.
+  - Now `_preview_path` keeps the path relative (and strips that base if the generator ever returns it).
+  - `main.py` mounts `identity_store.generated_dir()` at `/static/generated`, registered BEFORE `/static`
+    (the first matching Mount wins).
+  - nginx already proxies `/static/`. vite proxies `/static` too since this change (dev; it also fixes
+    chat `/static/uploads` in dev).
+  - The files are public by their uuid4 name, like `/static/uploads`. `verify_isolation` skips `/static` by
+    design. Never hand the browser an internal service URL.
+  - Verified 2026-11-17 on a production-shaped stack (moj-backend image, repo nginx.conf): a client
+    container got the PNG through nginx (200, same sha256, rendered 1024² in Chrome), while the old URL
+    gave «connection refused».
+  - Test: section 9 of `verify_identity.py`.
 - `identity_service.resume_pending()` (main.py startup) resumes an interrupted approval with the same
   pinned files (≤3 attempts, ≤24h, deleted employee ⇒ dropped); a newer approval supersedes an older
   one (`is_current`). Publishing into the copy the app runs from ALWAYS kills in-flight background
