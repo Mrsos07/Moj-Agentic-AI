@@ -39,6 +39,8 @@ logger = logging.getLogger("aeos.runtime")
 # Human-readable Arabic verbs for what the employee actually did this cycle.
 _ACTION_VERBS = {
     "publish_content": "نشر تغريدة جديدة",
+    "publish_thread": "نشر ثريداً",
+    "quote_post": "اقتبس تغريدة",
     "reply_to_user": "ردّ على تغريدة",
     "retweet_post": "أعاد نشر تغريدة",
     "like_post": "تفاعل بإعجاب مع تغريدة",
@@ -61,8 +63,9 @@ def _action_line(result: Dict[str, Any]) -> str:
     mark = "✓" if ok else "✗"
 
     detail = ""
+    link = ""
     if ok and isinstance(output, dict):
-        if cap == "publish_content":
+        if cap in ("publish_content", "publish_thread", "quote_post"):
             txt = (output.get("text") or "").strip().replace("\n", " ")
             if txt:
                 detail = f": «{txt[:140]}»"
@@ -70,6 +73,10 @@ def _action_line(result: Dict[str, Any]) -> str:
             txt = (output.get("reply_text") or "").strip().replace("\n", " ")
             if txt:
                 detail = f": «{txt[:120]}»"
+        # رابط ما نُشر من X نفسه — قيس 2026-11-12: «✓ نشر تغريدة جديدة: «…»» بلا رابط، والمنسّق
+        # يعد المالك «ستصلك الروابط في الشات»
+        if cap in ("publish_content", "publish_thread", "quote_post"):
+            link = str(output.get("tweet_url") or output.get("url") or "")
     if not ok:
         err = (result.get("error") or "").strip()
         if result.get("status") == "skipped":
@@ -77,7 +84,7 @@ def _action_line(result: Dict[str, Any]) -> str:
         if err:
             detail = f" (تعذّر: {err[:100]})"
     target = str(result.get("target") or "")
-    return f"{mark} {verb}{detail}" + (f" — {target}" if target else "")
+    return f"{mark} {verb}{detail}" + (f" — {target}" if target else "") + (f"\n  🔗 {link}" if link else "")
 
 
 def _observed_line(observations: Dict[str, Any]) -> str:

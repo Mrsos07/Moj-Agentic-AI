@@ -270,7 +270,7 @@ def fake_generate(cfg, entities=None, with_images=True):
     return {"name": "مولّد", "bio": "جديد", "avatar_url": u, "banner_url": ""}
 
 
-SVC.generate_preview = fake_generate
+REAL_PREVIEW, SVC.generate_preview = SVC.generate_preview, fake_generate
 from app.agents.main_agent_simple import MainAgent  # noqa: E402
 
 txt = MainAgent._employee_identity_preview(cfg4, {}, 7, True)
@@ -603,6 +603,56 @@ check("هيدر ما زال بالرابط القديم ← تحذير صريح 
       and "✓" not in banner_line, banner_line)
 X_AFTER["snap"] = None
 NEXT["res"] = {"success": True, "media": {"avatar": "confirmed", "banner": "confirmed"}}
+
+print("9) صور المعاينة يحمّلها المتصفح من الخادم نفسه — لا من سيرفر الهويات الداخلي")
+# قيس 2026-11-17 في الإنتاج: البطاقة عرضت الاسم والبايو وصورتين مكسورتين — الرابط كان
+# http://127.0.0.1:5990/static/generated/… فيطلبه متصفح المالك من جهازه هو.
+BASE = identity_bridge.IDENTITY_BASE_URL
+(p_av, av_bytes), (p_bn, bn_bytes), (p_f, f_bytes) = (
+    (u[len(BASE):], d) for u, d in (fake_png("prod-avatar"), fake_png("prod-banner"), fake_png("prod-field")))
+identity_bridge.start_identity_server = lambda: True
+identity_bridge.generate_profile = lambda params, with_images=False: {"success": True, "data": {
+    "name": "م", "bio": "ب", "profilePictureUrl": p_av, "headerImageUrl": p_bn}}
+ident = REAL_PREVIEW(cfg, {})
+check("المعاينة: مسارات نسبية على أصل الصفحة — بلا عنوان سيرفر الهويات الداخلي",
+      ident["avatar_url"] == p_av and ident["banner_url"] == p_bn and "5990" not in str(ident), ident)
+identity_bridge.generate_profile = lambda params, with_images=False: {"success": True, "data": {
+    "profilePictureUrl": BASE + p_av, "headerImageUrl": ""}}
+check("ولو أعاد المولّد رابطه الداخلي كاملاً ← يصل المتصفح المسار النسبي",
+      REAL_PREVIEW(cfg, {})["avatar_url"] == p_av)
+identity_bridge.construct_prompts = lambda params: {"success": True, "data": {
+    "profilePicPrompt": "p", "headerImagePrompt": "h"}}
+identity_bridge.generate_image = lambda prompt, image_type="profile": {"success": True, "data": {"imageUrl": p_f}}
+patch = SVC.generate_field(cfg, "avatar", "خلفية زرقاء")
+check("«تعديل عنصر ← الصورة» يعيد المسار النسبي نفسه", patch == {"avatar_url": p_f}, patch)
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import app.main as MAIN  # noqa: E402
+
+client = TestClient(MAIN.app)
+got = [client.get(u) for u in (ident["avatar_url"], ident["banner_url"], patch["avatar_url"])]
+check("التطبيق الحقيقي يخدم الصور بمساراتها، بلا توكن (<img> لا يرسله) وبالبايتات نفسها",
+      [(r.status_code, r.headers.get("content-type"), r.content) for r in got]
+      == [(200, "image/png", av_bytes), (200, "image/png", bn_bytes), (200, "image/png", f_bytes)],
+      [(r.status_code, r.headers.get("content-type")) for r in got])
+bad = [client.get(u).status_code for u in ("/static/generated/" + "0" * 32 + ".png",
+                                           "/static/generated/..%2F..%2F..%2Fapp%2Fmain.py", "/static/generated/")]
+check("صورة غير موجودة / مسار ملتفّ / فهرس المجلد ← 404", bad == [404, 404, 404], bad)
+mounts = [r.path for r in MAIN.app.routes if type(r).__name__ == "Mount"]
+check("مسار الصور قبل /static العام (أول Mount مطابق يفوز)", "/static/generated" in mounts
+      and "/static" in mounts and mounts.index("/static/generated") < mounts.index("/static"), mounts)
+FRONT = Path(__file__).resolve().parent / "frontend"
+ngx = (FRONT / "nginx.conf").read_text(encoding="utf-8")
+vite = (FRONT / "vite.config.js").read_text(encoding="utf-8")
+check("nginx (الإنتاج) وvite (التطوير) يمرّران /static إلى الخادم الخلفي",
+      bool(re.search(r"location /static/ \{\s*proxy_pass http://backend:8000;", ngx))
+      and bool(re.search(r"'/static':\s*\{\s*target: `http://127\.0\.0\.1:\$\{BACKEND_PORT\}`", vite)))
+n = len(CALLS)
+SVC.request_apply_identity(cfg, 1, identity={**ident, **patch})
+check("«تطبيق على X» بالمسارات المعروضة ← تُرفع بايتات الصورة والهيدر المعروضين نفسها",
+      len(CALLS) == n + 1 and CALLS[-1][1].get("avatar_bytes") == f_bytes
+      and CALLS[-1][1].get("banner_bytes") == bn_bytes, list(CALLS[-1][1]))
 
 shutil.rmtree(TMP, ignore_errors=True)
 print()

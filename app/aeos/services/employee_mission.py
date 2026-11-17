@@ -331,10 +331,16 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
 
     from ..runtime.manager import RuntimeManager
 
+    from . import campaigns
+
     platform = get_platform()
     eid = cfg.id
     oid = _begin_order(cfg, payload, expected_caps, label)
     source = RuntimeManager.order_source(oid, resume_of)
+
+    def _camp(ok: bool, url: str = "", detail: str = "", kind: str = "") -> None:
+        # جزء من حملة فريق: النتيجة (الرابط أو السبب) تدخل الخلاصة الموحّدة للمالك
+        campaigns.record(payload.get("campaign_id"), cfg.account_username, ok, url, detail, kind)
 
     # نشر موجّه بلا رسالة إعلامية بعد (أمر الحساب المثبّت/مهمّة نشر): بحث عميق أولاً.
     # نواه أولاً (توجيه لكل الفريق + مسودة بصوت الموظف)، ثم رسالة media_brief القديمة احتياطاً معلَناً.
@@ -380,9 +386,11 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
         fresh = platform.repository.get(eid)
         if fresh is None:
             _close_order(oid, TC.CANCELLED, "الموظف لم يعد موجوداً")
+            _camp(False, detail="الموظف لم يعد موجوداً")
             return
         if fresh.status != EmployeeStatus.ACTIVE:
             _close_order(oid, TC.FAILED, f"الموظف {fresh.status.value}")
+            _camp(False, detail=f"الموظف {fresh.status.value} — فعّله ثم أعد الطلب")
             platform.notify_owner(
                 eid,
                 f"⏸️ لم أستطع تنفيذ ({label}) على X لأن الموظف "
@@ -405,6 +413,7 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
             continue
         if report.get("skipped"):
             _close_order(oid, TC.FAILED, str(report.get("reason") or "")[:300])
+            _camp(False, detail=str(report.get("reason") or "سبب غير معروف"))
             platform.notify_owner(
                 eid, f"⚠️ لم تُنفَّذ ({label}): {report.get('reason', 'سبب غير معروف')}.",
                 "aeos_directed_blocked",
@@ -412,10 +421,12 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
             return
 
         # بدأت الدورة: نقطتها تسلّمت الأمر وحذفت نقطة الانتظار
-        _report_outcome(platform, eid, report, expected_caps, label)
+        outcome = _report_outcome(platform, eid, report, expected_caps, label) or {}
+        _camp(bool(outcome.get("ok")), outcome.get("url", ""), outcome.get("detail", ""), outcome.get("kind", ""))
         return
 
     _close_order(oid, TC.FAILED, "بقي الموظف مشغولاً بدورة طويلة")
+    _camp(False, detail="بقي مشغولاً بدورة طويلة — أعد الطلب بعد قليل")
     platform.notify_owner(
         eid,
         f"⚠️ لم أتمكّن من تنفيذ ({label}) لأن الموظف بقي مشغولاً بدورة طويلة. "
@@ -425,12 +436,17 @@ def dispatch_directed(cfg, payload: Dict[str, Any], expected_caps: List[str],
 
 
 def _report_outcome(platform, eid: str, report: Dict[str, Any],
-                    expected_caps: List[str], label: str) -> None:
-    """أبلِغ المالك عندما لا يقع الفعل على X — النجاح يسرده تقرير الدورة."""
+                    expected_caps: List[str], label: str) -> Dict[str, Any]:
+    """أبلِغ المالك عندما لا يقع الفعل على X — النجاح يسرده تقرير الدورة.
+    يعيد النتيجة ``{ok, url, kind, detail}`` لخلاصة الحملة (campaigns.record)."""
     results = [r for r in (report.get("results") or []) if isinstance(r, dict)]
     relevant = [r for r in results if r.get("capability") in expected_caps]
-    if any(r.get("success") for r in relevant):
-        return  # نُفّذ فعلاً على X؛ الرابط يظهر في سرد الدورة
+    done = next((r for r in relevant if r.get("success")), None)
+    if done is not None:
+        out = done.get("output") if isinstance(done.get("output"), dict) else {}
+        # نُفّذ فعلاً على X؛ الرابط من X نفسه (لا يُبنى ولا يُخمَّن)
+        return {"ok": True, "url": str(out.get("tweet_url") or out.get("url") or ""),
+                "kind": str(done.get("capability") or ""), "detail": ""}
 
     if relevant:
         errors = "؛ ".join(str(r.get("error") or "فشل غير موصوف")[:160]
@@ -439,7 +455,7 @@ def _report_outcome(platform, eid: str, report: Dict[str, Any],
             eid, f"❌ حاولت تنفيذ ({label}) على X لكنه لم ينجح: {errors}",
             "aeos_directed_failed",
         )
-        return
+        return {"ok": False, "url": "", "kind": str(relevant[0].get("capability") or ""), "detail": errors}
 
     # لم يُقترح/يُختر الإجراء أصلاً: الملاحظة تشرح السبب (لا هدف، أو رفض الحارس)
     note = str(report.get("directed_note") or "").strip()
@@ -454,6 +470,7 @@ def _report_outcome(platform, eid: str, report: Dict[str, Any],
         eid, f"⚠️ لم يقع فعل على X من طلبك ({label}). السبب: {detail}",
         "aeos_directed_failed",
     )
+    return {"ok": False, "url": "", "kind": "", "detail": detail}
 
 
 def request_mission(cfg, mission: Dict[str, Any],

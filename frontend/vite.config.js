@@ -38,6 +38,12 @@ export default defineConfig({
         target: `http://127.0.0.1:${BACKEND_PORT}`,
         changeOrigin: true,
       },
+      // ملفات الباك إند: صور معاينة الهوية (/static/generated) ومرفقات الشات (/static/uploads) —
+      // nginx يمرّرها في الإنتاج، وبدون هذا لا تصل الصورة للمتصفح في التطوير
+      '/static': {
+        target: `http://127.0.0.1:${BACKEND_PORT}`,
+        changeOrigin: true,
+      },
     },
   },
 })

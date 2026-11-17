@@ -168,6 +168,93 @@ check("النداء بلا رسالة له تعليمات ترحيب واقتر�
 check("الموظف يُمنع من طلب رابط تغريدة بلا داعٍ", "لا تطلب رابط تغريدة" in sysmsg)
 check("أدوات الموظف هي المرسلة للموديل", {t["function"]["name"] for t in fake.seen[0]["tools"]} == names)
 
+print("7) «الوكلاء» = الفريق (رسائل المالك المسجّلة حرفياً، 2026-11-12)")
+for msg in ("خل كل الوكلاء ينشرون عن #الحوثي_يستهدف_قبله_المسلمين", "خل كل الوكلاء ينشرون عن  تقارب الحوثي مع اسرائيل",
+            "شغّل دورة عمل الآن لكل الوكلاء النشطين", "وجّه وكلائي للنشر عن الاقتصاد", "انشروا من كل الحسابات",
+            "خل الحسابات كلها تتكلم عن العيد", "make all agents post about AI"):
+    check(f"رسالة فريق: «{msg[:40]}»", O.is_fleet_message(msg, []))
+for msg in ("خل الوكيل ينشر عن الطقس", "انشر عن AI agents الجديدة", "اعرض الحسابات", "حالة الموظف"):
+    check(f"ليست رسالة فريق: «{msg}»", not O.is_fleet_message(msg, []))
+
+print("8) رد المالك على خطة حملة معروضة يعود للمنسّق ولو من محادثة موظف")
+from app.aeos.services import campaigns as CP  # noqa: E402
+from app.aeos.services import media_brief as MB  # noqa: E402
+
+MB.build = lambda topic, user_id=None, llm=None, query="": {
+    "ok": True, "topic": topic, "headline": "عنوان الرسالة", "summary": "خلاصة", "angles": ["زاوية 1", "زاوية 2"],
+    "facts": [], "latest": [], "numbers": [], "statements": [], "do_not_claim": [],
+    "sources": [{"n": 1, "title": "مصدر", "url": "https://news.example/a", "site": "news.example", "date": ""}]}
+O.clear_pending_plan(1)
+check("بلا خطة معروضة: «نعم» لا تُخطف من الموظف", not O.routes_to_coordinator("نعم قم بالنشر", [], 1, "emp_alpha"))
+T = O._Tools(1, "خل الفريق ينشر عن العيد", session_id="emp_alpha")
+plan = T.plan_campaign({"topic": "العيد"})
+check("الخطة بلا dispatch تُسجَّل «تنتظر الموافقة»", O.pending_plan(1) and O.pending_plan(1)["topic"] == "العيد"
+      and "dispatched" not in plan)
+for msg in ("نعم قم بالنشر", "نعم", "وجّههم", "بس @beta", "لا الغ الحملة", "ok"):
+    check(f"«{msg}» من محادثة موظف ⇒ المنسّق", O.routes_to_coordinator(msg, [], 1, "emp_alpha"))
+check("رسالة عادية للموظف لا تُخطف ولو وُجدت خطة", not O.routes_to_coordinator("كيف كان تفاعلك اليوم؟", [], 1, "emp_alpha"))
+for msg in ("انشر عن الطقس", "قم بالرد حول الخبر", "اي موظف نشر اليوم؟"):
+    check(f"أمر/سؤال جديد للموظف لا يُعدّ موافقة: «{msg}»", not O.routes_to_coordinator(msg, [], 1, "emp_alpha"))
+for msg in ("نعم انشروا عن الموضوع", "اي نفّذ", "انشروا"):
+    check(f"موافقة صريحة: «{msg}»", O.routes_to_coordinator(msg, [], 1, "emp_alpha"))
+check("مستخدم آخر لا تمسّه خطة غيره", not O.routes_to_coordinator("نعم", [], 2, "emp_gamma"))
+fake = FakeClient(["جاهز"])
+O.handle("نعم", 1, client_factory=lambda: (fake, "m"), session_id="emp_alpha")
+sysmsg = fake.seen[0]["messages"][0]["content"]
+check("موجّه المنسّق يرى الخطة المنتظرة بموضوعها الحرفي", "خطة تنتظر موافقتك" in sysmsg and "«العيد»" in sysmsg)
+check("موجّه المنسّق فيه التاريخ والوقت", "بتوقيت الرياض" in sysmsg)
+
+print("9) التوجيه بعد الموافقة ← حملة متابَعة ← خلاصة واحدة للمحادثة التي أمر منها")
+delivered = []
+CP._deliver = lambda camp, text: delivered.append((camp.get("session_id"), text))
+dispatched.clear()
+out = T.plan_campaign({"topic": "العيد", "dispatch": True})
+cid = out.get("campaign_id", "")
+check("الموافقة تمسح الخطة المنتظرة", O.pending_plan(1) is None)
+check("كل موظف يتلقى معرّف الحملة في أمره", cid and all(d[1].get("campaign_id") == cid for d in dispatched)
+      and [d[0] for d in dispatched] == ["alpha", "beta"], dispatched)
+CP.record(cid, "alpha", True, url="https://x.com/alpha/status/1", kind="publish_thread")
+check("لا خلاصة قبل اكتمال الجميع", delivered == [])
+CP.record(cid, "beta", False, detail="الموظف paused — فعّله ثم أعد الطلب")
+check("خلاصة واحدة عند الاكتمال، في المحادثة التي أمر منها", len(delivered) == 1 and delivered[0][0] == "emp_alpha")
+text = delivered[0][1] if delivered else ""
+check("الخلاصة: مَن نشر + نوعه + الرابط، ومَن فشل + السبب",
+      "نُفّذ 1 من 2" in text and "ثريد https://x.com/alpha/status/1" in text and "❌ @beta: الموظف paused" in text, text)
+CP.record(cid, "beta", True, url="https://x.com/beta/status/2")
+check("نتيجة متأخرة بعد الإغلاق لا ترسل خلاصة ثانية", len(delivered) == 1)
+cid2 = CP.start(1, "session_1", "حملة بطيئة", ["alpha", "beta"], timeout=0.05)
+CP.record(cid2, "alpha", True, url="https://x.com/alpha/status/3", kind="publish_content")
+import time as _t  # noqa: E402
+
+_t.sleep(0.3)
+check("بعد المهلة: خلاصة جزئية تذكر مَن لم يصل خبره",
+      len(delivered) == 2 and "⏳ @beta" in delivered[1][1] and "منشور https://x.com/alpha/status/3" in delivered[1][1],
+      delivered[-1:])
+CP.record("camp_unknown", "alpha", True)
+check("معرّف حملة مجهول لا يكسر شيئاً", len(delivered) == 2)
+
+print("10) النتيجة تحمل رابط X نفسه")
+from app.aeos.services import employee_mission as EM  # noqa: E402
+
+notes = []
+plat = SimpleNamespace(notify_owner=lambda eid, text, intent="": notes.append(text))
+ok = EM._report_outcome(plat, "e1", {"results": [{"capability": "publish_thread", "success": True,
+                                                   "output": {"tweet_url": "https://x.com/alpha/status/9"}}]},
+                        ["publish_thread", "publish_content"], "نشر")
+check("نجاح ⇒ ok + الرابط + النوع، بلا إشعار فشل",
+      ok == {"ok": True, "url": "https://x.com/alpha/status/9", "kind": "publish_thread", "detail": ""} and notes == [])
+bad = EM._report_outcome(plat, "e1", {"results": [{"capability": "publish_content", "success": False,
+                                                    "error": "انتهت المهلة"}]}, ["publish_content"], "نشر")
+check("فشل ⇒ ok=False + السبب + إشعار المالك", bad["ok"] is False and "انتهت المهلة" in bad["detail"] and notes)
+from app.aeos.runtime.manager import _action_line  # noqa: E402
+
+line = _action_line({"capability": "publish_content", "success": True,
+                     "output": {"text": "منشور", "tweet_url": "https://x.com/alpha/status/9"}})
+check("سطر الدورة للنشر فيه الرابط", "🔗 https://x.com/alpha/status/9" in line, line)
+check("الثريد والاقتباس لهما وصف عربي (لا اسم القدرة الخام)",
+      "نشر ثريداً" in _action_line({"capability": "publish_thread", "success": True, "output": {}})
+      and "اقتبس تغريدة" in _action_line({"capability": "quote_post", "success": True, "output": {}}))
+
 print()
 if FAILED:
     print(f"❌ {len(FAILED)} فحص فشل: {FAILED}")

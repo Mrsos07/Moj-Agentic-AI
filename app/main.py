@@ -246,6 +246,13 @@ app.add_middleware(
 
 static_path = Path(__file__).parent.parent / "static"
 static_path.mkdir(exist_ok=True)
+# صور معاينة الهوية: سيرفر الهويات (5990، داخلي) يحفظها ويعيد مسارها /static/generated/<uuid>.<ext>،
+# فيخدمها هذا الخادم بالمسار ذاته ليحمّلها المتصفح من أصل الصفحة. رابط 5990 لا يصله متصفح المالك في
+# الإنتاج (قيس 2026-11-17: المعاينة بلا صورة ولا هيدر). قبل /static: أول Mount مطابق يفوز.
+from app.aeos.services import identity_store as _identity_store  # noqa: E402
+_identity_previews = _identity_store.generated_dir()
+_identity_previews.mkdir(parents=True, exist_ok=True)
+app.mount("/static/generated", StaticFiles(directory=str(_identity_previews)), name="identity_previews")
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 uploads_path = static_path / "uploads"
@@ -1301,10 +1308,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 # معاينة + تأكيد + تحقق ملكية، بدل وكيل X القديم الذي ينفّذ فوراً.
                 # ويشمل ردّ المالك على معاينة معلّقة («نعم أكّد»): لو ذهب لمسار الموظف المثبّت
                 # أو الوكلاء القدامى لما وصل التأكيد للمنسّق الذي طلبه.
-                x_mgmt = (len(team_mentions) != 1 and not str(session_id or "").startswith("emp_")
-                          and (orchestrator.is_x_management(user_message)
-                               or orchestrator.has_pending_x(_norm_uid(user_id))))
-                if orchestrator.is_fleet_message(user_message, team_mentions) or x_mgmt:
+                # وكذلك رد المالك على خطة حملة عرضها المنسّق («نعم قم بالنشر») ولو من محادثة موظف.
+                if orchestrator.routes_to_coordinator(user_message, team_mentions,
+                                                      _norm_uid(user_id), session_id):
                     coord = await _run_coordinator(user_message, user_id, pinned_account,
                                                    db, session_id)
                     if coord:

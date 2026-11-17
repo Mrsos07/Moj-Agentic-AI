@@ -99,14 +99,17 @@ def persona_identity_params(persona) -> Dict[str, Any]:
     }
 
 
-def _absolutize(url: str) -> str:
-    """صور المولّد تعود كمسارات نسبية /static/generated/… — يحوّلها لرابط كامل
-    يستطيع سيرفر app/x تنزيله (download_to_temp يتطلب URL صالحاً)."""
+def _preview_path(url: str) -> str:
+    """صور المولّد تبقى مسارات نسبية ``/static/generated/<uuid>.<ext>``: يخدمها الخادم الخلفي نفسه
+    (main.py)، فيحمّلها المتصفح من أصل الصفحة (nginx في الإنتاج وvite في التطوير يمرّران /static).
+    كانت تُحوَّل إلى http://127.0.0.1:5990/… — عنوان سيرفر الهويات داخل الخادم، يطلبه متصفح المالك
+    في الإنتاج من جهازه هو، فظهرت المعاينة بلا صورة ولا هيدر (2026-11-17). التطبيق على X لا يحتاج
+    رابطاً: يرفع البايتات المثبّتة (identity_store)."""
     from app.services import identity_bridge
 
-    if url and url.startswith("/"):
-        return identity_bridge.IDENTITY_BASE_URL + url
-    return url
+    url = (url or "").strip()
+    base = identity_bridge.IDENTITY_BASE_URL
+    return url[len(base):] if url.startswith(base + "/") else url
 
 
 # ─────────────────────────── public API ───────────────────────────
@@ -114,7 +117,7 @@ def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None,
                      with_images: bool = True) -> Dict[str, Any]:
     """يولّد هوية كاملة من البرسونا (بلا تطبيق) — للمعاينة في الواجهة.
 
-    Returns ``{name, username, bio, avatar_url, banner_url}`` (روابط مطلقة).
+    Returns ``{name, username, bio, avatar_url, banner_url}`` (الصور مسارات نسبية، انظر _preview_path).
     Raises ``RuntimeError`` with a user-facing Arabic message on failure.
     """
     from app.services import identity_bridge
@@ -138,8 +141,8 @@ def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None,
         "name": (data.get("name") or "").strip(),
         "username": (data.get("username") or "").strip(),
         "bio": (data.get("bio") or "").strip(),
-        "avatar_url": _absolutize((data.get("profilePictureUrl") or "").strip()),
-        "banner_url": _absolutize((data.get("headerImageUrl") or "").strip()),
+        "avatar_url": _preview_path(data.get("profilePictureUrl")),
+        "banner_url": _preview_path(data.get("headerImageUrl")),
     }
 
     # الهوية من التعليمات والبرسونا فقط: ما كتبه المستخدم في البرسونا
@@ -201,7 +204,7 @@ def generate_field(cfg, field: str, prompt: str = "") -> Dict[str, str]:
         if not img_res.get("success"):
             raise RuntimeError(f"فشل توليد الصورة: "
                                f"{img_res.get('error') or img_res.get('message', 'خطأ غير معروف')}")
-        url = _absolutize((img_res.get("data", {}).get("imageUrl") or "").strip())
+        url = _preview_path(img_res.get("data", {}).get("imageUrl"))
         if not url:
             raise RuntimeError("المولّد لم يُرجع رابط صورة.")
         return {("avatar_url" if field == "avatar" else "banner_url"): url}

@@ -1428,3 +1428,23 @@ independent structural causes — none of them fixable by telling the model to
 - npm: axios 1.13.2→1.21.0 (20 days old, not the 7-day-old 1.21.1), follow-redirects 1.16.3, form-data 4.0.6, @remix-run/router 1.23.4. 2 moderate react-router advisories remain (need a react-router 7 major).
 - `/api/x/health` and `/api/aeos/health` are public. They used to expose the server cookies path, the X account count, the employee/MCP server list and DB pool state. Anonymous callers now get the status only; full details need admin/developer (`app.auth.dependencies.get_current_user` = optional).
 - OPEN, owner decision: `app/x/loginx/uploads/accounts.csv` is tracked in git since 2026-05-19 with 5 rows of username/password/email in plaintext. The repo is private (anonymous API 404), but anyone with repo access or a clone has them.
+
+## Coordinator review 2026-11-16 (measured on the real chat history)
+- Routing: ONE decision, `orchestrator.routes_to_coordinator(message, mentions, user_id, session_id)`, used by `main.py`.
+  - `_FLEET_RE` now knows «الوكلاء/وكلائي/كل|جميع الوكيل/كل|جميع الحسابات/الحسابات كلها/all agents». Measured: «خل كل الوكلاء ينشرون عن #…» was sent 9 times and got the old X_Agent reply «⚠️ يرجى تقديم محتوى التغريدة»; «شغّل دورة لكل الوكلاء النشطين» got «لم أتعرّف على الموظف».
+  - Pending plan: `plan_campaign` without dispatch calls `note_pending_plan`. For 30 min, the owner's reply (`is_plan_reply`: yes/no/«وجّههم»/«بس @x»/«الغ» at the start) goes to the coordinator EVEN from an employee chat. Measured: «نعم قم بالنشر» typed in @nxjrjrjdj's chat reached that employee, which published alone; @emaad never got the task.
+  - Not a plan reply: «انشر عن X» (new topic, no explicit yes) and «اي/أي …» longer than 3 words («أي موظف نشر اليوم؟»).
+  - The prompt shows «⏳ خطة تنتظر موافقتك … الموضوع «…» حرفياً» plus running campaigns (`_state_block`), so approval works even with no chat history (verified live).
+- Results: `services/campaigns.py`. On dispatch, `plan_campaign` opens a campaign (`campaign_id` in each payload).
+  - Every exit path of `dispatch_directed` calls `campaigns.record` with the X link (`_report_outcome` now RETURNS `{ok,url,kind,detail}`) or the failure reason.
+  - When all employees have reported, ONE summary goes to the conversation the owner ordered from (`_Tools.session_id`). It lists who posted + type + link, who failed + why. After 40 min, a partial summary is sent instead («⏳ لم يصل خبره»).
+  - State is in memory; a restart is covered by the checkpoint «مقطوعة» notices.
+- Cycle report lines (`manager._action_line`) now carry `🔗 <tweet_url>` for post/thread/quote (it used to show the text only), plus Arabic verbs for publish_thread/quote_post.
+- The coordinator prompt is reorganized into sections:
+  - execution/honesty: a failed tool is never «تم»; say why and propose the next step;
+  - team direction: plan replies and run_cycle for all;
+  - discussion: one precise question when the request is unclear; a data-backed opinion when asked;
+  - results: a table for more than one employee, links from tool results only;
+  - other tools.
+  It also states the Riyadh date and time (UTC+3, no DST).
+- Verified live with the real model on the real team (dispatch stubbed, nothing on X): turn 1 «خل كل الوكلاء ينشرون عن اليوم الوطني» → `plan_campaign(dispatch=false)` + table; turn 2 «نعم قم بالنشر» from an employee chat with no history → `plan_campaign(same topic, dispatch=true)`, both employees dispatched under one campaign_id. Tests: sections 7–10 of `verify_coordinator.py`.
