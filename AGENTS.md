@@ -66,7 +66,11 @@
   backend volumes via `--volumes-from`, and copies `.env`. `scripts/restore.sh <dir>` asks for confirmation
   and replaces everything. Both were verified live: a user created after the backup is gone after the
   restore, and login still works.
-- Identity (5990) is skipped without `GEMINI_API_KEY`, by design.
+- Identity (5990) runs on OpenRouter since 2026-11-16 (it was Gemini direct with `GEMINI_API_KEY`, and was skipped without it).
+  - `identity_bridge` passes `resolve_llm()` to the child as `IDENTITY_LLM_API_KEY/BASE_URL/TEXT_MODEL`. The child runs from `app/identity`, so it can't find the root `.env` on its own.
+  - Text uses the system chat model. Images (create AND edit, input image as data URL) use `IDENTITY_IMAGE_MODEL`, default `openai/gpt-5.4-image-2`. That is the newest GPT Image on OpenRouter (`/models`, 2026-04-21), called on `/chat/completions` with `modalities: [image, text]` + `image_config.aspect_ratio`.
+  - Edit keeps the input's aspect ratio: measured, a 16:9 header came back 1024² without it.
+  - Verified live through the bridge with NO Gemini key: profile text 3 s, profile 1024², header 1280×720, edit 1280×720.
 - Node.js (Debian `nodejs` 20.19, in Dockerfile.backend) is REQUIRED: the Nawah clone + brief MCP servers are stdio `node <bundled .mjs>` (no npm install needed, the bundles are self-contained). Production said «Node.js غير مثبّت» until 2026-11-16. Verified in the image: both servers list their tools as the non-root `moj` user. With any key it boots (verified, HTTP 200).
 - Gotchas found by the 2026-11-09 smoke run:
   - The old healthcheck hit `/api/health`, which doesn't exist; it is `/health`.

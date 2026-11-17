@@ -122,7 +122,7 @@ def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None,
     entities = entities or {}
     if not identity_bridge.start_identity_server():
         raise RuntimeError("تعذّر تشغيل سيرفر توليد الهويات — "
-                           "تأكد أن GEMINI_API_KEY موجود في ملف .env الرئيسي.")
+                           "تأكد أن OPENROUTER_API_KEY موجود في ملف .env الرئيسي.")
 
     params = persona_identity_params(cfg.persona)
     for src, dst in _ENTITY_TO_PARAM:
@@ -177,7 +177,7 @@ def generate_field(cfg, field: str, prompt: str = "") -> Dict[str, str]:
         raise RuntimeError(f"حقل غير معروف: {field}")
     if not identity_bridge.start_identity_server():
         raise RuntimeError("تعذّر تشغيل سيرفر توليد الهويات — "
-                           "تأكد أن GEMINI_API_KEY موجود في ملف .env الرئيسي.")
+                           "تأكد أن OPENROUTER_API_KEY موجود في ملف .env الرئيسي.")
 
     params = persona_identity_params(cfg.persona)
     prompt = (prompt or "").strip()

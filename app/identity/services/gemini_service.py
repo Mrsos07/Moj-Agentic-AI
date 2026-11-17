@@ -1,6 +1,11 @@
-import google.generativeai as genai
-from google import genai as genai_new
-from google.genai import types as genai_types
+"""نماذج خدمة الهوية عبر OpenRouter (كانت Gemini مباشرة بمفتاح GEMINI_API_KEY).
+
+النص: نموذج دردشة النظام. الصور (إنشاء وتعديل): ``Config.IMAGE_MODEL`` — GPT Image عبر
+``/chat/completions`` بـ ``modalities: ["image", "text"]`` (يقبل صورة مدخلة للتعديل). المفتاح والعنوان
+والنماذج يمرّرها الأب (identity_bridge) من ``resolve_llm()`` — المصدر الوحيد في المشروع.
+اسم الملف أُبقي لأن app.py و__init__ يستوردانه.
+"""
+import requests
 import json
 import base64
 import re
@@ -12,8 +17,30 @@ from config import Config
 GENERATED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'static', 'generated')
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
-genai.configure(api_key=Config.API_KEY)
-genai_client = genai_new.Client(api_key=Config.API_KEY)
+
+def _chat(content, model: str, image: bool = False, aspect_ratio: str = "", timeout: int = 180) -> dict:
+    """نداء واحد لـ OpenRouter ``/chat/completions`` — يعيد الرسالة. يرفع ValueError برسالة مفهومة."""
+    if not Config.API_KEY:
+        raise ValueError("لا مفتاح نموذج للنظام (OPENROUTER_API_KEY) — خدمة الهوية بلا نموذج")
+    body = {"model": model, "messages": [{"role": "user", "content": content}]}
+    if image:
+        body["modalities"] = ["image", "text"]
+        if aspect_ratio:
+            body["image_config"] = {"aspect_ratio": aspect_ratio}
+    r = requests.post(f"{Config.BASE_URL.rstrip('/')}/chat/completions", json=body, timeout=timeout,
+                      headers={"Authorization": f"Bearer {Config.API_KEY}", "Content-Type": "application/json",
+                               "HTTP-Referer": "https://moj.local", "X-Title": "Moj Identity"})
+    if r.status_code != 200:
+        # رسالة المزوّد بلا المفتاح (لا يظهر فيها أصلاً، لكن لا نطبع الترويسات أبداً)
+        raise ValueError(f"OpenRouter {r.status_code}: {r.text[:300]}")
+    choices = (r.json() or {}).get("choices") or []
+    if not choices:
+        raise ValueError("OpenRouter أعاد رداً بلا نتيجة")
+    return choices[0].get("message") or {}
+
+
+def _text(prompt: str) -> str:
+    return str(_chat(prompt, Config.TEXT_MODEL).get("content") or "").strip()
 
 MAX_INPUT_LENGTH = 500
 PROMPT_INJECTION_PATTERNS = [
@@ -89,10 +116,7 @@ def generate_profile_text(params: dict) -> dict:
     Return ONLY the JSON object, no additional text.
     """
     
-    model = genai.GenerativeModel(Config.TEXT_MODEL)
-    response = model.generate_content(prompt)
-    
-    text = response.text.strip()
+    text = _text(prompt)
     # Clean up potential markdown code blocks
     if text.startswith('```'):
         text = re.sub(r'^```(?:json)?\n?', '', text)
@@ -127,10 +151,7 @@ def regenerate_bio(params: dict) -> str:
     CRITICAL: If the Bio Style is 'عامية' (colloquial), the generated bio MUST be in the authentic, natural-sounding colloquial dialect of the specified '{nationality}'.
     """
     
-    model = genai.GenerativeModel(Config.TEXT_MODEL)
-    response = model.generate_content(prompt)
-    
-    return response.text.strip()
+    return _text(prompt)
 
 
 def construct_image_prompts(params: dict) -> dict:
@@ -218,58 +239,39 @@ def _save_image_bytes(image_bytes: bytes, ext: str = "png") -> str:
     return filename
 
 
-def _extract_image_from_response(response) -> str:
-    """يستخرج أول صورة من رد Gemini ويحفظها؛ يعيد '' إن لم توجد.
-
-    قد يعيد Gemini مرشحاً بـ content=None (حجب أمان أو رد فارغ عابر) —
-    الوصول المباشر لـ .content.parts كان ينهار بـ
-    "'NoneType' object has no attribute 'parts'"."""
-    for cand in (getattr(response, 'candidates', None) or []):
-        content = getattr(cand, 'content', None)
-        parts = getattr(content, 'parts', None) if content is not None else None
-        for part in (parts or []):
-            if getattr(part, 'inline_data', None) is not None:
-                raw_data = part.inline_data.data
-                mime_type = part.inline_data.mime_type or "image/png"
-                ext = mime_type.split('/')[-1] if '/' in mime_type else 'png'
-                if isinstance(raw_data, str):
-                    raw_data = base64.b64decode(raw_data)
-                filename = _save_image_bytes(raw_data, ext)
-                return f"/static/generated/{filename}"
+def _image_from_message(message: dict) -> str:
+    """أول صورة في رد OpenRouter (``message.images[].image_url.url``: data URL أو رابط) ← تُحفظ محلياً."""
+    for img in message.get("images") or []:
+        url = str(((img or {}).get("image_url") or {}).get("url") or "")
+        if url.startswith("data:image/"):
+            header, data = url.split(",", 1)
+            ext = header.split("/")[1].split(";")[0] or "png"
+            return f"/static/generated/{_save_image_bytes(base64.b64decode(data), 'jpg' if ext == 'jpeg' else ext)}"
+        if url.startswith("https://"):
+            r = requests.get(url, timeout=60)
+            ctype = r.headers.get("Content-Type") or ""
+            if r.status_code == 200 and ctype.startswith("image/"):
+                return f"/static/generated/{_save_image_bytes(r.content, ctype.split('/')[1].split(';')[0] or 'png')}"
     return ""
 
 
 def generate_image(prompt: str, aspect_ratio: str = "1:1") -> str:
-    """Generate an image using Gemini 2.5 Flash Image - Returns URL path on server"""
+    """إنشاء صورة بـ GPT Image (OpenRouter) — يعيد مسارها على الخادم."""
+    shape = {"1:1": "square (1:1)", "16:9": "wide landscape banner (16:9)"}.get(aspect_ratio, aspect_ratio)
     last_error = None
     for attempt in range(3):
         if attempt:
             time.sleep(2 * attempt)  # الردود الفارغة غالباً عابرة — أعد المحاولة
         try:
-            response = genai_client.models.generate_content(
-                model='gemini-2.5-flash-image',
-                contents=[prompt],
-                config=genai_types.GenerateContentConfig(
-                    response_modalities=['Image'],
-                    image_config=genai_types.ImageConfig(
-                        aspect_ratio=aspect_ratio,
-                    )
-                )
-            )
+            url_path = _image_from_message(_chat(f"{prompt}\n\nImage format: {shape}.", Config.IMAGE_MODEL,
+                                                 image=True, aspect_ratio=aspect_ratio))
         except Exception as e:
             last_error = e
             continue
-
-        url_path = _extract_image_from_response(response)
         if url_path:
             return url_path
-
-        reasons = [str(getattr(c, 'finish_reason', '?'))
-                   for c in (getattr(response, 'candidates', None) or [])]
-        last_error = ValueError(
-            f"No image was returned from Gemini (finish_reason={reasons or 'no candidates'}).")
-
-    raise last_error if last_error else ValueError("No image was returned from Gemini.")
+        last_error = ValueError("No image was returned from the image model.")
+    raise last_error if last_error else ValueError("No image was returned from the image model.")
 
 
 def generate_profile_image(prompt: str) -> str:
@@ -283,38 +285,29 @@ def generate_header_image(prompt: str) -> str:
 
 
 def edit_image(base64_image_data: str, edit_prompt: str) -> str:
-    """Edit an existing image using Gemini - Returns URL path on server"""
-    # Extract base64 data
+    """تعديل صورة موجودة بـ GPT Image (الصورة مدخلة + التعليمات) — يعيد مسار الناتج على الخادم."""
     if ',' in base64_image_data:
         header, data = base64_image_data.split(',', 1)
         mime_type = header.split(':')[1].split(';')[0] if ':' in header else 'image/jpeg'
     else:
-        data = base64_image_data
-        mime_type = 'image/jpeg'
-    
-    model = genai.GenerativeModel(Config.IMAGE_EDIT_MODEL)
-    
-    response = model.generate_content([
-        {
-            "inline_data": {
-                "mime_type": mime_type,
-                "data": data
-            }
-        },
-        edit_prompt
-    ])
-    
-    if response.candidates and response.candidates[0].content.parts:
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'inline_data') and part.inline_data:
-                raw_data = part.inline_data.data
-                result_mime = part.inline_data.mime_type or "image/jpeg"
-                ext = result_mime.split('/')[-1] if '/' in result_mime else 'jpeg'
-                if isinstance(raw_data, str):
-                    raw_data = base64.b64decode(raw_data)
-                elif not isinstance(raw_data, bytes):
-                    raw_data = base64.b64decode(str(raw_data))
-                filename = _save_image_bytes(raw_data, ext)
-                return f"/static/generated/{filename}"
-    
-    raise ValueError("No image was returned from the edit API.")
+        data, mime_type = base64_image_data, 'image/jpeg'
+    # أبقِ نسبة الأبعاد: قيس حيّاً أن تعديل غلاف 16:9 عاد مربعاً 1024×1024 بلا هذا
+    aspect = "1:1"
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(base64.b64decode(data))) as im:
+            aspect = "16:9" if im.width / max(1, im.height) > 1.4 else "1:1"
+    except Exception:
+        pass
+    shape = "wide landscape banner (16:9)" if aspect == "16:9" else "square (1:1)"
+    message = _chat([{"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{data}"}},
+                     {"type": "text", "text": f"Edit this image: {edit_prompt}\nKeep the same composition and the "
+                                              f"same aspect ratio: {shape}. Return the edited image."}],
+                    Config.IMAGE_MODEL, image=True, aspect_ratio=aspect)
+    url_path = _image_from_message(message)
+    if not url_path:
+        raise ValueError("No image was returned from the edit API.")
+    return url_path

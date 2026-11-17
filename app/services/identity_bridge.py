@@ -27,31 +27,6 @@ _log_fh = None  # منع تجمّد العملية الابنة على أنبو�
 IDENTITY_LOG = IDENTITY_DIR / "identity_server.log"
 
 
-def _resolve_gemini_key() -> Optional[str]:
-    """يجلب مفتاح Gemini من كل المصادر الممكنة بالترتيب.
-
-    1) متغيرات البيئة (GEMINI_API_KEY أو API_KEY).
-    2) settings (pydantic يقرأ .env الرئيسي لكنه لا يصدّر للبيئة).
-    3) قراءة .env الرئيسي مباشرة كحل أخير.
-    """
-    key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
-    if key:
-        return key
-    try:
-        from app.core.config import settings
-        if getattr(settings, "GEMINI_API_KEY", None):
-            return settings.GEMINI_API_KEY
-    except Exception:
-        pass
-    try:
-        from dotenv import dotenv_values
-        root_env = Path(__file__).resolve().parent.parent.parent / ".env"
-        values = dotenv_values(root_env)
-        return values.get("GEMINI_API_KEY") or values.get("API_KEY")
-    except Exception:
-        return None
-
-
 def _is_running() -> bool:
     """تحقق إن سيرفر identity شغّال"""
     try:
@@ -123,17 +98,22 @@ def start_identity_server() -> bool:
     env["FLASK_RUN_PORT"] = str(IDENTITY_PORT)
     env["PORT"] = str(IDENTITY_PORT)
 
-    # تمرير مفتاح Gemini من .env الرئيسي إلى خدمة Identity.
-    # المفتاح موجود في .env لكنه لا يصل إلى os.environ تلقائياً: إعدادات
-    # pydantic تقرأ .env داخل كائن settings فقط ولا تصدّره للبيئة، لذلك
-    # os.getenv وحده يفشل ويقلع السيرفر بلا مفتاح فينهار عند الاستيراد.
-    gemini_key = _resolve_gemini_key()
-    if gemini_key:
-        env["API_KEY"] = gemini_key
-        env["GEMINI_API_KEY"] = gemini_key
-    else:
-        print("[Identity-Bridge] ❌ GEMINI_API_KEY غير موجود في .env — لن أشغّل السيرفر")
+    # نماذج خدمة الهوية عبر OpenRouter (كانت Gemini بمفتاح GEMINI_API_KEY): المزوّد من resolve_llm()
+    # — المصدر الوحيد — ويُمرَّر للطفل صراحةً، لأن pydantic يقرأ .env داخل settings فقط ولا يصدّره
+    # للبيئة، والطفل يعمل من مجلد app/identity فلا يجد .env الرئيسي بنفسه.
+    from app.core.llm_provider import resolve_llm
+
+    ep = resolve_llm()
+    if not ep.available or not ep.is_openrouter:
+        print("[Identity-Bridge] ❌ لا مفتاح OpenRouter للنظام (OPENROUTER_API_KEY) — لن أشغّل السيرفر")
         return False
+    env["IDENTITY_LLM_API_KEY"] = ep.api_key
+    env["IDENTITY_LLM_BASE_URL"] = ep.base_url or "https://openrouter.ai/api/v1"
+    env["IDENTITY_TEXT_MODEL"] = ep.model
+    if os.getenv("IDENTITY_IMAGE_MODEL"):
+        env["IDENTITY_IMAGE_MODEL"] = os.environ["IDENTITY_IMAGE_MODEL"]
+    for stale in ("API_KEY", "GEMINI_API_KEY"):
+        env.pop(stale, None)
 
     try:
         # وجّه المخرجات إلى ملف سجل بدل PIPE غير مقروء يتجمّد عند امتلائه.

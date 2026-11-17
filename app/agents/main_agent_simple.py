@@ -532,7 +532,7 @@ class MainAgent:
         try:
             if not identity_bridge.start_identity_server():
                 return ("⚠️ فشل تشغيل سيرفر توليد الهويات. "
-                        "تأكد أن GEMINI_API_KEY موجود في ملف .env الرئيسي.")
+                        "تأكد أن OPENROUTER_API_KEY موجود في ملف .env الرئيسي.")
         except Exception as e:
             return f"⚠️ فشل تشغيل سيرفر توليد الهويات: {e}"
 
