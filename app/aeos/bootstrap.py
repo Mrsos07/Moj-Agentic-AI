@@ -150,12 +150,27 @@ class AEOSPlatform:
         c.register_singleton(IRuntimeManager, runtime)
 
         # --- scheduler + workers ---
-        queue: IJobQueue = InMemoryJobQueue()
-        c.register_singleton(IJobQueue, queue)
+        # AEOS_RUNTIME=durable: الطابور الدائم (execution_jobs) بعقود وسياج وسجل أفعال؛ الافتراضي legacy
+        from .runtime.config import WorkerConfig, runtime_mode
 
-        self._scheduler = WakeScheduler(repo, queue, event_bus=bus,
-                                        poll_interval=self._poll_interval)
-        self._workers = WorkerPool(queue, runtime, num_workers=self._num_workers)
+        self._mode = runtime_mode()
+        self._rt_cfg = None
+        if self._mode == "durable":
+            from .runtime.durable_queue import DbJobQueue, DbLock
+            from .runtime.durable_workers import DurableWorkerPool
+
+            self._rt_cfg = WorkerConfig.from_env()
+            queue = DbJobQueue(self._rt_cfg)
+            self._workers = DurableWorkerPool(queue, runtime, self._rt_cfg)
+            self._scheduler = WakeScheduler(repo, queue, event_bus=bus, poll_interval=self._poll_interval,
+                                            leader_lock=DbLock("aeos_scheduler"),
+                                            owner=self._rt_cfg.worker_id, on_enqueue=self._workers.notify)
+        else:
+            queue = InMemoryJobQueue()
+            self._scheduler = WakeScheduler(repo, queue, event_bus=bus,
+                                            poll_interval=self._poll_interval)
+            self._workers = WorkerPool(queue, runtime, num_workers=self._num_workers)
+        c.register_singleton(IJobQueue, queue)
 
         self._bus = bus
         self._repo = repo
@@ -173,7 +188,61 @@ class AEOSPlatform:
 
     def stop(self) -> None:
         self._scheduler.stop()
-        self._workers.stop()
+        self._workers.stop()   # durable: drain — لا استلام جديد، ينتظر الجاري ثم يلغيه تعاونياً
+
+    @property
+    def runtime_mode(self) -> str:
+        return self._mode
+
+    def _execute(self, employee_id: str, event: Event, priority: int = 1) -> Dict[str, Any]:
+        """شغّل دورة وانتظر تقريرها. legacy: مباشرة. durable: عبر الطابور (مهمة واحدة نشطة لكل موظف،
+        عقد وسياج وسجل أفعال) ثم انتظار النتيجة — المستدعون يرون التقرير نفسه."""
+        if getattr(self, "_mode", "legacy") != "durable":
+            return self._runtime.run_cycle(employee_id, event)
+        from .core.exceptions import EmployeeNotFoundError
+        from .runtime.durable_queue import CURRENT_JOB, QueueFull, TaskLimitExceeded
+
+        cfg = self._repo.get(employee_id)
+        if cfg is None:
+            raise EmployeeNotFoundError(f"employee '{employee_id}' not found")
+        try:
+            job_id, _ = self._queue.submit(employee_id, event, priority=priority,
+                                           idempotency_key=f"evt:{event.event_id}",
+                                           tenant_id=getattr(cfg, "user_id", None))
+        except (QueueFull, TaskLimitExceeded) as exc:
+            return {"skipped": True, "reason": str(exc)}
+        self._workers.notify()
+        if CURRENT_JOB.get() is not None:
+            # داخل مهمة أخرى (Agent-to-Agent): لا يحجز العامل منتظراً — منع الجمود
+            return {"skipped": True, "reason": "dispatched_async", "job_id": job_id}
+        return self.job_report(self._queue.wait_for(job_id, self._rt_cfg.queue_wait_seconds))
+
+    @staticmethod
+    def job_report(view: Dict[str, Any]) -> Dict[str, Any]:
+        """حالة المهمة النهائية ⇒ تقرير بالشكل الذي يتوقعه المستدعون القدامى."""
+        result = dict(view.get("result") or {}) if isinstance(view.get("result"), dict) else {}
+        status = view.get("status")
+        result["job"] = {k: view.get(k) for k in ("job_id", "status", "attempts", "dead_letter")}
+        if status == "COMPLETED":
+            return result
+        if status == "CANCELLED":
+            return {**result, "skipped": True, "reason": f"cancelled: {view.get('error') or ''}".strip()}
+        if status in ("FAILED", "TIMED_OUT"):
+            return {**result, "error": result.get("error") or view.get("error") or status}
+        return {**result, "skipped": True, "reason": "queue_timeout"}
+
+    def cancel_employee(self, employee_id: str, reason: str = "أوقفه المالك") -> Dict[str, Any]:
+        """ألغِ مهام موظف: المنتظرة فوراً، والجارية تعاونياً عند نقطة الفحص التالية."""
+        if self._mode != "durable":
+            return {"supported": False}
+        out = self._queue.request_cancel(employee_id=employee_id, reason=reason)
+        return {"supported": True, **out}
+
+    def runtime_stats(self) -> Dict[str, Any]:
+        if self._mode != "durable":
+            return {"mode": "legacy", "queue_size": self._queue.size()}
+        return {"mode": "durable", "worker_id": self._rt_cfg.worker_id, "breaker": self._workers.breaker.state,
+                "inflight": self._workers.inflight(), **self._workers.metrics.snapshot(self._queue.stats())}
 
     # ---- façade for the API layer --------------------------------------
     def trigger_event(self, event_type: str, employee_id: str,
@@ -191,7 +260,7 @@ class AEOSPlatform:
         ``source``: ربط نقاط الاستعادة (``order:<id>`` / ``resume:<id>``) — انظر RuntimeManager."""
         event = Event(EventType(event_type), employee_id=employee_id,
                       payload=payload or {}, source=source)
-        return self._runtime.run_cycle(employee_id, event)
+        return self._execute(employee_id, event)
 
     def resume_cycle(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """أعد تشغيل دورة انقطعت (بطلب المالك): الحدث نفسه (أمر الشات بنصّه إن كان أمراً)،
@@ -222,12 +291,14 @@ class AEOSPlatform:
         event = Event(etype, employee_id=employee_id, payload=dict(req.get("payload") or {}),
                       source=RuntimeManager.resume_source(task["id"]))
         try:
-            report = self._runtime.run_cycle(employee_id, event)
+            # صريحاً عبر الصنف: المستدعون (والاختبارات) قد يمرّرون كائناً بسمات المنصة فقط
+            report = AEOSPlatform._execute(self, employee_id, event)
         except Exception as exc:  # noqa: BLE001
             logger.exception("resume cycle failed for %s", employee_id)
             report = {"skipped": True, "reason": str(exc)[:200]}
         if report.get("skipped"):
-            reason = {"cycle_already_running": "الموظف في منتصف دورة أخرى الآن"}.get(
+            reason = {"cycle_already_running": "الموظف في منتصف دورة أخرى الآن",
+                      "queue_timeout": "بقي في الطابور أطول من المهلة"}.get(
                 report.get("reason"), report.get("reason") or "")
             view = TC.reopen(task["id"], f"تعذّر الاستئناف: {reason}")
             RuntimeManager._push_task(self._repo.get(employee_id), view)
@@ -452,6 +523,8 @@ class AEOSPlatform:
             cfg.status = EmployeeStatus.PAUSED
             cfg.scheduler.enabled = False
             cfg.scheduler.next_wake_at = None
+            if not newly_created:
+                self.cancel_employee(cfg.id, "أوقفه المالك")
 
         saved = self._repo.save(cfg)
         if hasattr(self._repo, "set_next_wake") and saved.scheduler.next_wake_at:
@@ -525,6 +598,7 @@ class AEOSPlatform:
             self._repo.save(cfg)
         except Exception:  # noqa: BLE001
             pass
+        self.cancel_employee(employee_id, "حُذف الموظف")
         # نظّف حقائقه من الرسم المعرفي (إن كان مفعّلاً) — أفضل جهد
         try:
             self._graph_memory.clear(employee_id)
@@ -559,6 +633,7 @@ class AEOSPlatform:
         skills: SkillRegistry = self.container.resolve(SkillRegistry)
         return {
             "queue_size": self._queue.size(),
+            "runtime": self.runtime_stats(),
             "active_employees": len(self._repo.list_active()),
             "mcp_servers": mcp.list_servers(),
             "capabilities": caps.list_capabilities(),

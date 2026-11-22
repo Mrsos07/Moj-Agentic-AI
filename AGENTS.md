@@ -150,6 +150,50 @@
   separate worktree (`C:\Users\pc\moj-p0`), because the owner's `run.py` (RELOAD=1) runs from this folder and would
   have hot-reloaded half-done code and adopted the real `data/app.db`.
 
+## Durable AEOS runtime (`AEOS_RUNTIME=durable`, P0 part 3, 2026-11-23, off by default)
+- `legacy` (the default) is the old path, unchanged: in-memory queue, `run_cycle` directly. `durable` makes the DB table
+  `execution_jobs` the queue AND the state (owner decision: no Redis Streams, so state and queue can never disagree).
+- States (`runtime/states.py`): `CREATED → QUEUED → LEASED → RUNNING ⇄ WAITING → COMPLETED | FAILED | CANCELLED | TIMED_OUT`.
+  - Every transition is one UPDATE conditioned on the allowed source state AND the `lease_token`.
+- Claiming is a CAS UPDATE (QUEUED→LEASED).
+  - A partial unique index `ux_execution_jobs_one_active` allows one LEASED/RUNNING/WAITING job per employee, even across processes.
+  - Fairness: priority first, then the owner with fewer active jobs. `AEOS_TENANT_MAX_ACTIVE` is the per-owner quota.
+- Fencing: every claim increments `lease_token`.
+  - Heartbeat, start, finish and `ActionJournal.begin` are all fenced.
+  - A worker that lost its lease gets `StaleLease`, writes nothing, and its budget is cancelled (the cycle stops at the next checkpoint).
+- Expired leases (`reclaim_expired`, every `AEOS_RECLAIM_EVERY_SECONDS`):
+  - Not started, or a scheduler cycle with NO external effect: back to the queue.
+  - Anything with an effect: FAILED and the checkpoint reopened as «interrupted». The owner's decision stands: resume is manual.
+  - `AEOS_AUTO_RETRY_INTERRUPTED=1` relaxes this only for manual jobs with no effect.
+- Retry is exponential with jitter, then `dead_letter` (DLQ). A failure after an effect is never retried.
+- Action journal (`aeos_action_journal`): INTENT is written BEFORE every X action and the result AFTER it.
+  - An exception inside the capability means UNKNOWN. An INTENT whose worker died becomes UNKNOWN.
+  - UNKNOWN is fail-closed (owner decision): never repeated automatically, skipped on resume, and the owner is told to verify.
+- Budget per cycle (`runtime/budget.py`, a ContextVar read by `RoutedLLMProvider`, so content-server calls count too):
+  - Limits: deadline, LLM calls, estimated tokens, cost, tool calls. There is also an LLM concurrency bulkhead.
+  - Budget exhausted or deadline near (< min(90 s, 15%)): `emotion`/`critique`/`graph_memory` are skipped with a reason.
+  - guard/decide/execute/save are never skipped for budget.
+- PersonaGuard: with `AEOS_GUARD_FAIL_CLOSED=1` (the durable default), an LLM error or empty verdict means every guarded action
+  is rejected with the reason. Legacy stays fail-open exactly as before.
+- Phases: the only content-free skip is `guard` with no decisions.
+  - Every report now carries `phase_skips` (reason), `phase_outputs` (scratch keys each phase wrote) and `runtime`.
+    All three are persisted in `execution_logs.outcome`.
+  - Measured on 219 real cycles: execute 57% and observe 36% of the time; 10 phases take <50 ms. Skipping phases saves
+    almost nothing, so the work went into stopping wasted cycles instead.
+- Agent-to-agent: a job submitted while another runs in the same thread (`CURRENT_JOB`) becomes its child.
+  - Limits: `AEOS_MAX_TASK_DEPTH`, `AEOS_MAX_FANOUT` and `AEOS_MAX_TREE`.
+  - A loop (the same employee+event in the parent chain) is refused.
+  - `run_cycle_now` inside a job doesn't block the worker (no deadlock).
+- Backpressure over `AEOS_QUEUE_MAX_DEPTH`: scheduler jobs are dropped (the next tick re-creates them) and others get `QueueFull`.
+- Circuit breaker: `AEOS_BREAKER_FAILURES` consecutive failures stop claiming for the cooldown, then one probe.
+- `stop()` drains: no new claims, waits up to `AEOS_DRAIN_SECONDS`, then cancels cooperatively. The job is requeued if it had no
+  effect; its checkpoint becomes «interrupted».
+- In durable mode `run_cycle_now` / `resume_cycle` go through the queue and wait (`AEOS_QUEUE_WAIT_SECONDS`).
+  - The scheduler submits with key `sched:<id>:<next_wake_at>` and runs only while holding `DbLock("aeos_scheduler")`.
+  - Pause/delete cancels the employee's jobs. API: `POST /api/aeos/employees/{id}/cancel` and `GET /api/aeos/runtime` (admin metrics).
+- Tests: `verify_runtime.py` (68 checks, both dialects): concurrency, fencing, kill before each of the 18 phases, kill
+  inside an X action, drain, A2A, breaker, and the sync path. Schema: `0005_durable_runtime`.
+
 ## Pixabay + stock_media
 - `system/mcps/pixabay`: in-process Python port of Unlock-MCP/pixabay-mcp-server (MIT, see
   `UPSTREAM.md`). Same 4 tools. Results are cached 24 h (Pixabay terms). It needs `PIXABAY_API_KEY`,

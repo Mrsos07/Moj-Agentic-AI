@@ -217,7 +217,7 @@ class SqlEmployeeRepository(IEmployeeRepository):
         بيانات لمالك لم يعد يملك الموظف، ولا واجهة تصل إليها لحذفها.
         """
         from app.db.models import (
-            AgentMemory, EmployeeMemoryRecord, ExecutionJobRecord, ExecutionLogRecord,
+            ActionJournalRecord, AgentMemory, EmployeeMemoryRecord, ExecutionJobRecord, ExecutionLogRecord,
             TaskCheckpoint,
         )
 
@@ -226,7 +226,8 @@ class SqlEmployeeRepository(IEmployeeRepository):
             row = db.query(AIEmployee).filter(AIEmployee.id == employee_id).first()
             if not row:
                 return False
-            for model in (ExecutionLogRecord, EmployeeMemoryRecord, ExecutionJobRecord, TaskCheckpoint):
+            for model in (ExecutionLogRecord, EmployeeMemoryRecord, ExecutionJobRecord, TaskCheckpoint,
+                          ActionJournalRecord):
                 db.query(model).filter(model.employee_id == employee_id).delete(
                     synchronize_session=False)
             db.query(AgentMemory).filter(AgentMemory.scope == f"employee:{employee_id}").delete(

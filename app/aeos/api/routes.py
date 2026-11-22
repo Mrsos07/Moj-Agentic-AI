@@ -377,6 +377,22 @@ def trigger(employee_id: str, body: TriggerIn,
     return {"ok": True, "mode": "async", "event_id": event_id}
 
 
+@router.post("/employees/{employee_id}/cancel")
+def cancel_jobs(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """ألغِ دورات الموظف (AEOS_RUNTIME=durable): المنتظرة فوراً، والجارية عند نقطة الفحص التالية —
+    بين المراحل وقبل كل فعل على X؛ ما نُفّذ يُحفظ ولا يُكرَّر."""
+    _employee_or_404(employee_id, current_user)
+    return {"ok": True, **get_platform().cancel_employee(employee_id, "ألغاه المالك")}
+
+
+@router.get("/runtime")
+def runtime_metrics(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """قياسات العمال والطابور: الإنتاجية، تأخر الطابور، p50/p95، نسبة الفشل، DLQ، الأفعال المجهولة."""
+    if not is_admin(current_user):
+        raise HTTPException(403, "admin only")
+    return get_platform().runtime_stats()
+
+
 # ─────────── هوية X من البرسونا (اسم/بايو/صورة/هيدر) ───────────
 @router.post("/employees/{employee_id}/identity/preview")
 def identity_preview(employee_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:

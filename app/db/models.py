@@ -1,4 +1,5 @@
-from sqlalchemy import JSON, Column, Integer, String, DateTime, ForeignKey, Index, Text, Boolean
+from sqlalchemy import JSON, Column, Integer, String, DateTime, ForeignKey, Index, Text, Boolean, UniqueConstraint, text
+from sqlalchemy import false as sa_false
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -292,23 +293,54 @@ class EmployeeMemoryRecord(Base):
         return f"<EmployeeMemory(employee={self.employee_id}, layer={self.layer})>"
 
 
+_ACTIVE_JOB = "status IN ('LEASED', 'RUNNING', 'WAITING')"
+
+
 class ExecutionJobRecord(Base):
-    """A wake job produced by the scheduler and consumed by a shared worker."""
+    """مهمة دورة في الطابور الدائم (AEOS_RUNTIME=durable) — الحالات في app/aeos/runtime/states.py.
+
+    الطابور = هذا الجدول: الإدخال والحالة والعقد ورمز السياج في صف واحد، فلا يختلف الطابور عن الحالة.
+    """
     __tablename__ = "execution_jobs"
-    __table_args__ = (Index("ix_execution_jobs_status_priority_created", "status", "priority", "created_at"),)
+    __table_args__ = (
+        Index("ix_execution_jobs_status_priority_created", "status", "priority", "created_at"),
+        Index("ix_execution_jobs_claim", "status", "available_at", "priority"),
+        # موظف واحد = دورة نشطة واحدة، تفرضها القاعدة نفسها لا قفل داخل العملية
+        Index("ux_execution_jobs_one_active", "employee_id", unique=True,
+              postgresql_where=text(_ACTIVE_JOB), sqlite_where=text(_ACTIVE_JOB)),
+        UniqueConstraint("idempotency_key", name="uq_execution_jobs_idempotency_key"),
+    )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     job_id = Column(String(64), unique=True, index=True, nullable=False)
     employee_id = Column(String(64), ForeignKey("ai_employees.id"), nullable=False, index=True)
     event_type = Column(String(50), nullable=False)
     event_payload = Column(Text, nullable=True)             # JSON
-    status = Column(String(50), default="QUEUED", index=True)  # QUEUED|RUNNING|DONE|FAILED
+    status = Column(String(50), default="QUEUED", index=True)  # JobState
     priority = Column(Integer, default=3)
     attempts = Column(Integer, default=0)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
+    tenant_id = Column(Integer, nullable=True, index=True)  # مالك الموظف (حصص وعدالة)
+    event_source = Column(FreeText(500), nullable=True)
+    idempotency_key = Column(String(200), nullable=True)
+    lease_owner = Column(String(120), nullable=True)
+    lease_token = Column(Integer, nullable=False, default=0, server_default="0")  # رمز السياج
+    lease_expires_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    available_at = Column(DateTime, nullable=True)
+    deadline_at = Column(DateTime, nullable=True)
+    max_attempts = Column(Integer, nullable=False, default=3, server_default="3")
+    cancel_requested = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    dead_letter = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    had_effects = Column(Boolean, nullable=False, default=False, server_default=sa_false())
+    parent_job_id = Column(String(64), nullable=True, index=True)
+    root_job_id = Column(String(64), nullable=True, index=True)
+    depth = Column(Integer, nullable=False, default=0, server_default="0")
+    result_json = Column(Text, nullable=True)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
         return f"<ExecutionJob(job={self.job_id}, employee={self.employee_id}, status={self.status})>"
@@ -394,3 +426,37 @@ class SqliteImportProgress(Base):
     rows = Column(Integer, nullable=False, default=0)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
+
+
+class ActionJournalRecord(Base):
+    """سجل الأفعال الخارجية (AEOS_RUNTIME=durable): صفّ INTENT **قبل** الفعل على X، ثم نتيجته بعده.
+
+    ``idempotency_key`` فريد: الفعل نفسه في المهمة نفسها لا يُنفَّذ مرتين مهما أُعيدت. صفّ بقي INTENT
+    لمهمة مات عاملها ⇒ UNKNOWN (لا نعرف هل وقع على X) ⇒ لا يُعاد تلقائياً ويُبلَّغ المالك (الفشل مغلق).
+    """
+    __tablename__ = "aeos_action_journal"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key = Column(String(255), nullable=False, unique=True)
+    job_id = Column(String(64), nullable=True, index=True)
+    cycle_id = Column(String(64), nullable=True)
+    employee_id = Column(String(64), nullable=False, index=True)
+    capability = Column(String(64), nullable=False)
+    target = Column(FreeText(1000), nullable=True)
+    status = Column(String(20), nullable=False, index=True)   # INTENT|SUCCEEDED|FAILED|UNKNOWN
+    fence_token = Column(Integer, nullable=True)
+    request_json = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class DistributedLock(Base):
+    """قفل موزّع بعقد ورمز سياج متزايد (قيادة المجدول وأي مورد يحتاج مالكاً واحداً عبر العمليات)."""
+    __tablename__ = "aeos_locks"
+
+    name = Column(String(120), primary_key=True)
+    owner = Column(String(120), nullable=True)
+    token = Column(Integer, nullable=False, default=0, server_default="0")
+    expires_at = Column(DateTime, nullable=True)

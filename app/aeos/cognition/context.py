@@ -54,6 +54,13 @@ class ExecutionContext:
     # "phase" (اكتملت مرحلة) or "action" (فعل نجح على X — لا يتكرر عند الاستئناف).
     checkpoint_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
+    # AEOS_RUNTIME=durable فقط (None/False في الوضع القديم = السلوك السابق):
+    # ميزانية الدورة (إلغاء، مهلة، حدود النموذج والأدوات)، سجل الأفعال قبل/بعد كل أثر على X،
+    # وفشل الحارس المغلق (تعذّر تدقيق النموذج ⇒ رفض الإجراءات العامة لا تمريرها).
+    budget: Optional[Any] = None
+    journal: Optional[Any] = None
+    fail_closed: bool = False
+
     def checkpoint(self, kind: str, **data: Any) -> None:
         cb = self.checkpoint_cb
         if cb is None:

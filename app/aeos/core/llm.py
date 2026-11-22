@@ -19,6 +19,8 @@ from .interfaces import ILLMProvider
 if TYPE_CHECKING:  # pragma: no cover
     from app.core.llm_provider import LLMEndpoint
 
+from ..runtime.budget import CURRENT as CURRENT_BUDGET, llm_slot
+
 logger = logging.getLogger("aeos.llm")
 
 
@@ -147,6 +149,14 @@ class RoutedLLMProvider(ILLMProvider):
 
     def complete(self, system: str, prompt: str, *, temperature: float = 0.7,
                  max_tokens: int = 1000) -> str:
+        budget = _charge(system, prompt)
+        with llm_slot():
+            out = self._complete(system, prompt, temperature, max_tokens)
+        if budget is not None:
+            budget.add_output(len(out or ""))
+        return out
+
+    def _complete(self, system: str, prompt: str, temperature: float, max_tokens: int) -> str:
         prov = self._pick()
         out = prov.complete(system, prompt, temperature=temperature, max_tokens=max_tokens)
         if not out and prov is not self._default and self._default.available:
@@ -157,11 +167,24 @@ class RoutedLLMProvider(ILLMProvider):
 
     def complete_json(self, system: str, prompt: str, *,
                       temperature: float = 0.3) -> Dict[str, Any]:
-        prov = self._pick()
-        out = prov.complete_json(system, prompt, temperature=temperature)
-        if not out and prov is not self._default and self._default.available:
-            out = self._default.complete_json(system, prompt, temperature=temperature)
+        budget = _charge(system, prompt)
+        with llm_slot():
+            prov = self._pick()
+            out = prov.complete_json(system, prompt, temperature=temperature)
+            if not out and prov is not self._default and self._default.available:
+                out = self._default.complete_json(system, prompt, temperature=temperature)
+        if budget is not None:
+            budget.add_output(len(str(out or "")))
         return out
+
+
+def _charge(system: str, prompt: str):
+    """ميزانية الدورة الجارية في هذا الخيط (AEOS_RUNTIME=durable): نداء + رموز تقديرية، أو استثناء
+    BudgetExceeded/Cancelled يصل للمرحلة. بلا ميزانية (الوضع القديم) ⇒ لا شيء."""
+    budget = CURRENT_BUDGET.get()
+    if budget is not None:
+        budget.charge_llm(len(system or "") + len(prompt or ""))
+    return budget
 
 
 def build_llm_provider() -> ILLMProvider:

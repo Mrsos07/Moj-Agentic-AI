@@ -1029,11 +1029,24 @@ class PersonaGuardPhase(ICognitivePhase):
                 prompt=prompt, temperature=0.0, max_tokens=600,
             ) or ""
         except Exception as exc:  # noqa: BLE001 - fail-open, never block the fleet
+            if getattr(context, "fail_closed", False):
+                return self._closed(candidates, reasons, f"{type(exc).__name__}: {exc}")
             logger.warning("persona guard LLM call failed (fail-open): %s", exc)
             return set()
+        if not raw.strip() and getattr(context, "fail_closed", False):
+            # المزوّد يبتلع أخطاءه ويعيد نصاً فارغاً: بلا حكم ⇒ لا تمرير في الوضع المغلق
+            return self._closed(candidates, reasons, "لم يُعِد النموذج حكماً")
 
         return self._parse_verdicts(raw, valid=set(candidates),
                                     min_conf=min_conf, reasons=reasons)
+
+    @staticmethod
+    def _closed(candidates, reasons: dict, why: str) -> set:
+        """الفشل المغلق (AEOS_GUARD_FAIL_CLOSED): تعذّر التدقيق ⇒ كل إجراء عام مرشّح مرفوض بسببه."""
+        logger.warning("persona guard audit unavailable (fail-closed): %s", why)
+        for i in candidates:
+            reasons[i] = f"تعذّر تدقيق الحارس ({why[:120]}) — الفشل مغلق: لا نشر/تفاعل بلا مراجعة"
+        return set(candidates)
 
     @staticmethod
     def _parse_verdicts(raw: str, valid: set, min_conf: float,
@@ -1079,6 +1092,46 @@ class PersonaGuardPhase(ICognitivePhase):
                     f"تدقيق LLM: {str(legacy_reasons.get(str(idx), '') or '').strip()[:200]}",
                 )
         return rejected
+
+
+def _durable_gate(context: "ExecutionContext", action, entry: Dict[str, Any], key: str) -> str:
+    """AEOS_RUNTIME=durable: حدود الأدوات، الإلغاء/المهلة/فقدان العقد، وسجل الأفعال قبل الأثر.
+    يعيد سبب عدم التنفيذ أو "" (نفّذ). بلا ميزانية ولا سجل (الوضع القديم) ⇒ "" دائماً."""
+    from ..runtime.budget import BudgetExceeded, Cancelled
+    from ..runtime.durable_queue import StaleLease
+
+    budget, journal = getattr(context, "budget", None), getattr(context, "journal", None)
+    try:
+        if budget is not None:
+            budget.charge_tool()
+        if journal is None or action.capability == "wait":
+            return ""
+        state, entry_id = journal.begin(action.capability, entry.get("target") or "",
+                                        params=action.params, resume_key=key)
+    except (Cancelled, StaleLease) as exc:
+        context.scratch["_halt_execution"] = True
+        return f"توقف التنفيذ ({exc})"
+    except BudgetExceeded as exc:
+        context.scratch["_halt_execution"] = True
+        return f"حدّ الدورة ({exc})"
+    if state == "done":
+        return "نُفّذ سابقاً في هذه المهمة — لن أكرّره"
+    if state == "unknown":
+        # الفشل مغلق: لا نعرف هل وقع على X ⇒ لا تكرار، والمالك يتحقق بنفسه
+        msg = ("بدأ هذا الفعل في محاولة سابقة ولم يتأكد هل وقع على X — لن أكرّره حتى لا يتكرر النشر؛ "
+               "تحقق من الحساب")
+        context.scratch.setdefault("unknown_actions", []).append(
+            {"capability": action.capability, "target": entry.get("target") or ""})
+        return msg
+    context.scratch["_journal_entry"] = entry_id
+    return ""
+
+
+def _journal_finish(context: "ExecutionContext", status: str, output=None, error: str = "") -> None:
+    journal = getattr(context, "journal", None)
+    entry_id = context.scratch.pop("_journal_entry", None)
+    if journal is not None and entry_id is not None:
+        journal.finish(entry_id, status, output=output, error=error)
 
 
 def resume_key(capability: str, target: str) -> str:
@@ -1189,10 +1242,24 @@ class ExecutePhase(ICognitivePhase):
                     context.emit_progress(f"لم أنفّذ {action.capability}: {reason}.",
                                           intent="aeos_cycle_action_result")
                     continue
-                result = context.capabilities.execute(
-                    CapabilityRequest(name=action.capability, params=deepcopy(action.params)),
-                    context,
-                )
+                gate = _durable_gate(context, action, entry, key)
+                if gate:
+                    results.append({**outcome, "success": False, "status": "skipped", "error": gate})
+                    context.emit_progress(f"لم أنفّذ {action.capability}: {gate}.",
+                                          intent="aeos_cycle_action_result")
+                    if context.scratch.get("_halt_execution"):
+                        break
+                    continue
+                try:
+                    result = context.capabilities.execute(
+                        CapabilityRequest(name=action.capability, params=deepcopy(action.params)),
+                        context,
+                    )
+                except Exception as exc:  # noqa: BLE001 - قد يكون الفعل وقع قبل الاستثناء
+                    _journal_finish(context, "UNKNOWN", error=f"{type(exc).__name__}: {exc}")
+                    raise
+                _journal_finish(context, "SUCCEEDED" if result.success else "FAILED",
+                                output=result.output, error=result.error or "")
                 results.append({
                     **outcome,
                     "status": "succeeded" if result.success else "failed",
@@ -1222,6 +1289,8 @@ class ExecutePhase(ICognitivePhase):
                     intent="aeos_cycle_action_result")
             finally:
                 context.scratch.pop("active_action", None)
+                context.scratch.pop("_journal_entry", None)
+        context.scratch.pop("_halt_execution", None)
         context.scratch["execution_results"] = results
         # سجّل أنواع الإجراءات المنفّذة بنجاح هذه الدورة، ليتجنّب محرّك القرار
         # تكرار نفس النوع في الدورة التالية (تنويع فعلي عبر الدورات).
@@ -1917,6 +1986,8 @@ class SavePhase(ICognitivePhase):
     """Persist runtime state back onto the (permanent) employee config."""
 
     name = "save"
+    #: تعمل حتى لو أُلغيت الدورة أو انتهت مهلتها: ما نُفّذ يُحفظ
+    always_run = True
 
     def run(self, context: "ExecutionContext") -> None:
         rs = context.config.runtime_state

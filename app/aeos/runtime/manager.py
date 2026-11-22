@@ -249,7 +249,9 @@ class RuntimeManager(IRuntimeManager):
             return self._cycle_guards.setdefault(employee_id, threading.Lock())
 
     # ---- IRuntimeManager ------------------------------------------------
-    def run_cycle(self, employee_id: str, event: Event) -> Dict[str, Any]:
+    def run_cycle(self, employee_id: str, event: Event, *, lease=None, budget=None,
+                  queue=None) -> Dict[str, Any]:
+        """``lease``/``budget``/``queue``: يمرّرها العامل الدائم (AEOS_RUNTIME=durable). بدونها = السلوك القديم."""
         guard = self._cycle_guard(employee_id)
         if not guard.acquire(blocking=False):
             logger.info("cycle already running for %s; skipping duplicate", employee_id)
@@ -268,11 +270,12 @@ class RuntimeManager(IRuntimeManager):
             return {"skipped": True, "reason": "cycle_already_running",
                     "employee_id": employee_id}
         try:
-            return self._run_cycle_locked(employee_id, event)
+            return self._run_cycle_locked(employee_id, event, lease, budget, queue)
         finally:
             guard.release()
 
-    def _run_cycle_locked(self, employee_id: str, event: Event) -> Dict[str, Any]:
+    def _run_cycle_locked(self, employee_id: str, event: Event, lease=None, budget=None,
+                          queue=None) -> Dict[str, Any]:
         cycle_id = uuid.uuid4().hex
 
         # 1) LOAD
@@ -311,11 +314,31 @@ class RuntimeManager(IRuntimeManager):
             f"⚙️ **@{_account} بدأ دورة تفكير جديدة الآن...**",
             intent="aeos_cycle_started",
         )
+        unsure = [a for a in inherited if a.get("unknown")]
+        if unsure:
+            context.emit_progress(
+                "⚠️ أفعال بدأت قبل الانقطاع ولم يتأكد هل وقعت على X — لن أكرّرها حتى لا يتكرر النشر، "
+                "تحقق منها في الحساب: " + "، ".join(
+                    f"{a['capability']}{(' ' + a['target']) if a.get('target') else ''}" for a in unsure[:5]),
+                intent="aeos_cycle_unknown_actions")
 
         # 3) RUN one cognitive cycle
         cycle: CognitiveCycle = self._cycle_factory()
         # نقطة الاستعادة قبل أي فعل مباشرةً، فإن انقطعت الدورة (إعادة تشغيل) عرف المالك ذلك
         self._begin_checkpoint(config, event, task_id, inherited)
+        if lease is not None:
+            from .durable_queue import StaleLease
+            from .journal import ActionJournal
+
+            try:
+                # LEASED → RUNNING تحت السياج، ومعرّف نقطة الاستعادة في المهمة (للاستعادة بعد موت العامل)
+                queue.start(lease, task_id)
+            except StaleLease:
+                TC.finish(task_id, TC.CANCELLED, "فُقد العقد قبل البدء — تسلّمها عامل آخر")
+                return {"skipped": True, "reason": "stale_lease", "cycle_id": cycle_id}
+            context.budget = budget
+            context.journal = ActionJournal(queue, lease, cycle_id)
+            context.fail_closed = bool(queue.cfg.guard_fail_closed)
         # كل نداءات LLM في هذه الدورة تذهب لنموذج «الموظفين» الذي اختاره مالكه (إن اختار)
         from app.core.llm_provider import LLM_OWNER
 
@@ -330,6 +353,9 @@ class RuntimeManager(IRuntimeManager):
         finally:
             LLM_OWNER.reset(owner_token)
 
+        if budget is not None:
+            report["runtime"] = self._runtime_outcome(report, budget, lease)
+
         # 4) PERSIST
         try:
             self._persist(config, report)
@@ -338,12 +364,37 @@ class RuntimeManager(IRuntimeManager):
             logger.exception("failed to persist cycle for %s", employee_id)
         # تُغلق نقطة الاستعادة بعد الحفظ لا قبله: انقطاع بينهما يعني أن العدّادات لم تُحفظ،
         # والاستئناف يعيد احتسابها من الأفعال المسجّلة
-        self._push_task(config, TC.finish(task_id, TC.FAILED if report.get("error") else TC.SUCCEEDED,
-                                          report.get("error")))
+        self._push_task(config, self._close_checkpoint(task_id, report))
 
         # 5) DESTROY runtime
         self._destroy(employee_id)
         return report
+
+    @staticmethod
+    def _runtime_outcome(report: Dict[str, Any], budget, lease) -> Dict[str, Any]:
+        stop = str(report.get("stop_reason") or "")
+        out: Dict[str, Any] = {"job_id": getattr(lease, "job_id", None), "fence": getattr(lease, "token", None),
+                               "budget": budget.snapshot(), "cancelled": None, "timed_out": False,
+                               "unknown_actions": report.get("unknown_actions") or []}
+        if budget.cancelled:
+            out["cancelled"] = budget.cancel_reason or "cancelled"
+        elif stop.startswith("deadline") or budget.exhausted == "deadline":
+            out["timed_out"] = True
+        return out
+
+    @staticmethod
+    def _close_checkpoint(task_id: str, report: Dict[str, Any]):
+        rt = report.get("runtime") or {}
+        if rt.get("cancelled"):
+            from .durable_workers import LOST_LEASE, SHUTDOWN
+
+            if rt["cancelled"] in (SHUTDOWN, LOST_LEASE):
+                # قرار المالك: ما انقطع يبقى «مقطوعاً» حتى يستأنفه هو
+                return TC.reopen(task_id, f"انقطعت الدورة ({rt['cancelled']}) — راجع ما نُفّذ ثم استأنف")
+            return TC.finish(task_id, TC.CANCELLED, f"أُلغيت: {rt['cancelled']}")
+        if rt.get("timed_out"):
+            return TC.finish(task_id, TC.FAILED, "انتهت مهلة الدورة")
+        return TC.finish(task_id, TC.FAILED if report.get("error") else TC.SUCCEEDED, report.get("error"))
 
     # ---- checkpoints (task_checkpoints) ---------------------------------
     # مصدر الحدث يحمل الربط بنقاط الاستعادة (لا الـpayload: يُطبع في موجّه التخطيط):
@@ -379,6 +430,15 @@ class RuntimeManager(IRuntimeManager):
         # حُفظت الدورة قبل الانقطاع (بين الحفظ وإغلاق المهمة) ⇒ لا احتساب مرتين
         if not (prior.get("state") or {}).get("persisted"):
             self._replay_learning(config, actions)
+        # أفعال بدأت ولم يتأكد هل وقعت على X (سجل الأفعال: INTENT/UNKNOWN) — الفشل مغلق: تُتخطّى أيضاً
+        from .journal import unresolved_for_task
+
+        known = {a.get("key") for a in actions}
+        for e in unresolved_for_task(rid):
+            if e.get("resume_key") and e["resume_key"] not in known:
+                actions.append({"key": e["resume_key"], "capability": e["capability"],
+                                "target": e.get("target") or "", "unknown": True})
+                known.add(e["resume_key"])
         return actions
 
     @staticmethod
@@ -521,6 +581,9 @@ class RuntimeManager(IRuntimeManager):
                 "tool_calls": report.get("tool_calls"),
                 "available_tools": report.get("available_tools"),
                 "phase_timings_ms": report.get("phase_timings_ms"),
+                "phase_skips": report.get("phase_skips"),
+                "phase_outputs": report.get("phase_outputs"),
+                "runtime": report.get("runtime"),
                 "error": report.get("error"),
             }
             log_row = ExecutionLogRecord(

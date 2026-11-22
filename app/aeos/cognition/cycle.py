@@ -12,12 +12,30 @@ import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from ..core.events import Event, EventType
+from ..runtime.budget import BudgetExceeded, Cancelled
 from .phases import ICognitivePhase
 
 if TYPE_CHECKING:
     from .context import ExecutionContext
 
 logger = logging.getLogger("aeos.cognition.cycle")
+
+#: مراحل تحسينية تُتخطّى عند ضغط الميزانية (حدّ مُستنفد أو مهلة قريبة) — لا يعتمد عليها التنفيذ.
+#: الحارس والقرار والتنفيذ والحفظ لا تُتخطّى للميزانية أبداً (الحارس يفشل مغلقاً إن تعذّر).
+OPTIONAL_UNDER_PRESSURE = frozenset({"emotion", "critique", "graph_memory"})
+
+
+def skip_reason(phase, context: "ExecutionContext", budget) -> str:
+    """سبب صريح لتخطّي مرحلة، أو "" لتشغيلها. الشروط تطابق ما كانت المراحل تفعله بلا أثر."""
+    name = getattr(phase, "name", "")
+    if name == "guard" and not (context.scratch.get("decisions") or []):
+        return "لا قرارات لمراجعتها"
+    if budget is not None and name in OPTIONAL_UNDER_PRESSURE:
+        if budget.exhausted:
+            return f"ميزانية الدورة مستنفدة ({budget.exhausted})"
+        if budget.under_pressure():
+            return f"المهلة المتبقية {int(budget.remaining() or 0)} ث"
+    return ""
 
 
 class CognitiveCycle:
@@ -35,8 +53,28 @@ class CognitiveCycle:
                                     payload={"cycle_id": context.cycle_id}))
 
         phase_timings: Dict[str, int] = {}
+        phase_skips: Dict[str, str] = {}
+        phase_outputs: Dict[str, List[str]] = {}
+        stop_reason = ""
         checkpoint = getattr(context, "checkpoint", None)
+        budget = getattr(context, "budget", None)
         for phase in self._phases:
+            # نقطة فحص تعاونية بين المراحل: إلغاء/فقدان عقد/مهلة ⇒ تتوقف المراحل الباقية (عدا الحفظ)
+            if budget is not None and not stop_reason:
+                try:
+                    budget.check()
+                except Cancelled as exc:
+                    stop_reason = f"cancelled: {exc}"
+                except BudgetExceeded as exc:
+                    stop_reason = f"{exc.limit}: {exc}"
+            skip = (f"توقفت الدورة ({stop_reason})" if stop_reason and not getattr(phase, "always_run", False)
+                    else skip_reason(phase, context, budget))
+            if skip:
+                phase_skips[phase.name] = skip
+                if callable(checkpoint):
+                    checkpoint("phase", name=phase.name, total=len(self._phases))
+                continue
+            before = set(context.scratch)
             p_start = time.time()
             try:
                 phase.run(context)
@@ -45,6 +83,9 @@ class CognitiveCycle:
                 context.scratch.setdefault("phase_errors", []).append(phase.name)
             finally:
                 phase_timings[phase.name] = int((time.time() - p_start) * 1000)
+                written = sorted(set(context.scratch) - before)
+                if written:
+                    phase_outputs[phase.name] = written
                 if callable(checkpoint):
                     checkpoint("phase", name=phase.name, total=len(self._phases))
                 if self._bus:
@@ -85,6 +126,11 @@ class CognitiveCycle:
             "tool_calls": context.scratch.get("tool_use") or [],
             "available_tools": sorted({f"{t['label']}.{t['tool']}" for t in context.scratch.get("available_tools") or []}),
             "phase_timings_ms": phase_timings,
+            # لماذا لم تعمل مرحلة، وما كتبته كل مرحلة في الدورة (قابلية التدقيق)
+            "phase_skips": phase_skips,
+            "unknown_actions": context.scratch.get("unknown_actions") or [],
+            "phase_outputs": phase_outputs,
+            "stop_reason": stop_reason or None,
             "duration_ms": duration_ms,
         }
 
