@@ -41,6 +41,10 @@ class CycleBudget:
     cancel_event: threading.Event = field(default_factory=threading.Event)
     cancel_reason: str = ""
     exhausted: str = ""                       # أول حدّ تُجووز
+    #: يسأل المصدر الدائم «هل طُلب الإلغاء؟» (القاعدة) — كل ثانية على الأكثر، فلا ينتظر الإلغاء النبض التالي
+    poll: Optional[Any] = None
+    poll_every: float = 1.0
+    _last_poll: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     # ── الإلغاء والمهلة ──
@@ -66,6 +70,14 @@ class CycleBudget:
 
     def check(self) -> None:
         """نقطة فحص تعاونية: بين المراحل وقبل كل أثر خارجي وكل نداء نموذج."""
+        if self.poll is not None and not self.cancelled and time.monotonic() - self._last_poll >= self.poll_every:
+            self._last_poll = time.monotonic()
+            try:
+                reason = self.poll()
+            except Exception:  # noqa: BLE001 - تعذّر السؤال: النبض يبقى المسار الاحتياطي
+                reason = None
+            if reason:
+                self.cancel(reason)
         if self.cancelled:
             raise Cancelled(self.cancel_reason or "cancelled")
         rem = self.remaining()

@@ -305,6 +305,20 @@ class DbJobQueue(IJobQueue):
             raise StaleLease(f"{lease.job_id}: فُقد العقد {lease.token}")
         return bool(cancel)
 
+    def cancel_reason(self, lease: Lease) -> Optional[str]:
+        """سبب لإيقاف الدورة الآن: إلغاء مطلوب، أو العقد لم يعد لهذا العامل. None = استمر."""
+        db = self._sf()
+        try:
+            row = db.execute(select(J.lease_token, J.status, J.cancel_requested)
+                             .where(J.job_id == lease.job_id)).first()
+        finally:
+            db.close()
+        if row is None or row.lease_token != lease.token or row.status not in {s.value for s in ACTIVE}:
+            from .durable_workers import LOST_LEASE
+
+            return LOST_LEASE
+        return "طلب الإلغاء" if row.cancel_requested else None
+
     def assert_fence(self, db, lease: Lease) -> None:
         """داخل معاملة المستدعي (سجل الأفعال): العقد ما زال لهذا العامل ونشطاً."""
         row = db.execute(select(J.lease_token, J.status, J.cancel_requested)

@@ -123,6 +123,7 @@ class DurableWorkerPool:
 
             remaining = min(remaining, max(1.0, (lease.deadline_at - datetime.utcnow()).total_seconds()))
         budget = CycleBudget.from_config(self.cfg, deadline_seconds=remaining)
+        budget.poll = lambda: self.queue.cancel_reason(lease)
         lost = threading.Event()
         stop_hb = threading.Event()
 

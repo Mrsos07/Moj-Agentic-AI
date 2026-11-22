@@ -387,6 +387,14 @@ check("المراحل الباقية متخطّاة بالسبب والحفظ ي
       "cancelled" in (rep["phase_skips"].get("execute") or "") and "save" not in rep["phase_skips"])
 check("نقطة الاستعادة «أُلغيت»", TC.get(TC.cycle_task_id(rep["cycle_id"]))["status"] == TC.CANCELLED)
 
+rt, executed = build(hooks={"think": lambda ctx: q.request_cancel(job_id=holder["jid"])})
+jid, pool, lease = one(q, rt, e, EventType.MANUAL, c=cfg(heartbeat_seconds=30, lease_seconds=120))
+holder["jid"] = jid
+t0 = time.monotonic()
+out = pool.run_lease(lease)
+check("الإلغاء لا ينتظر النبض (30 ث): يصل عند نقطة الفحص التالية بين المراحل",
+      out == "cancelled" and executed == [] and time.monotonic() - t0 < 10, (out, executed))
+
 rt, executed = build(hooks={"observe": lambda ctx: time.sleep(1.6)})
 jid, pool, lease = one(q, rt, e, c=cfg(cycle_deadline_seconds=1))
 out = pool.run_lease(lease)

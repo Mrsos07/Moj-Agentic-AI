@@ -1110,6 +1110,11 @@ def _durable_gate(context: "ExecutionContext", action, entry: Dict[str, Any], ke
                                         params=action.params, resume_key=key)
     except (Cancelled, StaleLease) as exc:
         context.scratch["_halt_execution"] = True
+        if budget is not None:
+            # السياج رأى الإلغاء/فقدان العقد قبل الأثر: الدورة كلها تتوقف وتُسجَّل كذلك
+            from ..runtime.durable_workers import LOST_LEASE
+
+            budget.cancel(LOST_LEASE if isinstance(exc, StaleLease) else "طلب الإلغاء")
         return f"توقف التنفيذ ({exc})"
     except BudgetExceeded as exc:
         context.scratch["_halt_execution"] = True
