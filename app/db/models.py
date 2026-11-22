@@ -220,7 +220,6 @@ class UserLLMSettings(Base):
 class AIEmployee(Base):
     """Permanent, isolated configuration of one autonomous AI Employee."""
     __tablename__ = "ai_employees"
-    __table_args__ = (Index("ix_ai_employees_status_next_wake", "status", "next_wake_at"),)
 
     id = Column(String(64), primary_key=True, index=True)  # employee_id (uuid)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)

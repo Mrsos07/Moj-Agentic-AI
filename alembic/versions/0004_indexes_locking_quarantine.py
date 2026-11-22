@@ -5,7 +5,9 @@ Revises: 0003_full_baseline
 Create Date: 2026-11-22 15:57:24.715263
 
 * فهارس (مستخدم/موظف/محادثة/حالة/موعد) — أبرزها ``messages(conversation_id, created_at)``: لم يكن
-  على ``messages.conversation_id`` أي فهرس، وكل فتح محادثة يقرأ رسائلها بالترتيب.
+  على ``messages.conversation_id`` أي فهرس، وكل فتح محادثة يقرأ رسائلها بالترتيب. كل فهرس هنا اختاره
+  مخطِّط PostgreSQL لاستعلامه الفعلي على حجم إنتاجي مولّد (200k رسالة، 100k صادر، 200k ذاكرة…)؛
+  ``ai_employees(status, next_wake_at)`` حُذف: جدول صغير دائماً والمخطِّط يمسحه تسلسلياً.
 * ``ai_employees.version`` (يُستخدم فقط مع ``DB_OPTIMISTIC_LOCKING=1``).
 * ``_migration_quarantine`` و``_sqlite_import_progress`` لأداة النقل (``app/db/transfer.py``).
 قابلة للعكس بالكامل، إلا أن الـdowngrade يرفض حذف جدول العزل وفيه صفوف (بيانات مستخدمين).
@@ -52,7 +54,6 @@ def upgrade() -> None:
 
     with op.batch_alter_table('ai_employees', schema=None) as batch_op:
         batch_op.add_column(sa.Column('version', sa.Integer(), server_default='0', nullable=False))
-        batch_op.create_index('ix_ai_employees_status_next_wake', ['status', 'next_wake_at'], unique=False)
 
     with op.batch_alter_table('conversations', schema=None) as batch_op:
         batch_op.create_index('ix_conversations_user_updated', ['user_id', 'updated_at'], unique=False)
@@ -125,7 +126,6 @@ def downgrade() -> None:
         batch_op.drop_index('ix_conversations_user_updated')
 
     with op.batch_alter_table('ai_employees', schema=None) as batch_op:
-        batch_op.drop_index('ix_ai_employees_status_next_wake')
         batch_op.drop_column('version')
 
     with op.batch_alter_table('agent_memories', schema=None) as batch_op:
