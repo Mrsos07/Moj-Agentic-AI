@@ -232,6 +232,8 @@ check("ترويسات الأمان داخل location / (nginx يُسقط ترو�
 check("caddy يضع ترويسات الأمان وHSTS لكل الردود",
       all(h in Path("deploy/Caddyfile").read_text(encoding="utf-8")
           for h in ("Strict-Transport-Security", "X-Frame-Options", "X-Content-Type-Options")))
+check("إعادة إنشاء backend تعيد تشغيل nginx (يحل الاسم مرة عند إقلاعه ⇒ 502 بعنوان قديم)",
+      compose["frontend"]["depends_on"]["backend"].get("restart") is True)
 pgc = yaml.safe_load(Path("docker-compose.postgres.yml").read_text(encoding="utf-8"))["services"]
 check("PostgreSQL (الملف الإضافي): بلا منافذ منشورة، صورة مثبّتة، ترتيب C.UTF-8، والخادم ينتظر migrate",
       not any(svc.get("ports") for svc in pgc.values())

@@ -82,8 +82,10 @@ services:
     restart: unless-stopped
     # الوصول العام عبر caddy؛ هذا للتشخيص من الخادم نفسه فقط
     ports: ["127.0.0.1:${FRONTEND_LOCAL_PORT:-8080}:80"]
+    # restart: nginx يحل اسم backend مرة عند إقلاعه؛ إعادة إنشاء backend وحده (متغيّر بيئة جديد، التحويل
+    # إلى PostgreSQL) تعطيه عنواناً جديداً فيبقى nginx على القديم ⇒ 502 لكل طلب (قيس 2026-11-22 في Staging).
     depends_on:
-      backend: { condition: service_healthy }
+      backend: { condition: service_healthy, restart: true }
     networks: [moj_network]
     logging: *logging
 

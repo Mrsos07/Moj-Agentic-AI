@@ -4,7 +4,7 @@ mask_sqlite.py — نسخة مموّهة من data/app.db للاختبار وSta
     python scripts/mask_sqlite.py --source data/app.db --out backups/masked/app.db [--encryption-key KEY]
 
 ما يُموَّه (حتمياً: نفس المدخل ⇒ نفس الناتج):
-* البريد ⇒ user<id>@example.test، وكل كلمات المرور ⇒ hash لـ ``masked-pass-123``.
+* البريد ⇒ user<id>@example.com (EmailStr يرفض ‎.test)، وكل كلمات المرور ⇒ hash لـ ``masked-pass-123``.
 * المعرّفات على المنصات (username/cookie_label/cookie_filename/account_username) ⇒ acct_<sha8> متّسقة
   بين الجداول.
 * النصوص (الرسائل، الذكريات، العناوين، الأخطاء) ⇒ نص بالطول نفسه وفئات الأحرف نفسها (عربي ⇒ عربي،
@@ -141,7 +141,7 @@ def main(argv=None) -> int:
 
     for r in rows("users"):
         originals.add(r["email"])
-        upd("users", "id", r["id"], email=f"user{r['id']}@example.test", password_hash=pw,
+        upd("users", "id", r["id"], email=f"user{r['id']}@example.com", password_hash=pw,
             name=t("users", r, "name"), profile_picture="/static/uploads/masked.png" if r["profile_picture"] else None)
     for r in rows("x_accounts"):
         originals.add(r["username"])
@@ -201,7 +201,7 @@ def main(argv=None) -> int:
 
     # المعرّفات الأصلية داخل نصوص أخرى (JSON، session_id مثل employee:<handle>) ⇒ البديل نفسه في كل مكان
     originals = {o for o in originals if o and len(o) >= 4}
-    subs = [(re.compile(re.escape(o), re.I), handle(o) if "@" not in o else "user@example.test")
+    subs = [(re.compile(re.escape(o), re.I), handle(o) if "@" not in o else "user@example.com")
             for o in sorted(originals, key=len, reverse=True)]
     for table in sorted(tables):
         if table.startswith(("td_", "sqlite_")):
