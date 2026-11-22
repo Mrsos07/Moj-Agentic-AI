@@ -39,6 +39,18 @@ docker run --rm --volumes-from "$BACKEND" -v "$MOUNT":/backup:ro alpine:3.20 sh 
   fi
   chown -R 1000:1000 /app/data /app/app/x/cookies /app/static/uploads /app/app/identity/static/generated'
 
+if [ -f "$SRC/postgres.dump" ]; then
+  PG=$(docker compose ps -aq postgres 2>/dev/null || true)
+  [ -n "$PG" ] || { echo "❌ النسخة فيها postgres.dump وخدمة postgres غير مفعّلة (COMPOSE_FILE … docker-compose.postgres.yml)"; exit 1; }
+  echo "▶ استعادة PostgreSQL (pg_restore --clean، معاملة واحدة)…"
+  docker compose start postgres >/dev/null
+  for _ in $(seq 1 30); do
+    docker compose exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1 && break
+    sleep 2
+  done
+  docker compose exec -T postgres sh -c     'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --single-transaction'     < "$SRC/postgres.dump"
+fi
+
 if [ -f "$SRC/neo4j.tgz" ]; then
   NEO4J=$(docker compose ps -aq neo4j)
   echo "▶ استعادة ذاكرة الرسم…"

@@ -1,85 +1,76 @@
+"""Alembic environment — كل النماذج، والرابط من DATABASE_URL (أو اتصال يمرّره app.db.migrations)."""
 from logging.config import fileConfig
 import sys
 from pathlib import Path
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import text
 
 from alembic import context
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Import database configuration and models
-from app.db.database import Base, SQLALCHEMY_DATABASE_URL
-from app.db.models import User, XAccount
+from dotenv import load_dotenv  # noqa: E402
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+# Import database configuration and ALL models (autogenerate يرى كل الجداول)
+from app.db.database import Base, build_engine, resolve_database_url  # noqa: E402
+import app.db.models  # noqa: E402,F401
+import app.trend_detector.models  # noqa: E402,F401
+
 config = context.config
 
-# Set the database URL from our configuration
-config.set_main_option('sqlalchemy.url', SQLALCHEMY_DATABASE_URL)
+# اتصال مُمرَّر برمجياً (ensure_schema/الاختبارات) ⇒ لا نلمس إعدادات السجلات في التطبيق
+_passed = config.attributes.get("connection")
+if _passed is None and config.config_file_name is not None:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-# add your model's MetaData object here
-# for 'autogenerate' support
 target_metadata = Base.metadata
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+#: ترقيتان متزامنتان (migrate + إقلاع يدوي) لا تتسابقان على المخطط
+_PG_MIGRATION_LOCK = 0x4D4F4A00  # "MOJ\0"
+
+
+def _configure(connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=connection.dialect.name == "sqlite",
+        compare_type=True,
+    )
+
+
+def _run(connection) -> None:
+    _configure(connection)
+    with context.begin_transaction():
+        if connection.dialect.name == "postgresql":
+            connection.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _PG_MIGRATION_LOCK})
+        context.run_migrations()
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=resolve_database_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        render_as_batch=resolve_database_url().startswith("sqlite"),
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
+    if _passed is not None:
+        _run(_passed)
+        return
+    engine = build_engine(resolve_database_url())
+    try:
+        with engine.begin() as connection:
+            _run(connection)
+    finally:
+        engine.dispose()
 
 
 if context.is_offline_mode():

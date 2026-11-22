@@ -16,7 +16,6 @@ from types import SimpleNamespace
 os.environ.setdefault("PYTHONUTF8", "1")
 sys.stdout.reconfigure(encoding="utf-8")
 
-from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app.db.database import Base  # noqa: E402
@@ -34,11 +33,17 @@ def check(name, cond, detail=""):
 
 
 # ── قاعدة مؤقتة ──
-tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-tmp.close()
-engine = create_engine(f"sqlite:///{tmp.name}", connect_args={"check_same_thread": False})
-Base.metadata.create_all(bind=engine)
+from app.db.testing import temp_database  # noqa: E402
+
+engine = temp_database()  # Alembic head، SQLite مؤقت أو PG إن ضُبط MOJ_TEST_DATABASE_URL
 Session = sessionmaker(bind=engine)
+# الآباء الذين تشير إليهم الفحوص (PostgreSQL يفرض الـFK؛ SQLite كان يقبل أبناءً بلا أب)
+_fx = Session()
+_fx.add(DBM.User(id=2, email="u2@example.test", password_hash="x"))
+_fx.flush()
+_fx.add(DBM.AIEmployee(id="emp1", user_id=2, platform="x", account_username="emaad"))
+_fx.commit()
+_fx.close()
 AM._session = Session
 
 # ── تضمين مزيّف: محاور مفاهيم + بصمة كلمات خفيفة (نصّان مختلفان ≠ متجه واحد) ──
@@ -230,7 +235,6 @@ db.close()
 check("الدروس القديمة منخفضة الأهمية تُحذف والعدد مسقوف", left == 0 and removed == 170, (left, removed))
 
 engine.dispose()
-os.unlink(tmp.name)
 print()
 if FAILED:
     print(f"❌ {len(FAILED)} فحص فشل: {FAILED}")

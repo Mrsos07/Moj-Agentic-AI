@@ -24,6 +24,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+
 from app.db import database as _DB
 from app.db.models import RealtimeOutbox, TaskCheckpoint
 
@@ -56,6 +59,8 @@ PHASE_LABELS = {
 
 _inserts = 0
 _prune_lock = threading.Lock()
+#: مفتاح القفل الاستشاري لصندوق كل مستخدم في PostgreSQL ("MOJ\1")
+_OUTBOX_LOCK = 0x4D4F4A01
 
 
 def _session():
@@ -129,7 +134,15 @@ def begin(task_id: str, kind: str, user_id: Any, *, title: str = "",
                              session_id=session_id, title=(title or "")[:500], status=RUNNING,
                              request=_dumps(request or {}), state=_dumps(state or {}))
         db.add(row)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # إعادة إرسال متزامنة بالمعرّف نفسه (تبويبان/عودة اتصال): سبقنا إليها طلب آخر ⇒ لا تُنفَّذ مرتين
+            db.rollback()
+            existing = db.get(TaskCheckpoint, task_id)
+            if existing is not None and existing.user_id == uid:
+                return _view(existing), False
+            raise
         return _view(row), True
     finally:
         db.close()
@@ -138,7 +151,8 @@ def begin(task_id: str, kind: str, user_id: Any, *, title: str = "",
 def _update(task_id: str, fn) -> Optional[Dict[str, Any]]:
     db = _session()
     try:
-        row = db.get(TaskCheckpoint, task_id)
+        # قراءة-تعديل-كتابة على JSON الحالة: قفل الصف (PostgreSQL) فلا يمحو تحديثان متزامنان أحدهما الآخر
+        row = db.get(TaskCheckpoint, task_id, with_for_update=True)
         if row is None:
             return None
         fn(row)
@@ -319,6 +333,10 @@ def outbox_record(user_id: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         return payload
     db = _session()
     try:
+        if db.get_bind().dialect.name == "postgresql":
+            # المتسلسل يوزّع الأرقام قبل الارتكاب: بلا قفل قد يُرتكب 15 قبل 14، فيطلب المتصفح ما بعد 15
+            # ويضيع 14. القفل لكل مستخدم حتى الارتكاب يجعل ترتيب الأرقام = ترتيب الظهور (SQLite يسلسل أصلاً).
+            db.execute(text("SELECT pg_advisory_xact_lock(:k, :u)"), {"k": _OUTBOX_LOCK, "u": uid})
         row = RealtimeOutbox(user_id=uid, payload=_dumps(payload))
         db.add(row)
         db.commit()

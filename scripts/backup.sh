@@ -6,8 +6,9 @@
 #   ./scripts/backup.sh /mnt/backups        ← مجلد آخر
 #   ./scripts/backup.sh /mnt/backups --with-neo4j   ← + ذاكرة الرسم (يوقف neo4j ثوانٍ)
 #
-# ما يُحفظ: قاعدة البيانات (نسخة متّسقة أثناء التشغيل)، ذاكرة الموظفين والأسرار الداخلية
-# (data/)، كوكيز X، الصور المرفوعة وصور الهويات. الاستعادة: scripts/restore.sh
+# ما يُحفظ: قاعدة البيانات (نسخة متّسقة أثناء التشغيل: SQLite online backup، و/أو pg_dump إن كانت
+# خدمة postgres تعمل — docker-compose.postgres.yml)، ذاكرة الموظفين والأسرار الداخلية (data/)، كوكيز X،
+# الصور المرفوعة وصور الهويات. الاستعادة: scripts/restore.sh
 # ⚠️ النسخة تحوي كوكيز جلسات X وأسراراً: احفظها في مكان محمي.
 # ════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -29,12 +30,22 @@ MOUNT="$OUT"
 if command -v cygpath >/dev/null 2>&1; then export MSYS_NO_PATHCONV=1; MOUNT=$(cygpath -m "$OUT"); fi
 umask 077
 
-echo "▶ نسخة متّسقة من قاعدة البيانات (SQLite online backup)…"
+echo "▶ نسخة متّسقة من قاعدة SQLite (online backup) إن وُجدت…"
 docker compose exec -T backend python -c "
-import sqlite3
-src = sqlite3.connect('data/app.db'); dst = sqlite3.connect('data/app.db.backup')
+import os, sqlite3
+if not os.path.exists('data/app.db'):
+    print('  لا data/app.db (القاعدة على PostgreSQL)'); raise SystemExit(0)
+src = sqlite3.connect('file:data/app.db?mode=ro', uri=True); dst = sqlite3.connect('data/app.db.backup')
 src.backup(dst); dst.close(); src.close()
 print('  ok')"
+
+PG=$(docker compose ps -q postgres 2>/dev/null || true)
+if [ -n "$PG" ]; then
+  echo "▶ نسخة PostgreSQL (pg_dump -Fc، متّسقة أثناء التشغيل)…"
+  docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$OUT/postgres.dump"
+  [ -s "$OUT/postgres.dump" ] || { echo "❌ pg_dump أنتج ملفاً فارغاً"; exit 1; }
+  echo "  ok ($(du -h "$OUT/postgres.dump" | cut -f1))"
+fi
 
 echo "▶ أرشفة أحجام الخادم الخلفي…"
 docker run --rm --volumes-from "$BACKEND" -v "$MOUNT":/backup alpine:3.20 \

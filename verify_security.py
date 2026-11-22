@@ -145,19 +145,15 @@ fe = Path("frontend/src/components/ChatInterface.jsx").read_text(encoding="utf-8
 check("الواجهة لا تضع التوكن في رابط السوكت", "ws/chat?token" not in fe and "type: 'auth'" in fe)
 
 print("7) الإنتاج: التسجيل، أول مشرف، عنوان العميل خلف البروكسي، المنافذ")
-from sqlalchemy import create_engine  # noqa: E402
-
 import app.db.database as DB  # noqa: E402
 import app.auth.token_guard as TG  # noqa: E402
+from app.db.testing import use_temp_database  # noqa: E402
 
 _tmpdb = Path(tempfile.mkdtemp()) / "sec.db"
-DB.engine = create_engine(f"sqlite:///{_tmpdb}", connect_args={"check_same_thread": False})
-DB.SessionLocal.configure(bind=DB.engine)
+use_temp_database(_tmpdb.parent)  # Alembic head، SQLite مؤقت أو PG إن ضُبط MOJ_TEST_DATABASE_URL
 TG._PATH = _tmpdb.parent / "auth_revocations.json"
 TG._state = None
 from app.db import models as _M  # noqa: E402
-
-DB.Base.metadata.create_all(bind=DB.engine)
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from app.auth.routes import router as _auth_router  # noqa: E402
@@ -236,6 +232,12 @@ check("ترويسات الأمان داخل location / (nginx يُسقط ترو�
 check("caddy يضع ترويسات الأمان وHSTS لكل الردود",
       all(h in Path("deploy/Caddyfile").read_text(encoding="utf-8")
           for h in ("Strict-Transport-Security", "X-Frame-Options", "X-Content-Type-Options")))
+pgc = yaml.safe_load(Path("docker-compose.postgres.yml").read_text(encoding="utf-8"))["services"]
+check("PostgreSQL (الملف الإضافي): بلا منافذ منشورة، صورة مثبّتة، ترتيب C.UTF-8، والخادم ينتظر migrate",
+      not any(svc.get("ports") for svc in pgc.values())
+      and pgc["postgres"]["image"].startswith("postgres:18.") and "C.UTF-8" in pgc["postgres"]["environment"]["POSTGRES_INITDB_ARGS"]
+      and pgc["backend"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+      and "DATABASE_URL" not in str(compose["backend"].get("environment")))
 envx = Path(".env.docker.example").read_text(encoding="utf-8")
 check("قالب الإنتاج: التسجيل مغلق وDEBUG معطّل", "ALLOW_REGISTRATION=false" in envx and "DEBUG=False" in envx)
 check("سكربتات الخادم بنهايات LF (CRLF يكسر bash)",

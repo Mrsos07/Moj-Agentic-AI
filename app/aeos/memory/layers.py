@@ -92,7 +92,8 @@ class _SqlMemoryLayer(IMemoryLayer):
                 .filter(EmployeeMemoryRecord.layer == self.layer_type.value)
             )
             if query:
-                q = q.filter(EmployeeMemoryRecord.content.like(f"%{query}%"))
+                # ilike: LIKE في SQLite غير حساس لحالة الأحرف وفي PostgreSQL حساس — نُبقي سلوك SQLite
+                q = q.filter(EmployeeMemoryRecord.content.ilike(f"%{query}%"))
             rows = q.order_by(EmployeeMemoryRecord.created_at.desc()).limit(limit).all()
             return [self._row_to_record(r) for r in rows]
         finally:

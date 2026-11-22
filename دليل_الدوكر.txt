@@ -244,6 +244,51 @@
 
    النقل لخادم جديد: نفّذ الخطوات ٣–٦ على الخادم الجديد بنفس .env المحفوظ في النسخة
    (env.backup)، ثم انسخ مجلد النسخة إليه ونفّذ restore.sh.
+   مع PostgreSQL تضم النسخة postgres.dump (pg_dump -Fc) ويستعيده restore.sh بـ pg_restore --clean.
+
+
+■ ١١ب. التحويل إلى PostgreSQL (اختياري — الافتراضي SQLite ولا يتغيّر شيء بدون هذه الخطوات)
+══════════════════════════════════════════════════════════════════════════════════════
+
+   نافذة صيانة قصيرة (دقائق للبيانات الحالية). الأصل data/app.db لا يُعدَّل أبداً.
+
+   ١) نسخة احتياطية:            ./scripts/backup.sh
+   ٢) في .env أزل # من السطرين (كلمة مرور حروف وأرقام فقط: openssl rand -hex 24):
+         COMPOSE_FILE=docker-compose.yml:docker-compose.postgres.yml
+         POSTGRES_PASSWORD=...
+   ٣) أوقف الخادم الخلفي (لا كتابة بعد اللقطة) وأنشئ القاعدة ومخططها:
+         docker compose stop backend
+         docker compose up -d postgres
+         docker compose run --rm migrate
+   ٤) تجربة بلا كتابة (الأعداد، الأيتام التي ستُعزل، ترتيب النصوص):
+         docker compose run --rm --no-deps backend sh -c \
+           'python scripts/sqlite_to_pg.py --out-dir data/backups --target "$DATABASE_URL" --dry-run'
+   ٥) النقل الفعلي (يتحقق تلقائياً: العدد والبصمة لكل جدول، وأن الأصل لم يتغيّر):
+         docker compose run --rm --no-deps backend sh -c \
+           'python scripts/sqlite_to_pg.py --out-dir data/backups --target "$DATABASE_URL"'
+      انقطع؟ أعد الأمر نفسه مع --resume --snapshot data/backups/premigration-<ts>/app.db
+      رمز خروج غير 0 ⇒ لا تكمل؛ التقرير في data/backups/premigration-<ts>/transfer-report.json
+   ٦) شغّل وتحقق:
+         docker compose up -d
+         docker compose logs backend | grep "Database schema"      ← (postgresql)
+      ثم سجّل الدخول وافتح محادثة وموظفاً.
+
+   ما يحدث للبيانات:
+   • صفوف تشير لأب محذوف (SQLite لا يفرض المفاتيح الأجنبية) لا تُحذف: تُنسخ كاملة إلى الجدول
+     _migration_quarantine مع السبب، وتعود لجداولها في النقل العكسي.
+   • المعرّفات وأرقام التسلسل محفوظة (التوكنات المفتوحة تبقى صالحة، والمتصفح لا يفقد رسائل).
+
+   التراجع:
+   • قبل أي استخدام على PostgreSQL: احذف سطر COMPOSE_FILE ثم
+         docker compose up -d --remove-orphans          ← يعود على data/app.db الأصلي
+   • بعد كتابات على PostgreSQL (تُنقل للخلف إلى ملف SQLite جديد، والقديم يبقى):
+         docker compose stop backend
+         docker compose run --rm --no-deps backend sh -c \
+           'python scripts/sqlite_to_pg.py --reverse --target "$DATABASE_URL" --out data/app.db.from_pg'
+         docker compose run --rm --no-deps backend sh -c \
+           'mv data/app.db data/app.db.before_pg && mv data/app.db.from_pg data/app.db'
+      ثم احذف سطر COMPOSE_FILE و: docker compose up -d --remove-orphans
+   • حجم pg_data يبقى بعد التراجع (لا يُحذف تلقائياً).
 
 
 ■ ١٢. حل المشاكل الشائعة

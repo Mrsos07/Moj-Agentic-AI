@@ -1,7 +1,9 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import JSON, Column, Integer, String, DateTime, ForeignKey, Index, Text, Boolean
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.database import Base
+from app.db.types import FreeText
 import json
 
 
@@ -11,8 +13,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    name = Column(String(255), nullable=True)
-    profile_picture = Column(String(500), nullable=True)
+    name = Column(FreeText(255), nullable=True)
+    profile_picture = Column(FreeText(500), nullable=True)
     is_admin = Column(Boolean, default=False, nullable=False)
     #: user | admin | developer (app.auth.roles) — is_admin يبقى متزامناً للتوافق
     role = Column(String(20), default="user", nullable=False)
@@ -47,13 +49,14 @@ class XAccount(Base):
 class SocialAccount(Base):
     """حسابات وسائل التواصل الاجتماعي - دعم منصات متعددة"""
     __tablename__ = "social_accounts"
+    __table_args__ = (Index("ix_social_accounts_user_platform", "user_id", "platform"),)
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     platform = Column(String(50), nullable=False, index=True)  # x, instagram, facebook, linkedin, tiktok
     username = Column(String(255), nullable=False, index=True)
-    display_name = Column(String(255), nullable=True)
-    account_label = Column(String(255), nullable=True)  # اسم مخصص للحساب
+    display_name = Column(FreeText(255), nullable=True)
+    account_label = Column(FreeText(255), nullable=True)  # اسم مخصص للحساب
     cookie_filename = Column(String(255), nullable=True)  # اسم ملف الكوكيز
     status = Column(String(50), default="active")  # active, inactive, expired, error
     # تصنيف الحساب: social, political, sports, tech, religious,
@@ -73,11 +76,12 @@ class SocialAccount(Base):
 class Conversation(Base):
     """محادثة مع المستخدم"""
     __tablename__ = "conversations"
+    __table_args__ = (Index("ix_conversations_user_updated", "user_id", "updated_at"),)
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     session_id = Column(String(255), nullable=True, index=True)
-    title = Column(String(500), nullable=True)
+    title = Column(FreeText(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -91,14 +95,15 @@ class Conversation(Base):
 class Message(Base):
     """رسالة في المحادثة"""
     __tablename__ = "messages"
+    __table_args__ = (Index("ix_messages_conversation_created", "conversation_id", "created_at"),)
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
     role = Column(String(50), nullable=False)  # user, assistant, system
     content = Column(Text, nullable=False)
-    intent = Column(String(100), nullable=True)
-    confidence = Column(String(10), nullable=True)
-    agent = Column(String(100), nullable=True)
+    intent = Column(FreeText(100), nullable=True)
+    confidence = Column(FreeText(10), nullable=True)
+    agent = Column(FreeText(100), nullable=True)
     extra_data = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -112,21 +117,22 @@ class Message(Base):
 class ScheduleEvent(Base):
     """حدث مجدول للنشر على وسائل التواصل الاجتماعي"""
     __tablename__ = "schedule_events"
+    __table_args__ = (Index("ix_schedule_events_status_run_at", "status", "run_at"),)
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     schedule_event_id = Column(String(64), unique=True, index=True, nullable=False)
     platform = Column(String(50), nullable=False)
     username = Column(String(255), nullable=False)
-    category = Column(String(100), nullable=False)
+    category = Column(FreeText(100), nullable=False)
     content = Column(Text, nullable=False)
     run_at = Column(DateTime, nullable=False)
-    intent_time = Column(String(50), nullable=False)
-    mood = Column(String(50), nullable=False)
+    intent_time = Column(FreeText(50), nullable=False)
+    mood = Column(FreeText(50), nullable=False)
     status = Column(String(50), default="SCHEDULED", nullable=False)
     # حقول الإشعار والنتيجة بعد النشر التلقائي
     conversation_id = Column(Integer, nullable=True, index=True)
     user_id = Column(Integer, nullable=True, index=True)
-    tweet_url = Column(String(500), nullable=True)
+    tweet_url = Column(FreeText(500), nullable=True)
     error_message = Column(Text, nullable=True)
     published_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -160,9 +166,9 @@ class TelegramIntegration(Base):
     encrypted_bot_token = Column(Text, nullable=False)
     chat_id = Column(String(255), nullable=False)
     bot_username = Column(String(255), nullable=True)
-    bot_display_name = Column(String(255), nullable=True)
+    bot_display_name = Column(FreeText(255), nullable=True)
     webhook_token = Column(String(128), unique=True, index=True, nullable=False)
-    webhook_url = Column(String(1000), nullable=True)
+    webhook_url = Column(FreeText(1000), nullable=True)
     is_enabled = Column(Boolean, default=False, nullable=False)
     last_error = Column(Text, nullable=True)
     last_connected_at = Column(DateTime, nullable=True)
@@ -204,9 +210,9 @@ class UserLLMSettings(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
     keys_json = Column(Text, nullable=True)          # {"openai": "<fernet token>", ...} — لا نص صريح أبداً
     chat_provider = Column(String(30), nullable=True)
-    chat_model = Column(String(200), nullable=True)
+    chat_model = Column(FreeText(200), nullable=True)
     employee_provider = Column(String(30), nullable=True)
-    employee_model = Column(String(200), nullable=True)
+    employee_model = Column(FreeText(200), nullable=True)
     status_json = Column(Text, nullable=True)        # آخر اختبار لكل مزوّد {provider: {ok, error, at}}
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -214,6 +220,7 @@ class UserLLMSettings(Base):
 class AIEmployee(Base):
     """Permanent, isolated configuration of one autonomous AI Employee."""
     __tablename__ = "ai_employees"
+    __table_args__ = (Index("ix_ai_employees_status_next_wake", "status", "next_wake_at"),)
 
     id = Column(String(64), primary_key=True, index=True)  # employee_id (uuid)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
@@ -236,6 +243,8 @@ class AIEmployee(Base):
     last_cycle_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    #: رقم نسخة الصف للقفل المتفائل (DB_OPTIMISTIC_LOCKING=1، انظر SqlEmployeeRepository._save)
+    version = Column(Integer, nullable=False, default=0, server_default="0")
 
     def __repr__(self):
         return f"<AIEmployee(id={self.id}, account=@{self.account_username}, status={self.status})>"
@@ -249,11 +258,12 @@ class AgentMemory(Base):
     جدول جديد (لا عمود جديد) فيُنشأ تلقائياً بـ ``create_all`` بلا ترحيل.
     """
     __tablename__ = "agent_memories"
+    __table_args__ = (Index("ix_agent_memories_scope_kind", "scope", "kind"),)
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     scope = Column(String(100), nullable=False, index=True)
     kind = Column(String(30), nullable=False, index=True)
-    key = Column(String(255), nullable=True, index=True)
+    key = Column(FreeText(255), nullable=True, index=True)
     content = Column(Text, nullable=False)
     importance = Column(Integer, default=2)                  # 1..5
     embedding = Column(Text, nullable=True)                  # JSON list[float]
@@ -267,11 +277,12 @@ class AgentMemory(Base):
 class EmployeeMemoryRecord(Base):
     """A single memory item across any memory layer for one employee."""
     __tablename__ = "employee_memories"
+    __table_args__ = (Index("ix_employee_memories_emp_layer_created", "employee_id", "layer", "created_at"),)
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     employee_id = Column(String(64), ForeignKey("ai_employees.id"), nullable=False, index=True)
     layer = Column(String(50), nullable=False, index=True)  # working|conversation|long_term|semantic|reflection
-    key = Column(String(255), nullable=True, index=True)
+    key = Column(FreeText(255), nullable=True, index=True)
     content = Column(Text, nullable=False)
     importance = Column(Integer, default=1)                  # 1..5
     embedding = Column(Text, nullable=True)                  # JSON list[float] (optional)
@@ -285,6 +296,7 @@ class EmployeeMemoryRecord(Base):
 class ExecutionJobRecord(Base):
     """A wake job produced by the scheduler and consumed by a shared worker."""
     __tablename__ = "execution_jobs"
+    __table_args__ = (Index("ix_execution_jobs_status_priority_created", "status", "priority", "created_at"),)
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     job_id = Column(String(64), unique=True, index=True, nullable=False)
@@ -306,6 +318,7 @@ class ExecutionJobRecord(Base):
 class ExecutionLogRecord(Base):
     """Per-cycle audit log: phases, decision, capability results, reflection."""
     __tablename__ = "execution_logs"
+    __table_args__ = (Index("ix_execution_logs_employee_created", "employee_id", "created_at"),)
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     employee_id = Column(String(64), ForeignKey("ai_employees.id"), nullable=False, index=True)
@@ -326,13 +339,14 @@ class TaskCheckpoint(Base):
     """نقطة استعادة لمهمة جارية (طلب شات أو دورة موظف) — تبقى بعد انقطاع الاتصال أو
     إعادة تشغيل الخادم، فتُعرض حالتها ويُستأنف المقطوع منها يدوياً (app/services/task_checkpoints.py)."""
     __tablename__ = "task_checkpoints"
+    __table_args__ = (Index("ix_task_checkpoints_user_status_updated", "user_id", "status", "updated_at"),)
 
     id = Column(String(80), primary_key=True)
     kind = Column(String(20), nullable=False, index=True)          # chat | cycle
     user_id = Column(Integer, nullable=True, index=True)
     employee_id = Column(String(64), nullable=True, index=True)
     session_id = Column(String(255), nullable=True)
-    title = Column(String(500), nullable=True)
+    title = Column(FreeText(500), nullable=True)
     #: running | succeeded | failed | interrupted | resumed | cancelled
     status = Column(String(20), nullable=False, default="running", index=True)
     phase = Column(String(80), nullable=True)
@@ -349,9 +363,35 @@ class RealtimeOutbox(Base):
     """كل رسالة مهمة دُفعت لسوكت المستخدم، برقم تسلسلي متزايد (``id``): المتصفح يطلب
     ما بعد آخر رقم رآه عند عودة الاتصال فلا تضيع رسالة وصلت أثناء الانقطاع."""
     __tablename__ = "realtime_outbox"
-    __table_args__ = {"sqlite_autoincrement": True}
+    __table_args__ = (Index("ix_realtime_outbox_user_id_id", "user_id", "id"), {"sqlite_autoincrement": True})
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, nullable=False, index=True)
     payload = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class MigrationQuarantine(Base):
+    """صفوف لم تُنقل لجدولها لأن أباها غير موجود (SQLite لم يفرض الـFK): محفوظة كاملة لا محذوفة.
+
+    ``row_json`` قيم الصف مطبّعة (``app.db.transfer.canon``)؛ النقل العكسي إلى SQLite يعيدها لجدولها.
+    """
+    __tablename__ = "_migration_quarantine"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_table = Column(String(100), nullable=False, index=True)
+    source_pk = Column(String(255), nullable=False)
+    reason = Column(Text, nullable=False)
+    row_json = Column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)
+    migrated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SqliteImportProgress(Base):
+    """تقدّم أداة النقل لكل جدول — يُحدَّث في معاملة الدفعة نفسها (استئناف بلا تكرار)."""
+    __tablename__ = "_sqlite_import_progress"
+
+    table_name = Column(String(100), primary_key=True)
+    last_pk = Column(Text, nullable=True)
+    rows = Column(Integer, nullable=False, default=0)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)

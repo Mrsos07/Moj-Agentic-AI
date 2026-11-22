@@ -3,10 +3,11 @@ Trend Detector Database Models
 Tables: signals, candidates, x_validation, classifications, watchlist, scoring_config
 """
 from sqlalchemy import (
-    Column, Integer, String, DateTime, Text, Boolean, Float, JSON
+    Column, Integer, String, DateTime, Text, Boolean, Float, JSON, Index
 )
 from datetime import datetime
 from app.db.database import Base
+from app.db.types import FreeText
 
 
 class Signal(Base):
@@ -15,14 +16,14 @@ class Signal(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     platform = Column(String(50), nullable=False, index=True)       # tavily (old rows: reddit, x, google_trends, tiktok)
-    source_id = Column(String(500), nullable=True, index=True)      # Original post/trend ID on the platform
-    title = Column(String(1000), nullable=True)
+    source_id = Column(FreeText(500), nullable=True, index=True)      # Original post/trend ID on the platform
+    title = Column(FreeText(1000), nullable=True)
     content = Column(Text, nullable=True)
-    url = Column(String(2000), nullable=True)
-    media_url = Column(String(2000), nullable=True)                 # Image/video URL if present
+    url = Column(FreeText(2000), nullable=True)
+    media_url = Column(FreeText(2000), nullable=True)                 # Image/video URL if present
     media_text = Column(Text, nullable=True)                        # Text extracted from media via Vision API
     keywords = Column(Text, nullable=True)                          # Comma-separated keywords
-    author = Column(String(255), nullable=True)
+    author = Column(FreeText(255), nullable=True)
     published_at = Column(DateTime, nullable=True)
     views = Column(Integer, default=0)
     likes = Column(Integer, default=0)
@@ -43,13 +44,13 @@ class Candidate(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     fingerprint = Column(String(64), unique=True, index=True)       # SHA-256 hash for dedup
-    title = Column(String(1000), nullable=False)
+    title = Column(FreeText(1000), nullable=False)
     content = Column(Text, nullable=True)
     keywords = Column(Text, nullable=True)                          # Comma-separated
-    url = Column(String(2000), nullable=True)                       # Best/primary URL
-    media_url = Column(String(2000), nullable=True)
-    platforms = Column(String(500), nullable=True)                  # Comma-separated platforms where seen
-    source_signal_ids = Column(String(500), nullable=True)          # Comma-separated Signal IDs merged into this
+    url = Column(FreeText(2000), nullable=True)                       # Best/primary URL
+    media_url = Column(FreeText(2000), nullable=True)
+    platforms = Column(FreeText(500), nullable=True)                  # Comma-separated platforms where seen
+    source_signal_ids = Column(FreeText(500), nullable=True)          # Comma-separated Signal IDs merged into this
     first_seen_at = Column(DateTime, nullable=True)
     views_total = Column(Integer, default=0)
     likes_total = Column(Integer, default=0)
@@ -71,7 +72,7 @@ class XValidation(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     candidate_id = Column(Integer, nullable=False, index=True)
-    search_query = Column(String(500), nullable=True)               # What was searched on X
+    search_query = Column(FreeText(500), nullable=True)               # What was searched on X
     post_count = Column(Integer, default=0)                         # Number of recent posts found
     unique_authors = Column(Integer, default=0)                     # Distinct authors
     total_engagement = Column(Integer, default=0)                   # Sum of likes+retweets+replies
@@ -90,9 +91,9 @@ class Classification(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     candidate_id = Column(Integer, nullable=False, index=True)
-    category = Column(String(100), nullable=False, index=True)      # سياسي, رياضة, etc.
-    subcategory = Column(String(100), nullable=True)
-    sensitivity = Column(String(50), default="low")                 # low, medium, high, critical
+    category = Column(FreeText(100), nullable=False, index=True)      # سياسي, رياضة, etc.
+    subcategory = Column(FreeText(100), nullable=True)
+    sensitivity = Column(FreeText(50), default="low")                 # low, medium, high, critical
     risk_notes = Column(Text, nullable=True)                        # Why it's sensitive
     extracted_keywords = Column(Text, nullable=True)                # LLM-extracted keywords
     entities = Column(Text, nullable=True)                          # Names, places, teams (JSON string)
@@ -107,6 +108,7 @@ class Classification(Base):
 class Watchlist(Base):
     """EARLY signals being monitored for re-validation"""
     __tablename__ = "td_watchlist"
+    __table_args__ = (Index("ix_td_watchlist_active_next_check", "is_active", "next_check_at"),)
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     candidate_id = Column(Integer, nullable=False, index=True)

@@ -19,17 +19,13 @@ os.environ.setdefault("TOPIC_SEMANTIC", "0")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.stdout.reconfigure(encoding="utf-8")
 
-from sqlalchemy import create_engine  # noqa: E402
-
 import app.db.database as DB  # noqa: E402
 
 TMP = Path(tempfile.mkdtemp(prefix="moj_llm_"))
-_engine = create_engine(f"sqlite:///{TMP / 'app.db'}", connect_args={"check_same_thread": False})
-DB.engine = _engine
-DB.SessionLocal.configure(bind=_engine)
-from app.db import models as M  # noqa: E402
+from app.db.testing import use_temp_database  # noqa: E402
 
-DB.Base.metadata.create_all(bind=_engine)
+_engine = use_temp_database(TMP)  # Alembic head، SQLite مؤقت أو PG إن ضُبط MOJ_TEST_DATABASE_URL
+from app.db import models as M  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
 

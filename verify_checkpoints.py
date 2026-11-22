@@ -27,8 +27,6 @@ os.environ.setdefault("TOPIC_SEMANTIC", "0")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.stdout.reconfigure(encoding="utf-8")
 
-from sqlalchemy import create_engine  # noqa: E402
-
 import app.db.database as DB  # noqa: E402
 
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -40,12 +38,10 @@ import app.auth.token_guard as _TG  # noqa: E402
 _TG._PATH = Path(_auth_dir) / "auth_revocations.json"
 _TG._state = None
 _INT._USED_PATH = os.path.join(_auth_dir, "nonces.json")
-_engine = create_engine(f"sqlite:///{_tmp.name}", connect_args={"check_same_thread": False})
-DB.engine = _engine
-DB.SessionLocal.configure(bind=_engine)
-from app.db import models as M  # noqa: E402
+from app.db.testing import use_temp_database  # noqa: E402
 
-DB.Base.metadata.create_all(bind=_engine)
+_engine = use_temp_database()  # Alembic head، SQLite مؤقت أو PG إن ضُبط MOJ_TEST_DATABASE_URL
+from app.db import models as M  # noqa: E402
 
 from app.services import task_checkpoints as TC  # noqa: E402
 
