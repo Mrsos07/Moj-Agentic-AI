@@ -67,6 +67,12 @@ def run_migrations_online() -> None:
         return
     engine = build_engine(resolve_database_url())
     try:
+        from app.db.migrations import needs_adoption
+
+        if needs_adoption(engine):
+            # alembic/migrate.py مباشرة على قاعدة create_all غير مختومة: 6e5dcbbbdac8 سيحاول إنشاء users الموجود
+            raise RuntimeError("قاعدة SQLite قديمة غير مختومة — رقِّها بالتبنّي الآمن (نسخة احتياطية + مقارنة "
+                               "مخطط): python scripts/db_migrate.py upgrade")
         with engine.begin() as connection:
             _run(connection)
     finally:
