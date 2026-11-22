@@ -54,7 +54,7 @@ def main(argv=None) -> int:
             if m.get("replayed"):
                 replayed.append(m.get("seq"))
         out["replayed"] = len(replayed)
-        out["replayed_seqs"] = replayed[:3] + (["…"] if len(replayed) > 6 else []) + replayed[-3:] if replayed else []
+        out["replayed_seqs"] = replayed if len(replayed) <= 6 else replayed[:3] + ["…"] + replayed[-3:]
         out["replayed_ordered"] = replayed == sorted(replayed)
     finally:
         ws.close()

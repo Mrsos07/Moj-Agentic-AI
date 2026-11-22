@@ -135,6 +135,15 @@
   - `scripts/run_verify.py` runs the whole suite to JSON.
   - `scripts/db_bench.py` measures p50/p95.
   - `scripts/db_baseline.py` snapshots schema, counts and endpoints.
+- Staging (2026-11-22, docker, masked data, test secrets, no cookies) passed the whole guide path:
+  first boot on SQLite adopted it, then backup, migrate, `sqlite_to_pg` in the container, up, smoke, backup/restore with
+  `postgres.dump`, and reverse plus `--remove-orphans` back to SQLite with the PG-era writes kept.
+  - Smoke via the full proxy: `scripts/staging_smoke.py` (login, employees, WS auth, outbox replay after a seq).
+  - Gotchas it found:
+    - nginx resolves `backend` once, so recreating only the backend (a new env, i.e. the PG cutover) left 502
+      on every request. Fixed with `frontend.depends_on.backend.restart: true`.
+    - On Windows the `COMPOSE_FILE` separator is `;` (`COMPOSE_PATH_SEPARATOR=:`).
+    - `EmailStr` rejects `*.test`, so masked emails are `example.com`.
 - Measured before the change: SQLite at 32 threads throws `database is locked` (checkpoints 5, claim_resume 3 errors
   out of 800). Don't read the PG numbers as "N workers supported": they are DB-ops only, not AEOS cycles or browsers.
 - Publishing exception: the P0 package said "no automatic publish". Work happened on branch `feat/p0-postgres` in a
