@@ -233,7 +233,7 @@ class AEOSPlatform:
 
     def cancel_employee(self, employee_id: str, reason: str = "أوقفه المالك") -> Dict[str, Any]:
         """ألغِ مهام موظف: المنتظرة فوراً، والجارية تعاونياً عند نقطة الفحص التالية."""
-        if self._mode != "durable":
+        if getattr(self, "_mode", "legacy") != "durable":
             return {"supported": False}
         out = self._queue.request_cancel(employee_id=employee_id, reason=reason)
         return {"supported": True, **out}
@@ -524,7 +524,7 @@ class AEOSPlatform:
             cfg.scheduler.enabled = False
             cfg.scheduler.next_wake_at = None
             if not newly_created:
-                self.cancel_employee(cfg.id, "أوقفه المالك")
+                AEOSPlatform.cancel_employee(self, cfg.id, "أوقفه المالك")
 
         saved = self._repo.save(cfg)
         if hasattr(self._repo, "set_next_wake") and saved.scheduler.next_wake_at:
@@ -598,7 +598,7 @@ class AEOSPlatform:
             self._repo.save(cfg)
         except Exception:  # noqa: BLE001
             pass
-        self.cancel_employee(employee_id, "حُذف الموظف")
+        AEOSPlatform.cancel_employee(self, employee_id, "حُذف الموظف")
         # نظّف حقائقه من الرسم المعرفي (إن كان مفعّلاً) — أفضل جهد
         try:
             self._graph_memory.clear(employee_id)
