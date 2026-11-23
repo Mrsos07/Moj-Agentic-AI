@@ -423,7 +423,9 @@ class DbJobQueue(IJobQueue):
                     n = db.execute(base.values(status=S.FAILED.value, finished_at=now, dead_letter=dead,
                                                had_effects=effects,
                                                error_message=("استُنفدت المحاولات" if dead else
-                                                              "انقطع التنفيذ بعد أثر خارجي — الاستئناف يدوي"),
+                                                              "انقطع التنفيذ بعد أثر خارجي — الاستئناف يدوي"
+                                                              if effects else
+                                                              "انقطع أمر المالك أثناء التنفيذ — الاستئناف يدوي"),
                                                **common)).rowcount
                     action = "dead_letter" if dead else "interrupted"
                 if n:
