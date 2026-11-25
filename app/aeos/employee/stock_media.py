@@ -284,7 +284,8 @@ def _fetch_page(url: str, limit: int = 600_000) -> str:
     for _ in range(3):                                   # تحويلان كحد أقصى، كلٌّ يُفحص من جديد
         if not _public_url(url):
             return ""
-        r = requests.get(url, timeout=8, allow_redirects=False, stream=True,
+        from ..security.egress import public_request
+        r = public_request("GET", url, timeout=8, stream=True,
                          headers={"User-Agent": "Mozilla/5.0 (compatible; MojAgenticAI/1.0)"})
         if r.is_redirect and r.headers.get("Location"):
             from urllib.parse import urljoin

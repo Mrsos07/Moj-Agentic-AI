@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+from app.aeos.security import sealed
 import ipaddress
 import json
 import logging
@@ -36,7 +38,7 @@ _lock = threading.Lock()
 
 
 def _tag(employee_id: str) -> str:
-    return "e" + "".join(ch for ch in str(employee_id) if ch.isalnum())[:10].lower()
+    return "e" + hashlib.sha256(str(employee_id).encode()).hexdigest()[:24]
 
 
 def registry_slug(employee_id: str, local: str) -> str:
@@ -48,7 +50,7 @@ def is_private(name: str) -> bool:
 
 
 def belongs_to(name: str, employee_id: str) -> bool:
-    return name.startswith(f"{X.PREFIX}{_tag(employee_id)}_")
+    return any(name == X.PREFIX + cfg["slug"] for cfg in _read(employee_id))
 
 
 # ─────────────────────────── SSRF guard ───────────────────────────
@@ -74,6 +76,8 @@ class EmployeeMCPServer(X.ExternalMCPServer):
     """خادم موظف: نفس عميل MCP، مع إعادة فحص العنوان قبل كل اتصال (تغيّر DNS)."""
 
     def call(self, request):
+        if not request.employee_id or self.cfg.get("employee_id") != request.employee_id:
+            return X.MCPResponse.fail("private MCP owner mismatch")
         try:
             check_public_url(self.cfg.get("url", ""))
         except ValueError as exc:
@@ -87,16 +91,24 @@ def _path(employee_id: str) -> Path:
 
 
 def _read(employee_id: str) -> List[Dict[str, Any]]:
-    data = X._json(_path(employee_id), [])
-    return data if isinstance(data, list) else []
+    path = _path(employee_id)
+    if not path.exists():
+        legacy = "e" + "".join(ch for ch in str(employee_id) if ch.isalnum())[:10].lower()
+        path = _DIR / f"{legacy}.json"
+    return [c for c in sealed.read(path, []) if c.get("employee_id") == employee_id]
 
 
 def _write(employee_id: str, items: List[Dict[str, Any]]) -> None:
     path = _path(employee_id)
-    if not items:
-        path.unlink(missing_ok=True)
-        return
-    X._atomic_write(path, items)
+    X._atomic_write(path, sealed.envelope(items))
+    # Old short IDs could collide. Remove only records matching the complete owner ID.
+    legacy_tag = "e" + "".join(ch for ch in str(employee_id) if ch.isalnum())[:10].lower()
+    legacy = _DIR / (legacy_tag + ".json")
+    if legacy != path and legacy.exists():
+        old = sealed.read(legacy, [])
+        kept = [cfg for cfg in old if cfg.get("employee_id") != employee_id]
+        if len(kept) != len(old):
+            X._atomic_write(legacy, sealed.envelope(kept))
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -131,6 +143,7 @@ def save(employee_id: str, raw: Dict[str, Any], registry=None, added_by: str = "
         "research_arg": raw.get("research_arg") or "", "description": raw.get("description") or "",
         "scope": {"coordinator": False, "employees": True},
     })
+    cfg["private"] = True
     cfg = X.discover(cfg)
     cfg.update(local_slug=local, employee_id=str(employee_id), private=True, added_by=added_by,
                added_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
@@ -167,14 +180,16 @@ def purge(employee_id: str, registry=None) -> int:
     if registry is not None:
         for c in items:
             registry.unregister(X.PREFIX + c["slug"])
-    _path(employee_id).unlink(missing_ok=True)
+    _write(employee_id, [])
     return len(items)
 
 
 def register_all(registry) -> int:
     n = 0
     for path in sorted(_DIR.glob("*.json")):
-        for cfg in X._json(path, []) or []:
+        for cfg in sealed.read(path, []) or []:
+            if path != _path(cfg["employee_id"]) and _path(cfg["employee_id"]).exists():
+                continue
             try:
                 registry.register(EmployeeMCPServer(cfg))
                 n += 1

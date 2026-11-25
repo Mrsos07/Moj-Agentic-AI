@@ -20,6 +20,7 @@ from app.auth.ownership import require_user as get_current_user
 from app.auth.roles import require as require_perm
 from app.db.models import User
 
+from ..security.gateway import api_decision
 from ..bootstrap import get_platform
 from ..employee.models import (
     EmployeeConfig, EmployeeStatus, Goal, Persona, SchedulerConfig,
@@ -216,6 +217,7 @@ def delete_employee(employee_id: str, current_user: User = Depends(get_current_u
     """Permanently delete an AI employee (stops schedule + removes logs + purges memory)."""
     platform = get_platform()
     _employee_or_404(employee_id, current_user)
+    api_decision("employee.delete", employee_id, {})
     ok = platform.delete_employee(employee_id)
     if not ok:
         raise HTTPException(500, "failed to delete employee")
@@ -230,6 +232,7 @@ def delete_agent(account_username: str, platform: str = "x",
     cfg = plat.repository.get_by_account(platform, account_username)
     if not owns_employee(cfg, current_user):
         raise HTTPException(404, "agent not found for this account")
+    api_decision("employee.delete", cfg.id, {})
     ok = plat.delete_agent(platform, account_username)
     if not ok:
         raise HTTPException(404, "agent not found for this account")
@@ -780,7 +783,7 @@ class SkillPatchIn(BaseModel):
 def _employee_or_404(employee_id: str, current_user: User):
     # سياسة الملكية واحدة (owns_employee)، والوصول للبيانات عبر منصة هذه الطبقة
     cfg = get_platform().repository.get(employee_id)
-    if not owns_employee(cfg, current_user):
+    if cfg is None or cfg.user_id != current_user.id:
         raise HTTPException(404, "employee not found")
     return cfg
 
@@ -939,6 +942,11 @@ def delete_employee_skill(employee_id: str, skill_id: str,
     from ..skills import custom as CS
 
     cfg = _employee_or_404(employee_id, current_user)
+    from ..security import gateway, ledger
+    spec = next((s for s in CS.list_specs(cfg) if s.get("id") == skill_id), None)
+    if spec:
+        gateway.api_decision("employee.skill.delete", employee_id,
+                             {"skill": skill_id, "revision": ledger.fingerprint(spec)})
     if not CS.delete_spec(cfg, skill_id):
         raise HTTPException(404, "skill not found")
     get_platform().repository.save(cfg)
@@ -1064,9 +1072,12 @@ def add_external_tool(body: ExternalMCPIn,
 @router.delete("/tools/external/{name}")
 def delete_external_tool(name: str,
                          current_user: User = Depends(require_perm("system.mcp.manage"))) -> Dict[str, Any]:
-    from ..services import tools_service as TS
-
-    if not TS.remove_external(name):
+    from ..services import system_catalog
+    try:
+        deleted = system_catalog.delete_mcp(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if not deleted:
         raise HTTPException(404, "server not found")
     return {"ok": True, "deleted": name}
 
@@ -1143,6 +1154,12 @@ def delete_private_tool(employee_id: str, name: str,
     from ..services import tools_service as TS
 
     cfg = _employee_or_404(employee_id, current_user)
+    from ..mcp import employee_mcp
+    from ..security import gateway, ledger
+    tool = employee_mcp.get(employee_id, name)
+    if tool:
+        gateway.api_decision("employee.tool.delete", employee_id,
+                             {"tool": name, "revision": ledger.fingerprint(tool)})
     if not TS.remove_private(cfg, name):
         raise HTTPException(404, "server not found")
     return {"ok": True, "deleted": name}

@@ -260,6 +260,10 @@ def patch_skill(slug: str, body: SkillPatchIn,
 def delete_skill(slug: str, user: User = Depends(require("system.skills.manage"))) -> Dict[str, Any]:
     from app.aeos.skills import system_skills as SS
 
+    from app.aeos.security import gateway, ledger
+    skill = SS.get(slug)
+    if skill and skill.get("kind") != "employee":
+        gateway.api_decision("admin.skill.delete", "", {"skill": slug, "revision": ledger.fingerprint(skill)})
     try:
         deleted = SS.delete(slug)
     except ValueError as exc:

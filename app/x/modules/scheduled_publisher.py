@@ -72,7 +72,7 @@ def _publish_one(post: dict) -> dict:
         if media_url and is_url(media_url):
             tmp_dir = tempfile.mkdtemp(prefix='sched_media_')
             try:
-                media_path = download_to_temp(media_url, tmp_dir)
+                media_path = download_to_temp(media_url, tmp_dir, cookie_label)
             except Exception as e:
                 logger.warning(f"[Scheduler] {event_id} media download failed: {e}")
                 media_path = None

@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import json
 import logging
+from app.aeos.security import sealed
 import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
@@ -69,65 +71,26 @@ class MCPError(RuntimeError):
 
 
 # ─────────────────────────── transports ───────────────────────────
-class _StdioTransport:
-    def __init__(self, command: str, args: List[str], env: Dict[str, str],
-                 cwd: Optional[str] = None) -> None:
-        exe = shutil.which(command) or command  # Windows: npx → npx.cmd
-        # UTF-8 افتراضياً للعملية الابنة: على ويندوز stdout = cp1252، فخادم Python يطبع عربياً
-        # (json.dumps(..., ensure_ascii=False)) ينهار بـ UnicodeEncodeError ويموت قبل أول رد.
-        self._proc = subprocess.Popen(
-            [exe, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env={"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **os.environ, **env},
-            text=True, encoding="utf-8", bufsize=1, cwd=cwd or None,
-        )
-        self._pending: Dict[int, Dict[str, Any]] = {}
-        self._cond = threading.Condition()
-        threading.Thread(target=self._reader, daemon=True).start()
+def _transport_request(private):
+    import requests
+    from app.aeos.security.egress import public_request
 
-    def _reader(self) -> None:
-        for line in self._proc.stdout:  # type: ignore[union-attr]
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except ValueError:
-                continue  # سجلّات يطبعها بعض الخوادم على stdout
-            if isinstance(msg, dict) and "id" in msg and ("result" in msg or "error" in msg):
-                with self._cond:
-                    self._pending[msg["id"]] = msg
-                    self._cond.notify_all()
-        with self._cond:
-            self._cond.notify_all()
-
-    @property
-    def alive(self) -> bool:
-        return self._proc.poll() is None
-
-    def send(self, msg: Dict[str, Any], timeout: float) -> Optional[Dict[str, Any]]:
-        if not self.alive:
-            raise MCPError("server process exited")
-        self._proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")  # type: ignore[union-attr]
-        self._proc.stdin.flush()  # type: ignore[union-attr]
-        if "id" not in msg:
-            return None
-        with self._cond:
-            ok = self._cond.wait_for(lambda: msg["id"] in self._pending or not self.alive, timeout)
-            if msg["id"] in self._pending:
-                return self._pending.pop(msg["id"])
-        raise MCPError("timeout" if not ok else "server process exited")
-
-    def close(self) -> None:
-        try:
-            self._proc.terminate()
-            self._proc.wait(timeout=5)
-        except Exception:  # noqa: BLE001
-            self._proc.kill()
+    def send(method, url, **kwargs):
+        parts = urlsplit(url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+        # Explicit operator exception only for system-installed MCP. Private tools stay public-only.
+        internal = os.environ.get("MCP_INTERNAL_ORIGINS", "").split(",")
+        if not private and origin in {o.strip() for o in internal}:
+            with requests.Session() as session:
+                session.trust_env = False
+                return session.request(method, url, allow_redirects=False, **kwargs)
+        return public_request(method, url, **kwargs)
+    return send
 
 
 class _HttpTransport:
-    def __init__(self, url: str, headers: Dict[str, str]) -> None:
+    def __init__(self, url: str, headers: Dict[str, str], *, private=False) -> None:
+        self._request = _transport_request(private)
         self._url = url
         self._headers = dict(headers)
         self._session_id = ""
@@ -146,47 +109,56 @@ class _HttpTransport:
             headers["MCP-Protocol-Version"] = self.protocol
         # بلا تتبّع تحويلات: خادم عام كان يستطيع تحويل الطلب لعنوان داخلي فيتجاوز فحص
         # العنوان (SSRF عبر redirect). خادم MCP لا يحتاج تحويلاً أصلاً.
-        resp = requests.post(self._url, json=msg, headers=headers, timeout=timeout,
-                             stream=True, allow_redirects=False)
-        _raise_for_http(resp)
-        sid = resp.headers.get("Mcp-Session-Id")
-        if sid:
-            self._session_id = sid
-        if "id" not in msg:
-            resp.close()
-            return None
-        if "text/event-stream" in resp.headers.get("Content-Type", ""):
-            # بايتات ثم UTF-8 يدوياً: decode_unicode يفكّ البث كـlatin-1 (لا charset
-            # في الترويسة)، وفي latin-1 البايت 0x85 «سطر جديد» (NEL) — وهو البايت
-            # الثاني لحرف «م» في UTF-8، فكان JSON العربي ينقسم في منتصفه.
-            for raw_b in resp.iter_lines():
-                raw = raw_b.decode("utf-8", "replace") if raw_b else ""
-                if raw.startswith("data:"):
-                    try:
-                        data = json.loads(raw[5:].strip())
-                    except ValueError:
-                        continue
-                    if isinstance(data, dict) and data.get("id") == msg["id"]:
-                        resp.close()
-                        return data
-            raise MCPError("stream ended without a response")
-        ctype = resp.headers.get("Content-Type", "")
-        try:
-            data = resp.json()
-        except ValueError:
-            kind = "صفحة ويب (HTML)" if "html" in ctype else f"نص غير JSON ({ctype or 'بلا نوع'})"
-            raise MCPError(f"الرابط أعاد {kind} لا رد MCP — تأكد أنه عنوان خادم MCP "
-                           "(غالباً ينتهي بـ /mcp) لا صفحة الموقع أو التوثيق") from None
-        return data
+        resp = self._request("POST", self._url, json=msg, headers=headers, timeout=timeout, stream=True)
+        with resp:
+            _raise_for_http(resp)
+            sid = resp.headers.get("Mcp-Session-Id")
+            if sid:
+                self._session_id = sid
+            if "id" not in msg:
+                resp.close()
+                return None
+            if "text/event-stream" in resp.headers.get("Content-Type", ""):
+                # بايتات ثم UTF-8 يدوياً: decode_unicode يفكّ البث كـlatin-1 (لا charset
+                # في الترويسة)، وفي latin-1 البايت 0x85 «سطر جديد» (NEL) — وهو البايت
+                # الثاني لحرف «م» في UTF-8، فكان JSON العربي ينقسم في منتصفه.
+                deadline = time.monotonic() + timeout
+                total = 0
+                for raw_b in iter(lambda: resp.raw.readline(1048577), b""):
+                    total += len(raw_b)
+                    if len(raw_b) > 1048576 or total > 2000000 or time.monotonic() >= deadline:
+                        raise MCPError("MCP stream budget exceeded")
+                    raw = raw_b.decode("utf-8", "replace") if raw_b else ""
+                    if raw.startswith("data:"):
+                        try:
+                            data = json.loads(raw[5:].strip())
+                        except ValueError:
+                            continue
+                        if isinstance(data, dict) and data.get("id") == msg["id"]:
+                            resp.close()
+                            return data
+                raise MCPError("stream ended without a response")
+            ctype = resp.headers.get("Content-Type", "")
+            try:
+                buf = bytearray()
+                for chunk in resp.iter_content(32768):
+                    buf.extend(chunk)
+                    if len(buf) > 2_000_000:
+                        raise MCPError("MCP response too large")
+                data = json.loads(buf)
+            except ValueError:
+                kind = "صفحة ويب (HTML)" if "html" in ctype else f"نص غير JSON ({ctype or 'بلا نوع'})"
+                raise MCPError(f"الرابط أعاد {kind} لا رد MCP — تأكد أنه عنوان خادم MCP "
+                               "(غالباً ينتهي بـ /mcp) لا صفحة الموقع أو التوثيق") from None
+            return data
 
     def close(self) -> None:
         if not self._session_id:
             return
         try:
-            import requests
-
-            requests.delete(self._url, headers={**self._headers, "Mcp-Session-Id": self._session_id},
-                            timeout=5)
+            with self._request("DELETE", self._url, headers={**self._headers, "Mcp-Session-Id": self._session_id},
+                               timeout=5, stream=True):
+                pass
         except Exception:  # noqa: BLE001
             pass
 
@@ -212,7 +184,8 @@ class _SseTransport:
     ``endpoint`` (عنوان POST)، ثم تصل الردود أحداثَ ``message`` على البث نفسه.
     خوادم كثيرة (روابط تنتهي بـ ``/sse``) ما زالت تعمل به فقط — كانت تُرفض تماماً."""
 
-    def __init__(self, url: str, headers: Dict[str, str], timeout: float = _DEFAULT_TIMEOUT) -> None:
+    def __init__(self, url: str, headers: Dict[str, str], timeout: float = _DEFAULT_TIMEOUT, *, private=False) -> None:
+        self._request = _transport_request(private)
         import queue
 
         import requests
@@ -223,8 +196,8 @@ class _SseTransport:
         self._endpoint = ""
         self._ready = threading.Event()
         self.alive = True
-        self._resp = requests.get(url, headers={"Accept": "text/event-stream", **self._headers},
-                                  stream=True, timeout=(timeout, None), allow_redirects=False)
+        self._resp = self._request("GET", url, headers={"Accept": "text/event-stream", **self._headers},
+                                   stream=True, timeout=(timeout, timeout))
         _raise_for_http(self._resp)
         if "text/event-stream" not in self._resp.headers.get("Content-Type", ""):
             self._resp.close()
@@ -243,7 +216,9 @@ class _SseTransport:
         try:
             # readline لا iter_lines: الأخيرة تنتظر امتلاء كتلة 512 بايت قبل أن تُخرج أي سطر،
             # وحدث endpoint أقصر من ذلك فيبقى عالقاً حتى المهلة (قيس: «لم يرسل endpoint»)
-            for raw_b in iter(self._resp.raw.readline, b""):
+            for raw_b in iter(lambda: self._resp.raw.readline(1048577), b""):
+                if len(raw_b) > 1048576 or len(data) > 256 or sum(map(len, data)) > 2000000:
+                    break
                 line = raw_b.rstrip(b"\r\n").decode("utf-8", "replace")
                 if line.startswith("event:"):
                     event = line[6:].strip()
@@ -281,7 +256,7 @@ class _SseTransport:
         if "id" in msg:
             with self._plock:
                 self._pending[msg["id"]] = q
-        resp = requests.post(self._endpoint, json=msg, timeout=timeout, allow_redirects=False,
+        resp = self._request("POST", self._endpoint, json=msg, timeout=timeout,
                              headers={"Content-Type": "application/json", **self._headers})
         _raise_for_http(resp)
         if "id" not in msg:
@@ -374,20 +349,17 @@ class MCPClient:
                            "إن أعطاك المزوّد أمر curl لواجهة REST فهي ليست MCP")
         if reply.get("error"):
             err = reply["error"]
-            raise MCPError(f"{err.get('code')}: {err.get('message')}")
+            raise MCPError("remote MCP returned an error")
         return reply.get("result") or {}
 
     def _connect(self) -> None:
         cfg = self._cfg
         if cfg.get("transport") == "http" and cfg.get("http_mode") == "sse":
-            self._t = _SseTransport(runtime_url(cfg), cfg.get("headers") or {})
+            self._t = _SseTransport(runtime_url(cfg), cfg.get("headers") or {}, private=bool(cfg.get("private")))
         elif cfg.get("transport") == "http":
-            self._t = _HttpTransport(runtime_url(cfg), cfg.get("headers") or {})
+            self._t = _HttpTransport(runtime_url(cfg), cfg.get("headers") or {}, private=bool(cfg.get("private")))
         else:
-            command, args, cwd = runtime_command(cfg)
-            env = runtime_env(cfg)
-            self._env_sig = _env_signature(env)
-            self._t = _StdioTransport(command, args, env, cwd)
+            raise MCPError("stdio requires the Docker sandbox")
         try:
             res = self._rpc("initialize", {
                 "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
@@ -408,15 +380,16 @@ class MCPClient:
         self._rpc("notifications/initialized", notify=True)
 
     def _ensure(self) -> None:
-        # خادم stdio ببيئة محسوبة: إن تغيّرت (بدّل المالك المزوّد/المفتاح) نعيد تشغيله بالجديدة
-        if (self._t is not None and self._t.alive and self._cfg.get("transport") != "http"
-                and (self._cfg.get("slug") or "") in _ENV_PROVIDERS
-                and _env_signature(runtime_env(self._cfg)) != self._env_sig):
-            self.close()
         if self._t is None or not self._t.alive:
             self._connect()
 
     def list_tools(self) -> List[Dict[str, Any]]:
+        from app.aeos.security.sandbox import operate
+        if self._cfg.get("transport") == "stdio":
+            info, tools = operate(self._cfg, "tools/list")
+            self.server_info = info.get("serverInfo", {})
+            self.capabilities = info["capabilities"]
+            return tools
         with self._lock:
             self._ensure()
             tools, cursor = [], None
@@ -430,13 +403,19 @@ class MCPClient:
 
     def call_tool(self, name: str, arguments: Dict[str, Any],
                   timeout: float = _DEFAULT_TIMEOUT) -> Dict[str, Any]:
+        from app.aeos.security.gateway import external
+        from app.aeos.security.data import tool_output
+        external(self._cfg, name, arguments)
+        if self._cfg.get("transport") == "stdio":
+            from app.aeos.security.sandbox import operate
+            _, result = operate(self._cfg, "tools/call", {"name": name, "arguments": arguments}, timeout)
+            return tool_output(result, self._cfg)
         with self._lock:
             try:
                 self._ensure()
-                return self._rpc("tools/call", {"name": name, "arguments": arguments}, timeout)
-            except MCPError:
-                self.close()  # جلسة تالفة: الاستدعاء التالي يعيد الاتصال
-                raise
+                return tool_output(self._rpc("tools/call", {"name": name, "arguments": arguments}, timeout), self._cfg)
+            finally:
+                self.close()  # Never reuse a remote session or cookies between principals.
 
     def close(self) -> None:
         if self._t is not None:
@@ -516,7 +495,7 @@ class ExternalMCPServer(IMCPServer):
     def allowed(self) -> List[str]:
         names = [t["name"] for t in self.cfg.get("tools") or []]
         allow = self.cfg.get("allowed_tools")
-        return names if allow is None else [n for n in names if n in allow]
+        return [n for n in names if n in (allow or [])]
 
     @property
     def tools(self) -> List[str]:
@@ -589,7 +568,7 @@ def _read() -> List[Dict[str, Any]]:
     if _LEGACY_PATH.exists():
         with _store_lock:
             _migrate_legacy()
-    secrets = _json(_SECRETS_PATH, {}) or {}
+    secrets = sealed.read(_SECRETS_PATH, {}) or {}
     out = []
     for manifest in sorted(_CATALOG_DIR.glob(f"*/{MANIFEST}")):
         cfg = _json(manifest, None)
@@ -607,14 +586,14 @@ def _read() -> List[Dict[str, Any]]:
 
 def _write_items(items: List[Dict[str, Any]]) -> None:
     """اكتب manifest كل خادم (أسماء المفاتيح فقط) والقيم إلى ملف الأسرار."""
-    secrets = _json(_SECRETS_PATH, {}) or {}
+    secrets = sealed.read(_SECRETS_PATH, {}) or {}
     for cfg in items:
         manifest = {k: v for k, v in cfg.items() if k not in SECRET_FIELDS}
         for field, keys in SECRET_FIELDS.items():
             manifest[keys] = sorted((cfg.get(field) or {}).keys())
         _atomic_write(package_dir(cfg["slug"]) / MANIFEST, manifest)
         secrets[cfg["slug"]] = {field: dict(cfg.get(field) or {}) for field in SECRET_FIELDS}
-    _atomic_write(_SECRETS_PATH, secrets)
+    _atomic_write(_SECRETS_PATH, sealed.envelope(secrets))
     try:
         os.chmod(_SECRETS_PATH, 0o600)
     except OSError:
@@ -627,8 +606,8 @@ def _write(items: List[Dict[str, Any]]) -> None:
     for manifest in _CATALOG_DIR.glob(f"*/{MANIFEST}"):
         if manifest.parent.name not in keep and not is_builtin(manifest.parent.name):
             _remove_dir(manifest.parent)
-    secrets = {k: v for k, v in (_json(_SECRETS_PATH, {}) or {}).items() if k in keep}
-    _atomic_write(_SECRETS_PATH, secrets)
+    secrets = {k: v for k, v in (sealed.read(_SECRETS_PATH, {}) or {}).items() if k in keep}
+    _atomic_write(_SECRETS_PATH, sealed.envelope(secrets))
     if items:
         _write_items(items)
 
@@ -670,7 +649,7 @@ def public_view(cfg: Dict[str, Any], connected: Optional[bool] = None) -> Dict[s
         "query_keys": sorted((cfg.get("query_secrets") or {}).keys()),
         "tools": [{"name": t["name"], "description": (t.get("description") or "")[:200]}
                   for t in cfg.get("tools") or []],
-        "allowed_tools": cfg.get("allowed_tools"),
+        "allowed_tools": cfg.get("allowed_tools") or [],
         "research_tool": cfg.get("research_tool") or "",
         "research_arg": cfg.get("research_arg") or "",
         "server_info": cfg.get("server_info") or {},

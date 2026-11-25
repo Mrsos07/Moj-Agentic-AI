@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from ..security.gateway import carry
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("aeos.services.identity")
@@ -137,5 +138,5 @@ def apply_persona_identity_async(cfg, llm=None, repo=None) -> None:
         except Exception:  # noqa: BLE001
             logger.exception("apply_persona_identity_async failed for %s", cfg.id)
 
-    threading.Thread(target=_run, name=f"identity-{cfg.account_username}",
+    threading.Thread(target=carry(_run), name=f"identity-{cfg.account_username}",
                      daemon=True).start()

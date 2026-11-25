@@ -231,6 +231,8 @@ def _cleanup_old_images():
 
 def _save_image_bytes(image_bytes: bytes, ext: str = "png") -> str:
     """Save image bytes to static/generated and return the filename"""
+    if len(image_bytes) > 20_000_000 or ext.lower() not in {"png", "jpg", "jpeg", "webp"}:
+        raise ValueError("invalid image")
     _cleanup_old_images()
     filename = f"{uuid.uuid4().hex}.{ext}"
     filepath = os.path.join(GENERATED_DIR, filename)
@@ -248,10 +250,17 @@ def _image_from_message(message: dict) -> str:
             ext = header.split("/")[1].split(";")[0] or "png"
             return f"/static/generated/{_save_image_bytes(base64.b64decode(data), 'jpg' if ext == 'jpeg' else ext)}"
         if url.startswith("https://"):
-            r = requests.get(url, timeout=60)
-            ctype = r.headers.get("Content-Type") or ""
-            if r.status_code == 200 and ctype.startswith("image/"):
-                return f"/static/generated/{_save_image_bytes(r.content, ctype.split('/')[1].split(';')[0] or 'png')}"
+            from app.aeos.security.egress import read_page
+            data = read_page(url, limit=20_000_000)
+            if data.startswith(b"\x89PNG\r\n\x1a\n"):
+                ext = "png"
+            elif data.startswith(b"\xff\xd8\xff"):
+                ext = "jpg"
+            elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+                ext = "webp"
+            else:
+                raise ValueError("invalid remote image")
+            return f"/static/generated/{_save_image_bytes(data, ext)}"
     return ""
 
 

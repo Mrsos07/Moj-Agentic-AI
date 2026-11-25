@@ -232,7 +232,9 @@ async def x_upload_cookies(
     """
     try:
         # قراءة الملف
-        content = await cookie_file.read()
+        content = await cookie_file.read(1048577)
+        if len(content) > 1048576:
+            raise HTTPException(413, "cookie file too large")
         try:
             cookies_data = json.loads(content.decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -249,9 +251,17 @@ async def x_upload_cookies(
         if not account_name:
             raise HTTPException(status_code=400, detail="اسم الحساب فارغ")
         # لا يكتب مستخدم فوق كوكيز حساب يملكه غيره (كان الرفع يستبدل الملف بصمت)
-        if (COOKIES_DIR / f"{account_name}.json").exists():
+        replacing = (COOKIES_DIR / f"{account_name}.json").exists()
+        if replacing:
             label_or_404(account_name, current_user)
         
+        from app.aeos.security.gateway import account
+        try:
+            from app.aeos.security.ledger import fingerprint
+            account("replace_session" if replacing else "create_session", account_name, {"fingerprint": fingerprint(cookies_data)},
+                    sensitive=replacing, user_id=current_user.id, creating=not replacing)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
         # تحويل إلى صيغة Playwright
         playwright_data = _convert_to_playwright_format(cookies_data)
         
@@ -262,8 +272,8 @@ async def x_upload_cookies(
         
         # حفظ الملف
         dst = COOKIES_DIR / f"{account_name}.json"
-        with open(dst, 'w', encoding='utf-8') as f:
-            json.dump(playwright_data, f, ensure_ascii=False, indent=2)
+        from app.aeos.security.sealed import save_browser_state
+        save_browser_state(dst, playwright_data, replace=replacing)
         _register_owner(account_name, dst.name, current_user.id)
         
         return XUploadCookiesResponse(
@@ -328,6 +338,11 @@ async def x_post(
     """
     try:
         label = label_or_404(safe_label(request.label), current_user)
+        from app.aeos.security.gateway import account
+        try:
+            account("post", label, request.model_dump(exclude={"label"}), sensitive=True)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
         cookie_file = COOKIES_DIR / f"{label}.json"
         
         if not cookie_file.exists():
@@ -343,7 +358,7 @@ async def x_post(
             media_path = None
             if request.media_url and is_url(request.media_url):
                 try:
-                    media_path = download_to_temp(request.media_url, tmp)
+                    media_path = download_to_temp(request.media_url, tmp, label)
                 except Exception as e:
                     raise HTTPException(
                         status_code=400,
@@ -390,6 +405,11 @@ async def x_profile_update(
     """
     try:
         label = label_or_404(safe_label(request.label), current_user)
+        from app.aeos.security.gateway import account
+        try:
+            account("update_profile", label, request.model_dump(exclude={"label"}), sensitive=True)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
         cookie_file = COOKIES_DIR / f"{label}.json"
         
         if not cookie_file.exists():
@@ -407,7 +427,7 @@ async def x_profile_update(
             
             if request.avatar_url and is_url(request.avatar_url):
                 try:
-                    avatar_path = download_to_temp(request.avatar_url, tmp)
+                    avatar_path = download_to_temp(request.avatar_url, tmp, label)
                 except Exception as e:
                     raise HTTPException(
                         status_code=400,
@@ -416,7 +436,7 @@ async def x_profile_update(
             
             if request.banner_url and is_url(request.banner_url):
                 try:
-                    banner_path = download_to_temp(request.banner_url, tmp)
+                    banner_path = download_to_temp(request.banner_url, tmp, label)
                 except Exception as e:
                     raise HTTPException(
                         status_code=400,
@@ -506,6 +526,11 @@ async def delete_x_account(
     """
     try:
         label = label_or_404(safe_label(label), current_user)
+        from app.aeos.security.gateway import account
+        try:
+            account("delete_account", label, {}, sensitive=True)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
         cookie_file = COOKIES_DIR / f"{label}.json"
         
         if not cookie_file.exists():

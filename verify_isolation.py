@@ -128,8 +128,10 @@ from app.aeos.memory import lifecycle as LC  # noqa: E402
 from app.services.memory_service import memory_service  # noqa: E402
 
 db = DB.SessionLocal()
-conv_a = memory_service.get_or_create_conversation(db=db, user_id=A, session_id="emp_acct_a")
-memory_service.add_message(db=db, conversation_id=conv_a.id, role="user", content="سر المالك A")
+from app.aeos.security import gateway
+with gateway.execution(A):
+    conv_a = memory_service.get_or_create_conversation(db=db, user_id=A, session_id="emp_acct_a")
+    memory_service.add_message(db=db, conversation_id=conv_a.id, role="user", content="سر المالك A")
 db.add(M.AgentMemory(scope=AM.employee_scope(emp_a.id), kind="instruction", content="تعليمة A"))
 db.add(M.AgentMemory(scope=AM.coordinator_scope(A), kind="preference", content="تفضيل A"))
 db.add(M.AgentMemory(scope="x", kind="summary", key=AM._summary_key(conv_a.id), content="ملخّص A"))
@@ -243,7 +245,9 @@ check("رسالة تدّعي user_id=B على اتصال A تُنسب لـA", po
 
 print("4) الذاكرة: محادثات الجلسة معزولة بالمالك، والـcallbacks موقّعة")
 db = DB.SessionLocal()
-cb = memory_service.get_or_create_conversation(db=db, user_id=B, session_id="emp_acct_a")
+from app.aeos.security import gateway
+with gateway.execution(B):
+    cb = memory_service.get_or_create_conversation(db=db, user_id=B, session_id="emp_acct_a")
 check("نفس session_id لمستخدم آخر ← محادثة مختلفة (لا يرث سجل A)", cb.id != CONV_A and cb.user_id == B)
 db.close()
 from app.auth.internal import sign, signed_url, verify  # noqa: E402
@@ -326,11 +330,25 @@ check("callback الدخول بلا توقيع ← 403 (لا تزوير إشعا
 
 print("5) دورة حياة الذاكرة: لا بيانات يتيمة")
 check("قبل الحذف: لا أيتام", LC.orphan_report() == {"layer_memories_dead_employee": 0}, LC.orphan_report())
-client.delete(f"/api/conversations/{CONV_A}", headers=HA)
+deletion = client.delete(f"/api/conversations/{CONV_A}", headers=HA)
+check("حذف المحادثة ينتظر موافقة", deletion.status_code == 403)
+grant_url = "/api/agent-security/approvals/" + deletion.json()["detail"].split()[-1]
+proof = client.get(grant_url, headers=HA).json()["digest"]
+client.post(grant_url + "/approve", json={"digest": proof}, headers=HA).raise_for_status()
+client.delete(f"/api/conversations/{CONV_A}", headers=HA).raise_for_status()
 db = DB.SessionLocal()
 check("حذف المحادثة يحذف ملخّصها (لا يرثه معرّف مُعاد استخدامه)",
       db.query(M.AgentMemory).filter(M.AgentMemory.key == AM._summary_key(CONV_A)).count() == 0)
 db.close()
+r = client.delete(f"/api/aeos/employees/{E}", headers=HA)
+check("حذف الموظف ينتظر موافقة المالك", r.status_code == 403)
+cid = r.json()["detail"].split()[-1]
+review = client.get(f"/api/agent-security/approvals/{cid}", headers=HA)
+check("المعاينة مقيدة بالمالك", review.status_code == 200 and
+      client.get(f"/api/agent-security/approvals/{cid}", headers=HB).status_code == 404)
+grant = client.post(f"/api/agent-security/approvals/{cid}/approve",
+                    json={"digest": review.json()["digest"]}, headers=HA)
+check("اعتماد عملية الحذف ذاتها", grant.status_code == 200)
 r = client.delete(f"/api/aeos/employees/{E}", headers=HA)
 db = DB.SessionLocal()
 left = {

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from ..security.gateway import carry
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("aeos.employee_commands")
@@ -216,7 +217,7 @@ def _handle_pause(platform, cfg) -> str:
 def _handle_run_cycle(platform, cfg) -> str:
     # دورة فورية في الخلفية حتى لا نحجب الشات (التنفيذ يأخذ دقائق)
     threading.Thread(
-        target=platform.run_cycle_now,
+        target=carry(platform.run_cycle_now),
         args=(cfg.id, "manual", {}),
         daemon=True,
     ).start()

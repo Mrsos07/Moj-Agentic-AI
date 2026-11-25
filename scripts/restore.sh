@@ -33,6 +33,10 @@ docker run --rm --volumes-from "$BACKEND" -v "$MOUNT":/backup:ro alpine:3.20 sh 
   done
   tar xzf /backup/backend.tgz -C /
   # النسخة المتّسقة تحلّ محل الملف الذي نُسخ أثناء التشغيل
+  if [ -f /app/data/agent_security.sqlite3.backup ]; then
+    mv /app/data/agent_security.sqlite3.backup /app/data/agent_security.sqlite3
+    rm -f /app/data/agent_security.sqlite3-journal /app/data/agent_security.sqlite3-wal /app/data/agent_security.sqlite3-shm
+  fi
   if [ -f /app/data/app.db.backup ]; then
     mv /app/data/app.db.backup /app/data/app.db
     rm -f /app/data/app.db-wal /app/data/app.db-shm /app/data/app.db-journal
@@ -61,5 +65,11 @@ if [ -f "$SRC/neo4j.tgz" ]; then
 fi
 
 echo "▶ تشغيل الخادم الخلفي…"
+docker compose run --rm --no-deps -T backend python -c "
+from app.aeos.security import ledger
+if ledger._PATH.exists():
+    with ledger.transaction() as db:
+        db.execute('DELETE FROM grants')
+        ledger.audit(db, 'restore', None, 'approvals', 'invalidated')"
 docker compose start backend >/dev/null
 echo "✅ اكتملت الاستعادة. تابع: docker compose ps   و   docker compose logs -f backend"

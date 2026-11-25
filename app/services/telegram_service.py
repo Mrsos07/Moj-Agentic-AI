@@ -1,4 +1,6 @@
+import os
 import re
+import time
 import secrets
 from datetime import datetime
 from typing import Optional, Any, Dict
@@ -7,6 +9,8 @@ from urllib.parse import urlparse
 import requests
 from sqlalchemy.orm import Session
 
+from app.aeos.security import gateway, ledger
+from app.aeos.security.data import clean
 from app.auth.security import encrypt_credentials, decrypt_credentials
 from app.db.models import TelegramIntegration, User
 
@@ -40,22 +44,15 @@ class TelegramService:
         return f"https://api.telegram.org/bot{bot_token}/{method}"
 
     def _normalize_base_url(self, base_url: str) -> str:
-        normalized = (base_url or "").strip().rstrip("/")
-        if not normalized:
-            raise ValueError("Public Base URL مطلوب")
-
-        parsed = urlparse(normalized)
-        if parsed.scheme != "https":
-            raise ValueError("Public Base URL يجب أن يبدأ بـ https://")
-
-        if not parsed.netloc:
-            raise ValueError("Public Base URL غير صالح")
-
-        blocked_hosts = {"localhost", "127.0.0.1", "0.0.0.0"}
-        if (parsed.hostname or "").lower() in blocked_hosts:
-            raise ValueError("Public Base URL يجب أن يكون رابطًا عامًا وليس localhost")
-
-        return normalized
+        domain = os.environ.get("DOMAIN", "").strip()
+        configured = (os.environ.get("TELEGRAM_WEBHOOK_BASE_URL") or
+                      (f"https://{domain}" if domain else "")).strip().rstrip("/")
+        parsed = urlparse(configured)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path or parsed.params or parsed.query or parsed.fragment
+                or (base_url and base_url.rstrip("/") != configured)):
+            raise ValueError("يلزم عنوان HTTPS مطابق لعنوان Telegram المعتمد في إعداد الخادم")
+        return configured
 
     def _build_webhook_url(self, base_url: str, webhook_token: str) -> str:
         normalized = self._normalize_base_url(base_url)
@@ -72,72 +69,73 @@ class TelegramService:
 
     def _get_me(self, bot_token: str) -> Dict[str, Any]:
         try:
-            response = requests.get(self._build_api_url(bot_token, "getMe"), timeout=20)
+            response = requests.get(self._build_api_url(bot_token, "getMe"), allow_redirects=False, timeout=20)
         except requests.RequestException as exc:
-            raise ValueError(f"تعذر الاتصال بـ Telegram للتحقق من Bot Token: {str(exc)}") from exc
+            raise ValueError("تعذر الاتصال بـ Telegram للتحقق من Bot Token") from None
 
         data = self._parse_telegram_response(
             response,
             "تعذر قراءة استجابة Telegram أثناء التحقق من Bot Token",
         )
         if not response.ok or not data.get("ok"):
-            raise ValueError(data.get("description", "فشل التحقق من Telegram Bot Token"))
+            raise ValueError("فشل التحقق من Telegram Bot Token")
         return data["result"]
 
     def _set_webhook(self, bot_token: str, webhook_url: str) -> None:
+        origin, path, token = webhook_url.partition("/api/telegram/webhook/")
+        if not path or not re.fullmatch(r"[A-Za-z0-9_-]{32,80}", token):
+            raise ValueError("عنوان Telegram غير صالح")
+        self._normalize_base_url(origin)
         try:
             response = requests.post(
                 self._build_api_url(bot_token, "setWebhook"),
-                json={"url": webhook_url},
-                timeout=20,
+                json={"url": webhook_url, "secret_token": self.callback_secret(webhook_url.rsplit("/", 1)[1]),
+                      "allowed_updates": ["message"]},
+                allow_redirects=False, timeout=20,
             )
         except requests.RequestException as exc:
-            raise ValueError(f"تعذر الاتصال بـ Telegram لإعداد Webhook: {str(exc)}") from exc
+            raise ValueError("تعذر الاتصال بـ Telegram لإعداد Webhook") from None
 
         data = self._parse_telegram_response(
             response,
             "تعذر قراءة استجابة Telegram أثناء إعداد Webhook",
         )
         if not response.ok or not data.get("ok"):
-            description = data.get("description", "فشل إعداد Telegram webhook")
-            raise ValueError(f"{description} | webhook_url={webhook_url}")
+            raise ValueError("فشل إعداد Telegram webhook")
 
     def _delete_webhook(self, bot_token: str) -> None:
         try:
-            response = requests.post(self._build_api_url(bot_token, "deleteWebhook"), timeout=20)
+            response = requests.post(self._build_api_url(bot_token, "deleteWebhook"), allow_redirects=False, timeout=20)
         except requests.RequestException as exc:
-            raise ValueError(f"تعذر الاتصال بـ Telegram لحذف Webhook: {str(exc)}") from exc
+            raise ValueError("تعذر الاتصال بـ Telegram لحذف Webhook") from None
 
         data = self._parse_telegram_response(
             response,
             "تعذر قراءة استجابة Telegram أثناء حذف Webhook",
         )
         if not response.ok or not data.get("ok"):
-            raise ValueError(data.get("description", "فشل حذف Telegram webhook"))
+            raise ValueError("فشل حذف Telegram webhook")
 
     def _send_message(self, bot_token: str, chat_id: str, text: str) -> None:
         try:
             response = requests.post(
                 self._build_api_url(bot_token, "sendMessage"),
                 json={"chat_id": chat_id, "text": text},
-                timeout=20,
+                allow_redirects=False, timeout=20,
             )
         except requests.RequestException as exc:
-            raise ValueError(f"تعذر الاتصال بـ Telegram لإرسال الرسالة: {str(exc)}") from exc
+            raise ValueError("تعذر الاتصال بـ Telegram لإرسال الرسالة") from None
 
         data = self._parse_telegram_response(
             response,
             "تعذر قراءة استجابة Telegram أثناء إرسال الرسالة",
         )
         if not response.ok or not data.get("ok"):
-            raise ValueError(data.get("description", "فشل إرسال الرسالة إلى Telegram"))
+            raise ValueError("فشل إرسال الرسالة إلى Telegram")
 
-    def _build_chat_id_help_message(self, incoming_chat_id: str) -> str:
-        return (
-            "مرحبًا بك في تكامل موج مع Telegram!\n\n"
-            f"هذا هو Chat ID الخاص بك: {incoming_chat_id}\n\n"
-            "انسخه وضعه في إعدادات الحساب داخل موج لإكمال الربط، ثم أعد إرسال رسالتك هنا."
-        )
+    @staticmethod
+    def callback_secret(token):
+        return ledger.fingerprint(["telegram-callback-v1", token])
 
     def get_user_integration(self, db: Session, user_id: int) -> Optional[TelegramIntegration]:
         return db.query(TelegramIntegration).filter(TelegramIntegration.user_id == user_id).first()
@@ -148,11 +146,13 @@ class TelegramService:
     def upsert_integration(self, db: Session, user: User, bot_token: str, chat_id: str, base_url: str) -> TelegramIntegration:
         clean_bot_token = self._validate_bot_token(bot_token)
         clean_chat_id = str(chat_id or "").strip()
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", clean_chat_id):
+            raise ValueError("يلزم معرّف محادثة Telegram الخاصة بالمالك")
         clean_base_url = self._normalize_base_url(base_url)
 
         bot_info = self._get_me(clean_bot_token)
         integration = self.get_user_integration(db, user.id)
-        webhook_token = integration.webhook_token if integration else self._generate_webhook_token()
+        webhook_token = self._generate_webhook_token()
         webhook_url = self._build_webhook_url(clean_base_url, webhook_token)
 
         self._set_webhook(clean_bot_token, webhook_url)
@@ -174,6 +174,7 @@ class TelegramService:
         else:
             integration.encrypted_bot_token = encrypt_credentials(clean_bot_token)
             integration.chat_id = clean_chat_id
+            integration.webhook_token = webhook_token
             integration.webhook_url = webhook_url
             integration.is_enabled = True
             integration.bot_username = bot_info.get("username")
@@ -208,50 +209,45 @@ class TelegramService:
         db.delete(integration)
         db.commit()
 
-    def process_webhook_update(self, db: Session, integration: TelegramIntegration, update: Dict[str, Any], agent_manager: Any) -> Dict[str, Any]:
-        if not integration.is_enabled:
-            return {"ok": True, "ignored": "disabled"}
+    def process_webhook_update(self, db, integration, update):
+        from app.aeos.services import orchestrator
 
-        message = update.get("message") or update.get("edited_message") or {}
-        chat = message.get("chat") or {}
-        incoming_chat_id = str(chat.get("id", ""))
-        text = (message.get("text", "") or "").strip()
-
-        bot_token = decrypt_credentials(integration.encrypted_bot_token)
-
-        if not text:
-            return {"ok": True, "ignored": "no_text"}
-
-        if text.lower() in {"/start", "/chatid", "/get_chat_id"}:
-            self._send_message(bot_token, incoming_chat_id, self._build_chat_id_help_message(incoming_chat_id))
+        message = update.get("message")
+        if not integration.is_enabled or not isinstance(message, dict):
+            return {"ok": True, "ignored": "inactive"}
+        chat, sender = message.get("chat"), message.get("from")
+        if (not isinstance(chat, dict) or not isinstance(sender, dict) or chat.get("type") != "private"
+                or sender.get("is_bot") or str(chat.get("id")) != integration.chat_id
+                or sender.get("id") != chat.get("id")):
+            return {"ok": True, "ignored": "chat"}
+        uid, update_id = integration.user_id, update.get("update_id")
+        sent = message.get("date")
+        text = message.get("text")
+        if (type(update_id) is not int or not 0 <= update_id < 2**63 or type(sent) is not int
+                or not time.time() - 86400 <= sent <= time.time() + 60
+                or not isinstance(text, str) or not 0 < len(text.strip()) <= 4096):
+            return {"ok": True, "ignored": "invalid"}
+        session = f"telegram:{integration.id}:{integration.chat_id}"
+        with gateway.execution(uid, conversation=session):
+            gateway.owner()
+            if not ledger.admit(uid, "telegram.receive", 30):
+                return {"ok": True, "ignored": "limit"}
+            gateway.decision("telegram.receive", "", {"integration": integration.id})
+            if not ledger.claim_delivery(self.callback_secret(integration.webhook_token), update_id):
+                return {"ok": True, "ignored": "duplicate"}
+            if text.strip().lower() in {"/start", "/chatid", "/get_chat_id"}:
+                reply = f"معرّف محادثتك الخاصة هو {integration.chat_id}"
+            else:
+                result = orchestrator.handle(clean(text), uid, db=db, session_id=session)
+                reply = (result or {}).get("message") or "تعذرت معالجة الرسالة."
+            # The owner explicitly linked this private recipient. It cannot be
+            # redirected by the update, tool output or generated reply.
+            reply = clean(str(reply))[:4096]
+            gateway.decision("telegram.reply", "", {"recipient": integration.chat_id})
+            self._send_message(decrypt_credentials(integration.encrypted_bot_token), integration.chat_id, reply)
             integration.last_error = None
             integration.last_connected_at = datetime.utcnow()
             db.commit()
-            return {"ok": True, "sent": True, "command": "chat_id_help"}
-
-        if incoming_chat_id != str(integration.chat_id):
-            integration.last_error = f"رفض الرسالة من chat_id غير مطابق: {incoming_chat_id}"
-            self._send_message(bot_token, incoming_chat_id, self._build_chat_id_help_message(incoming_chat_id))
-            db.commit()
-            return {"ok": True, "ignored": "chat_id_mismatch"}
-
-        agent_result = agent_manager.process_user_message(
-            message=text,
-            user_id=integration.user_id,
-            session_id=f"telegram:{integration.chat_id}",
-            metadata={
-                "source": "telegram",
-                "telegram_chat_id": integration.chat_id,
-                "telegram_update_id": update.get("update_id"),
-            },
-            db=db,
-        )
-
-        response_message = agent_result.get("message") or "عذرًا، لم أتمكن من معالجة رسالتك الآن."
-        self._send_message(bot_token, integration.chat_id, response_message)
-        integration.last_error = None
-        integration.last_connected_at = datetime.utcnow()
-        db.commit()
         return {"ok": True, "sent": True}
 
 

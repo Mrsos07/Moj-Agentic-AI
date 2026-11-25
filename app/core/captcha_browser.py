@@ -712,6 +712,11 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
             "0", "false", "no", "off")
     # جلسة التدوير السعودية لا تُجهَّز مسبقاً: لا تحدّي عليها (قيس 2026-10-22)، والحل يعيد UA
     # لينكس يناقض Chrome ويندوز في كل صفحة (علامة كشف)، و20 نقطة لكل جلسة بلا مقابل.
+    from app.aeos.security.browser import restrict
+    kwargs.update(accept_downloads=False, service_workers="block")
+    if isinstance(storage_state, (str, Path)) and storage_state:
+        from app.aeos.security import sealed
+        storage_state = sealed.load_browser_state(storage_state)
     if proxy and presolve and not rotated:
         try:
             sol = cloudflare_clearance(page_url, proxy, log=log)
@@ -720,7 +725,7 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
                 kwargs["user_agent"] = ua
             if proxy.startswith("http"):
                 kwargs["proxy"] = _proxy_dict(proxy)
-            ctx = browser.new_context(storage_state=storage_state, **kwargs)
+            ctx = restrict(browser.new_context(storage_state=storage_state, **kwargs))
             cookies = sol.get("cookies") or {}
             if cookies:
                 ctx.add_cookies([{"name": str(k), "value": str(v), "url": page_url}
@@ -730,7 +735,7 @@ def new_context(browser, storage_state: str, *, page_url: str = "https://x.com/h
             log(f"⚠️ تعذّر تجهيز Cloudflare مسبقاً: {e} — سياق عادي")
     if proxy.startswith("http"):
         kwargs["proxy"] = _proxy_dict(proxy)
-    ctx = browser.new_context(storage_state=storage_state, **kwargs)
+    ctx = restrict(browser.new_context(storage_state=storage_state, **kwargs))
     if rotated:
         # goto يعرف منه جلسة أي حساب يُبدَّل IPها عند سقوط المسار
         try:

@@ -379,19 +379,7 @@ class MainAgent:
                     except Exception as e:
                         print(f"Error fetching accounts from DB: {e}")
                 
-                # فحص مجلد الكوكيز كفولباك
-                from pathlib import Path
-                cookies_dir = Path(__file__).parent.parent / "x" / "cookies"
-                cookie_usernames = set()
-                if cookies_dir.exists():
-                    for f in sorted(cookies_dir.glob("*.json")):
-                        cookie_usernames.add(f.stem)
-                
-                # دمج: حسابات قاعدة البيانات + حسابات الكوكيز غير الموجودة بالقاعدة
-                db_usernames = {a.username for a in db_accounts} if db_accounts else set()
-                extra_cookie_accounts = cookie_usernames - db_usernames
-                
-                if db_accounts or extra_cookie_accounts:
+                if db_accounts:
                     accounts_msg = f"📋 **حساباتك النشطة:**\n\n"
                     
                     if db_accounts:
@@ -425,12 +413,7 @@ class MainAgent:
                                     accounts_msg += f" (آخر استخدام: {last_used})"
                                 accounts_msg += "\n"
                     
-                    if extra_cookie_accounts:
-                        accounts_msg += f"\n🌐 **X (Twitter) — من الكوكيز:**\n"
-                        for uname in sorted(extra_cookie_accounts):
-                            accounts_msg += f"  • 👤 {uname}\n"
-                    
-                    total = len(db_accounts) + len(extra_cookie_accounts)
+                    total = len(db_accounts)
                     accounts_msg += f"\n✅ لديك {total} حساب نشط"
                 else:
                     accounts_msg = "⚠️ لا توجد حسابات محفوظة حالياً.\n\nيمكنك إضافة حساب بقول: سجل دخول اليوزر [username] الباسورد [password]"

@@ -54,15 +54,25 @@ class MCPRegistry:
     def call(self, request: MCPRequest) -> MCPResponse:
         """Route a request to the server that owns the tool."""
         server = self._servers.get(request.context.get("server", ""))
-        if server is None:
+        if server is None and "server" not in request.context:
             server = self.server_for_tool(request.tool)
         if server is None:
             return MCPResponse.fail(f"no MCP server provides tool '{request.tool}'")
         try:
-            return server.call(request)
+            from ..security import gateway
+            from ..security.data import clean
+            gateway.mcp(server, request)
+            p = gateway.current.get()
+            with gateway.execution(p.user_id, request.employee_id):
+                result = server.call(request)
+            result.data = clean(result.data)
+            result.error = clean(result.error)
+            return result
+        except PermissionError as exc:
+            return MCPResponse.fail(str(exc))
         except Exception as exc:  # noqa: BLE001
             logger.exception("MCP call failed: %s.%s", server.name, request.tool)
-            return MCPResponse.fail(str(exc))
+            return MCPResponse.fail("MCP execution failed")
 
     def list_servers(self) -> List[Dict]:
         return [

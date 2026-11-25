@@ -51,6 +51,8 @@ async def require_current_user(
             detail={"revoked": "Token has been revoked", "inactive": "Account is disabled",
                     "user_not_found": "User not found"}.get(reason, "Invalid or expired token")
         )
+    from app.aeos.security.gateway import authenticated
+    authenticated(user)
     return user
 
 

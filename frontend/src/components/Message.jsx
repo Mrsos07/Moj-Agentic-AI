@@ -1,7 +1,10 @@
+import usePrivateMedia from '../hooks/usePrivateMedia'
 import { FiCopy, FiRefreshCw, FiThumbsUp, FiThumbsDown } from 'react-icons/fi'
 import { User } from 'lucide-react'
 
 const Message = ({ message }) => {
+  const path = message?.attachment?.url || ''
+  const privateURL = usePrivateMedia(path)
   const formatTime = (timestamp) => {
     const date = new Date(timestamp)
     return date.toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' })
@@ -50,8 +53,8 @@ const Message = ({ message }) => {
     const att = message?.attachment
     if (!att) return null
 
-    const url = att.url_full || att.url
-    if (!url) return null
+    const url = privateURL
+    if (!url) return <span>المرفق غير متاح حاليًا</span>
 
     if (att.kind === 'image') {
       return (
@@ -72,6 +75,7 @@ const Message = ({ message }) => {
       <div className="mt-2">
         <a
           href={url}
+          download={att.original_name || "attachment"}
           target="_blank"
           rel="noreferrer"
           className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-border-light dark:border-border-dark bg-card-light dark:bg-card-dark hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm"

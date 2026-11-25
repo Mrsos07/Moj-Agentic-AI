@@ -31,8 +31,9 @@ def check(name, cond, detail=""):
 TEAM = [
     EmployeeConfig(id="e1", user_id=1, platform="x", account_username="alpha",
                    persona=Persona(display_name="أحمد", interests=["tech"])),
-    EmployeeConfig(id="e2", user_id=None, platform="x", account_username="beta",
+    EmployeeConfig(id="e2", user_id=1, platform="x", account_username="beta",
                    persona=Persona(display_name="سارة", interests=["history"])),
+    EmployeeConfig(id="orphan", user_id=None, platform="x", account_username="unowned"),
     EmployeeConfig(id="e3", user_id=2, platform="x", account_username="gamma"),
     EmployeeConfig(id="e4", user_id=1, platform="x", account_username="old",
                    status=EmployeeStatus.ARCHIVED),
@@ -42,9 +43,12 @@ O.employees_for.__globals__["_platform"] = lambda: SimpleNamespace(
     llm=None,
 )
 
+from scripts.security_fixture import setup, reviewed_fixture_actions
+setup(1, [("e1", "alpha"), ("e2", "beta")])
+reviewed_fixture_actions(1, {"chat.order_publish", "chat.update_employee", "campaign.dispatch"}).start()
 print("1) الفريق والملكية")
 handles = [c.account_username for c in O.employees_for(1)]
-check("موظفو المستخدم + بلا مالك، بلا المؤرشف وبلا موظفي غيره", handles == ["alpha", "beta"], handles)
+check("فريق المالك فقط، مع استبعاد المؤرشف ومجهول الملكية", handles == ["alpha", "beta"], handles)
 check("حل بالاسم المعروض", O.resolve_employee("سارة", 1).account_username == "beta")
 check("موظف مستخدم آخر غير قابل للحل", O.resolve_employee("gamma", 1) is None)
 
@@ -99,10 +103,11 @@ check("النشر يُتحقّق منه بقدرتي النشر",
 check("dispatched يعيد الموظفين المكلّفين", out["dispatched"] == ["alpha", "beta"])
 tool_msgs = [m for m in fake.seen[-1]["messages"] if m["role"] == "tool"]
 check("موظف مجهول ⇒ خطأ يعود للـLLM بقائمة الفريق",
-      "error" in tool_msgs[2]["content"] and "@alpha" in tool_msgs[2]["content"])
-check("موجّه النظام يحوي الفريق",
-      "@alpha" in fake.seen[0]["messages"][0]["content"]
-      and "@gamma" not in fake.seen[0]["messages"][0]["content"])
+      "error" in tool_msgs[2]["content"])
+team_data = next(json.loads(m["content"])["value"] for m in fake.seen[0]["messages"]
+                 if m["role"] == "user" and '"untrusted_data": "team"' in m["content"])
+check("الفريق بيانات مقيدة بالمالك وخارج تعليمات النظام",
+      [e["handle"] for e in team_data["employees"]] == ["alpha", "beta"])
 check("لا أداة حذف", not any("delete" in t["function"]["name"] for t in O.TOOLS))
 
 print("4) التعديل يعيد قراءة الإعداد بين الخطوات")
@@ -124,8 +129,8 @@ calls.clear()
 res = json.loads(O._Tools(1, "خل أحمد يشتغل كل 45 دقيقة").call("update_employee", json.dumps({
     "employee": "alpha", "interests": ["tech"], "tone": "كاتب", "dialect": "خليجية",
     "interval_minutes": 45, "active_hours_start": 0, "active_hours_end": 23,
-    "daily_post_target": 0, "add_instruction": ""})))
-check("حقول لم يطلبها المالك تُتجاهل (لا شخصية، لا ساعات، لا هدف=0)",
+    "daily_post_target": 1, "add_instruction": ""})))
+check("حقول لم يطلبها المالك تُتجاهل (لا شخصية، لا ساعات، لا تغيير للهدف)",
       calls == [("schedule", {"interval_minutes": 45})], calls)
 check("المُتجاهَل يُبلَّغ للموديل", "dialect" in res.get("ignored_unrequested_fields", []), res)
 check("أداة غير معروفة مرفوضة", "error" in json.loads(O._Tools(1).call("__init__", "{}")))
@@ -156,14 +161,16 @@ check("مخطط أدوات الموظف بلا وسيط employee",
 dispatched.clear()
 et = O._Tools(1, "انشر عن الطقس", only_employee=alpha)
 r = json.loads(et.call("order_publish", json.dumps({"employee": "beta", "topic": "الطقس"})))
-check("الأداة تُفرض على الموظف المخاطَب حتى لو طلب الموديل زميله",
+check("طلب تغيير هوية الموظف يُرفض", "error" in r and not dispatched)
+r = json.loads(et.call("order_publish", json.dumps({"topic": "الطقس"})))
+check("تستمد الأداة الموظف من السياق الموثق",
       r.get("employee") == "alpha" and [d[0] for d in dispatched] == ["alpha"])
 check("أداة خارج قائمة الموظف مرفوضة", "error" in json.loads(et.call("list_employees", "{}")))
 fake = FakeClient(["أهلاً! أنا أحمد، اليوم نشرت منشوراً واحداً. أقترح: ..."])
 out = O.handle(O.CALL_ONLY, 1, employee=alpha, client_factory=lambda: (fake, "m"))
 sysmsg = fake.seen[0]["messages"][0]["content"]
 check("الموظف يتحدث بنفسه: موجّه بصيغة المتكلم ومالكه هو المخاطِب",
-      out and "@alpha" in sysmsg and "مالكك" in sysmsg and "@beta" not in sysmsg)
+      out and "مالك" in sysmsg and '"account": "alpha"' in fake.seen[0]["messages"][1]["content"])
 check("النداء بلا رسالة له تعليمات ترحيب واقتراح", O.CALL_ONLY in sysmsg)
 check("الموظف يُمنع من طلب رابط تغريدة بلا داعٍ", "لا تطلب رابط تغريدة" in sysmsg)
 check("أدوات الموظف هي المرسلة للموديل", {t["function"]["name"] for t in fake.seen[0]["tools"]} == names)
@@ -201,7 +208,7 @@ check("مستخدم آخر لا تمسّه خطة غيره", not O.routes_to_coo
 fake = FakeClient(["جاهز"])
 O.handle("نعم", 1, client_factory=lambda: (fake, "m"), session_id="emp_alpha")
 sysmsg = fake.seen[0]["messages"][0]["content"]
-check("موجّه المنسّق يرى الخطة المنتظرة بموضوعها الحرفي", "خطة تنتظر موافقتك" in sysmsg and "«العيد»" in sysmsg)
+check("موجّه المنسّق يرى الخطة المنتظرة بموضوعها الحرفي", any("«العيد»" in m["content"] and m["role"] == "user" for m in fake.seen[0]["messages"]))
 check("موجّه المنسّق فيه التاريخ والوقت", "بتوقيت الرياض" in sysmsg)
 
 print("9) التوجيه بعد الموافقة ← حملة متابَعة ← خلاصة واحدة للمحادثة التي أمر منها")

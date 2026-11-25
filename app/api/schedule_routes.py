@@ -49,7 +49,13 @@ async def schedule_event(
     استقبال JSON للمنشور وإنشاء ScheduleEvent مجدول بناءً على نية المحتوى.
     """
     # كان مجهول يستطيع جدولة نشر على أي حساب
+    from app.aeos.security import gateway
     label_or_404(payload.username, current_user)
+    try:
+        gateway.account("schedule_post", payload.username, payload.model_dump(),
+                        user_id=current_user.id, sensitive=True)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
     try:
         event = create_schedule_event(
             db=db,
@@ -99,6 +105,9 @@ async def schedule_callback(
         # ما عندنا تتبع محلي — رد فقط
         return {"ok": True, "message": "no local event found"}
 
+    if payload.cookie_label != event.username:
+        raise HTTPException(403, "callback account mismatch")
+
     # حدّث حالة الحدث المحلي
     if payload.success:
         event.status = "PUBLISHED"
@@ -136,15 +145,17 @@ async def schedule_callback(
             )
 
         try:
-            memory_service.add_message(
-                db=db,
-                conversation_id=conversation_id,
-                role="assistant",
-                content=msg,
-                intent="schedule_notification",
-                agent="Scheduler",
-            )
-            db.commit()
+            from app.aeos.security import gateway
+            with gateway.execution(event.user_id):
+                memory_service.add_message(
+                    db=db,
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=msg,
+                    intent="schedule_notification",
+                    agent="Scheduler",
+                )
+                db.commit()
         except Exception as e:
             print(f"[Webhook] Failed to notify chat: {e}")
 

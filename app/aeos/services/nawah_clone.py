@@ -102,8 +102,9 @@ def _server(slug: str = SLUG):
 
 def status(slug: str = SLUG) -> Dict[str, Any]:
     """لماذا لا تعمل نواه الآن (إن كانت لا تعمل) — بالعربية، للمالك."""
-    if not shutil.which("node"):
-        return {"ok": False, "reason": "Node.js غير مثبّت على الخادم (خادم نواه يعمل بـnode)"}
+    address = os.getenv("MCP_SANDBOX_SOCKET")
+    if not (Path(address).is_socket() if address else shutil.which("docker")):
+        return {"ok": False, "reason": "مشغّل أدوات Docker غير متاح"}
     bundle = _BUNDLE.get(slug, "clone-server.mjs")
     if not (_ROOT / "system" / "mcps" / SLUG / "dist" / bundle).exists():
         return {"ok": False, "reason": f"ملف نواه المجمّع {bundle} غير موجود: شغّل npm run build في system/mcps/nawah_clone"}

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from ..security.gateway import carry
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -49,7 +50,7 @@ def request_data(kind: str, cfg, user_id: Optional[int]) -> Optional[str]:
     if kind not in DATA_KINDS:
         return None
     threading.Thread(
-        target=_run, args=(kind, cfg, user_id), daemon=True,
+        target=carry(_run), args=(kind, cfg, user_id), daemon=True,
     ).start()
     return (f"🔎 جارِ جلب {_KIND_LABEL[kind]} للموظف **@{cfg.account_username}**… "
             "سأوافيك بالنتيجة هنا خلال لحظات. ⏳")
@@ -206,7 +207,7 @@ def _fetch_top_posts(mcp, cfg) -> str:
 def request_analysis(cfg, user_id: Optional[int]) -> str:
     """يبحث ويحلّل عبر كل المصادر (أخبار/ترند/تايم لاين/أهم بوستات) ثم يستنتج
     المواضيع المرتبطة باهتمامات الموظف — في الخلفية، ويرسل النتيجة للنقاش."""
-    threading.Thread(target=_run_analysis, args=(cfg, user_id), daemon=True).start()
+    threading.Thread(target=carry(_run_analysis), args=(cfg, user_id), daemon=True).start()
     return (f"🧠 جارِ البحث والتحليل عبر مصادر @{cfg.account_username} "
             "(الأخبار والترند والتايم لاين وأهم البوستات)… قد يستغرق دقيقة أو "
             "دقيقتين، ثم أعرض لك المواضيع المرتبطة باهتماماتك للنقاش. ⏳")
@@ -315,13 +316,15 @@ def _push(user_id: Optional[int], content: str, cfg=None) -> None:
 
         db = SessionLocal()
         try:
-            conv = memory_service.get_or_create_conversation(
-                db=db, user_id=int(user_id), session_id=session_id, title=title)
-            memory_service.add_message(
-                db=db, conversation_id=conv.id, role="assistant",
-                content=content, intent="aeos_employee_data", agent="AEOS",
-            )
-            db.commit()
+            from app.aeos.security import gateway
+            with gateway.execution(int(user_id), agent=cfg.id if cfg else '', conversation=session_id or ''):
+                conv = memory_service.get_or_create_conversation(
+                    db=db, user_id=int(user_id), session_id=session_id, title=title)
+                memory_service.add_message(
+                    db=db, conversation_id=conv.id, role="assistant",
+                    content=content, intent="aeos_employee_data", agent="AEOS",
+                )
+                db.commit()
         finally:
             db.close()
     except Exception:  # noqa: BLE001

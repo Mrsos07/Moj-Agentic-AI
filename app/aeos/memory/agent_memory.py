@@ -25,6 +25,8 @@
 """
 from __future__ import annotations
 
+from ..security.gateway import memory as authorize_memory
+
 import json
 import logging
 import math
@@ -156,7 +158,10 @@ def add(scope: str, content: str, kind: str = "fact", importance: int = 2,
     الدمج يرفع الأهمية للأعلى ويُحدّث النص للأحدث: تفضيل قاله المالك مرتين أهم
     من مرة، وصيغته الأخيرة أدق — بدل سجلّين متناقضين في الموجّه.
     """
-    content = _norm(content)[:_MAX_CONTENT]
+    authorize_memory([scope], "add")
+    from ..security.data import clean
+    content = _norm(clean(content))[:_MAX_CONTENT]
+    meta = clean(meta)
     if not content or kind not in ALL_KINDS:
         raise ValueError("ذكرى فارغة أو نوع غير معروف")
     importance = max(1, min(int(importance or 2), 5))
@@ -209,6 +214,7 @@ def add(scope: str, content: str, kind: str = "fact", importance: int = 2,
 
 def reinforce(memory_id: int, scope: str, max_importance: int = 4) -> bool:
     """درس تكرّر بصياغة أخرى: ارفع وزن الأصل بدل إضافة نسخة (أهمية حتى ``max_importance``)."""
+    authorize_memory([scope], "reinforce")
     M = _model()
     db = _session()
     try:
@@ -226,6 +232,8 @@ def reinforce(memory_id: int, scope: str, max_importance: int = 4) -> bool:
 
 def delete(memory_id: int, scopes: Optional[Iterable[str]] = None) -> bool:
     """احذف ذكرى — مقيّداً بالنطاقات المسموحة للطالب (لا يحذف ذاكرة غيره)."""
+    scopes = tuple(scopes or ())
+    authorize_memory(scopes, "delete", memory_id)
     M = _model()
     db = _session()
     try:
@@ -250,6 +258,7 @@ def _recency(dt: Optional[datetime], half_life_days: float = 30.0) -> float:
 def search(scopes: Sequence[str], query: str, k: int = 6,
            kinds: Sequence[str] = LONG_KINDS, min_relevance: float = 0.22) -> List[Dict[str, Any]]:
     """استرجاع هجين: صلة (دلالية أو لفظية) + أهمية + حداثة + تكرار استخدام."""
+    authorize_memory(scopes, "search")
     if not scopes or not _norm(query):
         return []
     M = _model()
@@ -290,6 +299,7 @@ def search(scopes: Sequence[str], query: str, k: int = 6,
 
 def core(scopes: Sequence[str], k: int = 6) -> List[Dict[str, Any]]:
     """الذكريات الجوهرية (أهمية ≥4): تفضيلات وتعليمات تحضر في كل موجّه."""
+    authorize_memory(scopes, "core")
     if not scopes:
         return []
     M = _model()
@@ -304,6 +314,7 @@ def core(scopes: Sequence[str], k: int = 6) -> List[Dict[str, Any]]:
 
 
 def recent(scope: str, kinds: Sequence[str] = ("event",), k: int = 5) -> List[Dict[str, Any]]:
+    authorize_memory([scope], "recent")
     M = _model()
     db = _session()
     try:
@@ -316,6 +327,7 @@ def recent(scope: str, kinds: Sequence[str] = ("event",), k: int = 5) -> List[Di
 
 def list_memories(scopes: Sequence[str], limit: int = 100,
                   kinds: Sequence[str] = LONG_KINDS + ("event",)) -> List[Dict[str, Any]]:
+    authorize_memory(scopes, "list_memories")
     M = _model()
     db = _session()
     try:
@@ -332,6 +344,7 @@ def _summary_key(conversation_id: int) -> str:
 
 
 def get_summary(conversation_id: int) -> Dict[str, Any]:
+    authorize_memory([f"conv:{conversation_id}"], "get_summary")
     M = _model()
     db = _session()
     try:
@@ -347,6 +360,7 @@ def purge_conversation(conversation_id: int, db=None) -> int:
     الملخّص مفتاحه ``conv:<id>`` فقط، وSQLite يعيد استخدام معرّف آخر صف محذوف: بلا
     هذا الحذف ترث محادثةٌ جديدة — قد تكون لمستخدم آخر — ملخّصَ محادثة محذوفة في سياقها.
     """
+    authorize_memory([f"conv:{conversation_id}"], "purge_conversation")
     M = _model()
     own = db is None
     db = db or _session()
@@ -364,6 +378,7 @@ def purge_conversation(conversation_id: int, db=None) -> int:
 def chat_context(db, conversation_id: int, keep: int = SHORT_TERM_TURNS,
                  exclude_last_user: str = "") -> Dict[str, Any]:
     """سياق قصير المدى: ملخّص ما مضى + آخر ``keep`` رسالة حرفياً."""
+    authorize_memory([f"conv:{conversation_id}"], "chat_context")
     from app.services.memory_service import memory_service
 
     msgs = memory_service.get_conversation_history(db, conversation_id, keep + 1)
@@ -380,6 +395,7 @@ def chat_context(db, conversation_id: int, keep: int = SHORT_TERM_TURNS,
 def compact(conversation_id: int, llm, keep: int = SHORT_TERM_TURNS,
             min_new: int = _COMPACT_MIN_NEW) -> bool:
     """ادمج الرسائل التي خرجت من النافذة الحرفية في الملخّص المتدحرج (تدريجياً)."""
+    authorize_memory([f"conv:{conversation_id}"], "compact")
     if not (llm and getattr(llm, "available", False)):
         return False
     from app.db.models import Message
@@ -583,7 +599,8 @@ def history_messages(ctx: Dict[str, Any]) -> List[Dict[str, str]]:
     """حوّل السياق القصير إلى رسائل chat (الملخّص كرسالة نظام في المقدمة)."""
     out: List[Dict[str, str]] = []
     if ctx.get("summary"):
-        out.append({"role": "system", "content": "ملخّص ما سبق في هذه المحادثة:\n" + ctx["summary"]})
+        from ..security.data import evidence
+        out.append(evidence("conversation_summary", ctx["summary"]))
     return out + list(ctx.get("turns") or [])
 
 
@@ -592,6 +609,7 @@ def prune_employee_memory(employee_id: str, keep_reflection: int = 150,
                           keep_conversation: int = 400) -> int:
     """احتفظ بذاكرة الدورة محدودة: الدروس الآلية والسجلات القديمة تتراكم بلا حد
     (قيس: 100 درس «chose to wait» لموظف واحد) فتُغرق الاسترجاع بلا فائدة."""
+    authorize_memory([employee_scope(employee_id)], "prune")
     from app.db.models import EmployeeMemoryRecord as R
 
     removed = 0

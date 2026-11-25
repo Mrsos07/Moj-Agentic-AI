@@ -139,8 +139,8 @@ def extract_tokens_from_cookies(username: str) -> Tuple[Optional[str], Optional[
         return None, None
 
     try:
-        with open(cookie_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        from app.aeos.security import sealed
+        data = sealed.load_browser_state(cookie_file)
 
         # الصيغة الجديدة: {"cookies": [...], "origins": []}
         # الصيغة القديمة (legacy): [...]

@@ -308,6 +308,9 @@ async def delete_conversation(
     Returns:
         نتيجة الحذف
     """
+    from app.aeos.security.gateway import api_decision
+    conversation_or_404(conversation_id, current_user, db)
+    api_decision("conversation.delete", "", {"id": conversation_id})
     try:
         user_id = current_user.id if current_user else None
         

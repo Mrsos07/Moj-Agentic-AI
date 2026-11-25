@@ -118,12 +118,13 @@ def launch_args() -> List[str]:
     if sys.platform.startswith("linux"):
         args.append("--disable-dev-shm-usage")         # /dev/shm في Docker صغير فيتعطّل العارض
         if hasattr(os, "geteuid") and os.geteuid() == 0:
-            args.append("--no-sandbox")                 # Chrome يرفض العمل كـroot مع العزل
+            raise PermissionError("Chromium requires a non-root sandboxed user")
     return args
 
 
 def _launch(p, channel: str, options: Dict[str, Any]):
     opts = dict(options, channel=channel) if channel else dict(options)
+    opts["chromium_sandbox"] = True
     return p.chromium.launch(**opts)
 
 

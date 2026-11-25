@@ -628,12 +628,22 @@ def check_skill_execution_context() -> None:
     from app.aeos.decision.engine import Decision
     from app.aeos.mcp.base import MCPResponse
 
+    from scripts.security_fixture import setup
+    from app.db import database
+    from app.db.models import AIEmployee
+    cfg = make_config()
+    setup(cfg.user_id, [(cfg.id, cfg.account_username)])
+    with database.SessionLocal() as db:
+        db.get(AIEmployee, cfg.id).mcp_servers_json = json.dumps(cfg.mcp_servers)
+        db.commit()
+
     for kind in ("reply", "quote"):
         cfg = make_config()
         spec = CS.save_spec(cfg, {"label": "Procedure", "target": {"source": "timeline"},
                                  "content": {"brief": "COMPARE_EVIDENCE"},
                                  "actions": [{"type": kind, "directive": "STATE_UNCERTAINTY"}]})
         ctx = make_context(cfg)
+        ctx.workspace = SimpleNamespace(employee_id=cfg.id)
         proposed = CS.CustomSkillRunner().propose(ctx)[0]
         ctx.scratch["decisions"] = [Decision(proposed, 0.8, "selected")]
         ctx.mcp = Mock()

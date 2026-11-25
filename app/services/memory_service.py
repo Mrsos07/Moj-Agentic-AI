@@ -9,7 +9,8 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 import json
 
-from app.db.database import get_db
+from app.aeos.security import gateway
+from app.aeos.security.data import clean
 from app.db.models import Conversation, Message, User
 
 
@@ -37,6 +38,7 @@ class MemoryService:
         Returns:
             المحادثة
         """
+        gateway.conversation(user_id, session_id, 'open')
         conversation = None
         
         # البحث عن محادثة موجودة — **ضمن مالكها**: معرّفات الجلسات متوقَّعة
@@ -44,11 +46,10 @@ class MemoryService:
         # بنفس الاسم: يقرأ سجلها، ويُحقن في سياق النموذج، وتُكتب رسائله داخلها.
         if session_id:
             q = db.query(Conversation).filter(Conversation.session_id == session_id)
-            if user_id:
-                q = q.filter(Conversation.user_id == user_id)
+            q = q.filter(Conversation.user_id == user_id)
             conversation = q.first()
         
-        if not conversation and user_id:
+        if not conversation and user_id and not session_id:
             # البحث عن آخر محادثة للمستخدم
             conversation = db.query(Conversation).filter(
                 Conversation.user_id == user_id
@@ -65,14 +66,14 @@ class MemoryService:
             conversation = Conversation(
                 user_id=user_id,
                 session_id=session_id,
-                title=title or "محادثة جديدة"
+                title=clean(title) or "محادثة جديدة"
             )
             db.add(conversation)
             db.commit()
             db.refresh(conversation)
         # عيّن العنوان المحدّد (مثل عنوان محادثة الموظف) إن كانت المحادثة بلا عنوان
         elif title and (conversation.title in (None, "", "محادثة جديدة")):
-            conversation.title = title
+            conversation.title = clean(title)
             db.commit()
             db.refresh(conversation)
         
@@ -105,6 +106,11 @@ class MemoryService:
         Returns:
             الرسالة المضافة
         """
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            gateway._deny("conversation-owner")
+        gateway.conversation(conversation.user_id, conversation.session_id, "append", conversation.id)
+        content, metadata = clean(content), clean(metadata)
         message = Message(
             conversation_id=conversation_id,
             role=role,
@@ -118,10 +124,6 @@ class MemoryService:
         db.add(message)
         
         # تحديث عنوان المحادثة من أول رسالة مستخدم
-        conversation = db.query(Conversation).filter(
-            Conversation.id == conversation_id
-        ).first()
-        
         if conversation and role == "user" and conversation.title == "محادثة جديدة":
             # استخدم أول 50 حرف من الرسالة كعنوان
             conversation.title = content[:50] + ("..." if len(content) > 50 else "")
@@ -150,6 +152,10 @@ class MemoryService:
         Returns:
             قائمة الرسائل
         """
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            gateway._deny("conversation-owner")
+        gateway.conversation(conversation.user_id, conversation.session_id, "read", conversation_id)
         messages = db.query(Message).filter(
             Message.conversation_id == conversation_id
         ).order_by(Message.created_at.desc()).limit(limit).all()
@@ -173,6 +179,7 @@ class MemoryService:
         Returns:
             قائمة المحادثات
         """
+        gateway.conversation(user_id, None, "list")
         conversations = db.query(Conversation).filter(
             Conversation.user_id == user_id
         ).order_by(Conversation.updated_at.desc()).limit(limit).all()

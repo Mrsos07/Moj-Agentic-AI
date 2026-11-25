@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from ..security.gateway import carry
 import time
 from typing import Any, Dict, List, Optional
 
@@ -492,7 +493,7 @@ def request_mission(cfg, mission: Dict[str, Any],
     label = describe(mission)
 
     threading.Thread(
-        target=dispatch_directed,
+        target=carry(dispatch_directed),
         args=(cfg, payload, expected, label),
         daemon=True,
     ).start()

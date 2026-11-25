@@ -47,6 +47,8 @@ TEAM = [
     EmployeeConfig(id="e2", user_id=1, platform="x", account_username="beta", cookie_label="beta"),
     EmployeeConfig(id="e3", user_id=2, platform="x", account_username="gamma", cookie_label="gamma"),
 ]
+from scripts.security_fixture import setup
+setup(1, [("e1", "alpha"), ("e2", "beta")])
 SAVED, NOTES, MEMS = [], [], []
 REPO = SimpleNamespace(list_all=lambda: TEAM, get=lambda i: next((c for c in TEAM if c.id == i), None),
                        save=lambda c: SAVED.append(c.id))
@@ -207,7 +209,7 @@ check("المنسّق يعرض المعاينة ويسأل", out and "أؤكد" 
 check("المعاينة باقية بعد رسالتها", len(XC.pending_for(1)) == 1)
 fake2 = FakeClient(["تمام، ما حذفت شيء."])
 O.handle("لا خلاص، وش أخبار الفريق؟", 1, client_factory=lambda: (fake2, "m"))
-check("الموجّه التالي رأى المعاينة المعلّقة", "confirmation_id=" in fake2.seen[0]["messages"][0]["content"])
+check("الموجّه التالي رأى المعاينة المعلّقة", any("confirmation_id=" in m["content"] for m in fake2.seen[0]["messages"] if m["role"] == "user"))
 check("رسالة لا تؤكد ⇒ المعاينة سقطت", XC.pending_for(1) == [])
 
 fake3 = FakeClient([[_call(1, "x_account", {"employee": "alpha", "action": "delete_post", "targets": ["1"]})],
@@ -225,7 +227,7 @@ check("x_account متاحة للموظف حين يُخاطَب", "x_account" in 
       and any(t["function"]["name"] == "x_account" for t in O._employee_tool_schemas()))
 emp_tools = O._Tools(1, "احذف آخر تغريدة لي", only_employee=alpha)
 r = json.loads(emp_tools.call("x_account", json.dumps({"employee": "beta", "action": "delete_post", "targets": ["آخر"]})))
-check("الموظف يُفرض على نفسه حتى لو مُرّر زميله", r.get("employee") == "@alpha", r)
+check("رفض تمرير زميل عبر سياق موظف مقيّد", "error" in r, r)
 
 print("7) التنفيذ الفعلي: مؤكد / لم يكن قائماً / فشل")
 XC._PENDING.clear()

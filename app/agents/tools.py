@@ -55,6 +55,12 @@ def _x_save_cookies_sync(cookies_data: Union[str, dict, list], label: str, user_
         
         print(f"[Tools] حفظ كوكيز حساب: {account_name}")
         
+        from app.aeos.security.gateway import account
+        dst = COOKIES_DIR / f"{account_name}.json"
+        replacing = dst.exists()
+        from app.aeos.security.ledger import fingerprint
+        account("replace_session" if replacing else "create_session", account_name, {"fingerprint": fingerprint(cookies_data)},
+                sensitive=replacing, user_id=user_id, creating=not replacing)
         # تحويل من JSON string إذا لزم الأمر
         if isinstance(cookies_data, str):
             cookies_data = json.loads(cookies_data)
@@ -69,8 +75,8 @@ def _x_save_cookies_sync(cookies_data: Union[str, dict, list], label: str, user_
         
         # حفظ الملف
         dst = COOKIES_DIR / f"{account_name}.json"
-        with open(dst, 'w', encoding='utf-8') as f:
-            json.dump(playwright_data, f, ensure_ascii=False, indent=2)
+        from app.aeos.security.sealed import save_browser_state
+        save_browser_state(dst, playwright_data, replace=replacing)
         
         cookie_filename = dst.name
         
@@ -134,6 +140,8 @@ def x_delete_account(account_name: str, user_id: Optional[int] = None) -> Dict[s
     Returns:
         نتيجة عملية الحذف
     """
+    from app.aeos.security.gateway import account
+    account("x_delete_account", safe_label(account_name), {}, sensitive=True, user_id=user_id)
     try:
         safe_account = safe_label(account_name)
         cookie_file = COOKIES_DIR / f"{safe_account}.json"
@@ -293,6 +301,8 @@ def x_post(label: str, text: str, media_url: Optional[str] = None, headless: boo
     Returns:
         نتيجة عملية النشر
     """
+    from app.aeos.security.gateway import account
+    account("x_post", safe_label(label), {"text": text, "media_url": media_url}, sensitive=False)
     try:
         # تشغيل في thread منفصل لتجنب تعارض asyncio
         loop = None
@@ -330,6 +340,8 @@ def x_delete_tweet(label: str, tweet_id: str, headless: bool = True) -> Dict[str
     Returns:
         نتيجة عملية الحذف
     """
+    from app.aeos.security.gateway import account
+    account("x_delete_tweet", safe_label(label), {"tweet_id": tweet_id}, sensitive=True)
     try:
         label = safe_label(label)
         print(f"[Tools] حذف تغريدة عبر API: label={label}, tweet_id={tweet_id}")
@@ -418,6 +430,8 @@ def x_update_profile(
     Returns:
         نتيجة عملية التحديث
     """
+    from app.aeos.security.gateway import account
+    account("x_update_profile", safe_label(label), {"name": name, "bio": bio, "location": location, "website": website, "avatar_url": avatar_url, "banner_url": banner_url}, sensitive=True)
     try:
         # تشغيل في thread منفصل لتجنب تعارض asyncio
         loop = None
@@ -459,6 +473,8 @@ def _x_like_sync(label: str, tweet_url: str, headless: bool = True) -> Dict[str,
 
 def x_like(label: str, tweet_url: str, headless: bool = True) -> Dict[str, Any]:
     """إعجاب بتغريدة على منصة X"""
+    from app.aeos.security.gateway import account
+    account("x_like", safe_label(label), {"tweet_url": tweet_url}, sensitive=False)
     try:
         loop = None
         try:
@@ -492,6 +508,8 @@ def _x_repost_sync(label: str, tweet_url: str, headless: bool = True) -> Dict[st
 
 def x_repost(label: str, tweet_url: str, headless: bool = True) -> Dict[str, Any]:
     """إعادة نشر تغريدة على منصة X"""
+    from app.aeos.security.gateway import account
+    account("x_repost", safe_label(label), {"tweet_url": tweet_url}, sensitive=False)
     try:
         loop = None
         try:
@@ -525,6 +543,8 @@ def _x_follow_sync(label: str, profile_url: str, headless: bool = True) -> Dict[
 
 def x_follow(label: str, profile_url: str, headless: bool = True) -> Dict[str, Any]:
     """متابعة حساب على منصة X"""
+    from app.aeos.security.gateway import account
+    account("x_follow", safe_label(label), {"profile_url": profile_url}, sensitive=False)
     try:
         loop = None
         try:
@@ -545,6 +565,8 @@ def x_follow(label: str, profile_url: str, headless: bool = True) -> Dict[str, A
 # ── إلغاء متابعة ──
 def x_unfollow(label: str, profile_url: str, headless: bool = True) -> Dict[str, Any]:
     """إلغاء متابعة حساب على منصة X"""
+    from app.aeos.security.gateway import account
+    account("x_unfollow", safe_label(label), {"profile_url": profile_url}, sensitive=True)
     try:
         label = safe_label(label)
         loop = None
@@ -584,6 +606,8 @@ def _x_reply_sync(label: str, tweet_url: str, reply_text: str, headless: bool = 
 
 def x_reply(label: str, tweet_url: str, reply_text: str, headless: bool = True) -> Dict[str, Any]:
     """الرد على تغريدة على منصة X"""
+    from app.aeos.security.gateway import account
+    account("x_reply", safe_label(label), {"tweet_url": tweet_url, "reply_text": reply_text}, sensitive=False)
     try:
         loop = None
         try:
@@ -604,6 +628,8 @@ def x_reply(label: str, tweet_url: str, reply_text: str, headless: bool = True) 
 # ── حفظ تغريدة (بوكمارك) ──
 def x_bookmark(label: str, tweet_url: str, headless: bool = True) -> Dict[str, Any]:
     """حفظ تغريدة في المفضلة على منصة X"""
+    from app.aeos.security.gateway import account
+    account("x_bookmark", safe_label(label), {"tweet_url": tweet_url}, sensitive=False)
     try:
         label = safe_label(label)
         loop = None
@@ -653,6 +679,9 @@ def x_login_account(username: str, password: str, email: str = "", headless: boo
         if not username or not password:
             return {"success": False, "message": "⚠️ اسم المستخدم وكلمة المرور مطلوبين"}
 
+        from app.aeos.security import gateway, ledger
+        gateway.login_accounts(user_id, [{"username": username, "password": password, "email": email}])
+
         # إرسال طلب التسجيل + callback_url لاستلام إشعار اكتمال في الشات
         headers = {"X-API-Key": _loginx_key(), "Content-Type": "application/json"}
         # موج يشتغل افتراضياً على 8000 — يقبل callback من localhost فقط
@@ -673,6 +702,7 @@ def x_login_account(username: str, password: str, email: str = "", headless: boo
             return {"success": False, "message": f"❌ فشل بدء التسجيل: {data.get('error', 'خطأ')}"}
         
         session_id = data.get("session_id")
+        ledger.login_session(user_id, session_id, register=True)
         mode = "مخفي 👻" if headless else "ظاهر 🖥️"
         
         return {
@@ -706,9 +736,12 @@ def x_login_status(session_id: str = "") -> Dict[str, Any]:
         # إذا ما عطى session_id، نجيب آخر عملية
         if not session_id:
             # نجرب نجيب آخر task
-            resp = requests.get(f"{LOGINX_BASE_URL}/api/cookies", headers=headers, timeout=5)
-            return {"success": True, "message": "💡 استخدم: `حالة التسجيل SESSION_ID`\n\nأو اكتب `حالة التسجيل` بعد بدء عملية تسجيل دخول."}
-        
+            return {"success": True, "message": "استخدم حالة التسجيل متبوعة بمعرّف جلستك."}
+        from app.aeos.security import gateway, ledger
+        gateway.owner()
+        principal = gateway.current.get()
+        ledger.login_session(principal.user_id, session_id)
+        gateway.decision("account.login_status", "", {"session": session_id})
         resp = requests.get(f"{LOGINX_BASE_URL}/api/status/{session_id}", headers=headers, timeout=10)
         data = resp.json()
         
@@ -748,6 +781,8 @@ def x_fetch_timeline(account_name: str, count: int = 50, user_id: Optional[int] 
         count: عدد التغريدات المطلوب سحبها (افتراضي 50)
         user_id: معرف مستخدم موج (اختياري - لربط التغريدات بمستخدم)
     """
+    from app.aeos.security.gateway import account
+    account("x_fetch_timeline", safe_label(account_name), {"count": count}, sensitive=False, user_id=user_id)
     try:
         from app.services.x_timeline_service import fetch_and_save_timeline
         safe_account = safe_label(account_name)
@@ -824,6 +859,8 @@ def x_set_account_category(account_name: str, category: str, user_id: Optional[i
         category: التصنيف (social/political/sports/tech/...)
         user_id: معرّف المستخدم
     """
+    from app.aeos.security.gateway import account
+    account("x_set_account_category", safe_label(account_name), {"category": category}, sensitive=True, user_id=user_id)
     try:
         if not user_id:
             return {"success": False, "message": "⚠️ لتحديد التصنيف يجب تسجيل الدخول"}
@@ -1026,6 +1063,12 @@ def x_post_to_category(category: str, content: str, user_id: Optional[int] = Non
                 ),
             }
 
+        from app.aeos.security import gateway
+        gateway.owner()
+        if gateway.current.get().user_id != user_id:
+            gateway._deny("bulk-owner")
+        gateway.decision("x.bulk_publish", "", {"accounts": sorted(a.username for a in accounts),
+                         "content": content, "rewrite": rewrite}, sensitive=True)
         # ننشر على كل حساب
         results = []
         for acc in accounts:
@@ -1088,6 +1131,8 @@ def x_view_timeline(account_name: str, limit: int = 10, offset: int = 0, user_id
         limit: عدد التغريدات المعروضة (افتراضي 10)
         offset: تخطي عدد معين للتصفح (افتراضي 0)
     """
+    from app.aeos.security.gateway import account
+    account("x_view_timeline", safe_label(account_name), {"limit": limit, "offset": offset}, sensitive=False, user_id=user_id)
     try:
         from app.services.x_timeline_service import get_saved_tweets, count_saved_tweets
         safe_account = safe_label(account_name)

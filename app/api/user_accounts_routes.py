@@ -94,6 +94,8 @@ async def delete_my_account(
     if account.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="ليس لديك صلاحية لحذف هذا الحساب")
     
+    from app.aeos.security.gateway import api_decision
+    api_decision("account.remove", "", {"account": account_id, "owner": account.user_id})
     success = account_service.delete_account(db, account_id, current_user.id)
     
     if not success:

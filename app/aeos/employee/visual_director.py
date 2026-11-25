@@ -210,7 +210,8 @@ def acceptable(verdict: Dict[str, Any]) -> bool:
 def _image_data_url(path: str, max_side: int = 768) -> str:
     from PIL import Image
 
-    with Image.open(path) as im:
+    from app.aeos.security import media
+    with media.read(path) as image_file, Image.open(image_file) as im:
         im = im.convert("RGB")
         im.thumbnail((max_side, max_side))
         buf = io.BytesIO()

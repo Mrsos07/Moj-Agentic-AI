@@ -95,6 +95,8 @@ async def delete_account_admin(
         raise HTTPException(status_code=404, detail="الحساب غير موجود")
     
     # الإدارة يمكنها حذف أي حساب
+    from app.aeos.security.gateway import api_decision
+    api_decision("admin.account.remove", "", {"account": account_id, "owner": account.user_id})
     success = account_service.delete_account(db, account_id, account.user_id)
     
     if not success:
@@ -120,6 +122,8 @@ async def update_account_status_admin(
     
     - **status**: active, inactive, expired, error
     """
+    from app.aeos.security.gateway import api_decision
+    api_decision("admin.account.status", "", {"account": account_id, "status": status, "detail": error_message})
     account = account_service.update_account_status(
         db=db,
         account_id=account_id,

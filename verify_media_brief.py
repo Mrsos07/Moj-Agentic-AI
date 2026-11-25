@@ -177,9 +177,12 @@ _brief = {"ok": True, "topic": "t", "headline": "عنوان", "summary": "خلا
 _builds = []
 _orig_build = _MB.build
 _MB.build = lambda topic, **k: (_builds.append(topic), _brief)[1]
-_emps = [NS(account_username="pol", persona=NS(role="محلل سياسي", interests=["politics"], tone="جاد"),
+from scripts.security_fixture import setup, reviewed_fixture_actions
+setup(1, [("e-pol", "pol"), ("e-spt", "spt")])
+reviewed_fixture_actions(1, {"campaign.dispatch"}).start()
+_emps = [NS(id="e-pol", user_id=1, account_username="pol", persona=NS(role="محلل سياسي", interests=["politics"], tone="جاد"),
             status=NS(value="active")),
-         NS(account_username="spt", persona=NS(role="رياضي", interests=["football"], tone="خفيف"),
+         NS(id="e-spt", user_id=1, account_username="spt", persona=NS(role="رياضي", interests=["football"], tone="خفيف"),
             status=NS(value="active"))]
 _orig_emps, _orig_platform = _O.employees_for, _O._platform
 _O.employees_for = lambda uid: _emps

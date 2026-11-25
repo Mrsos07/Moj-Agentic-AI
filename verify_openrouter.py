@@ -201,9 +201,26 @@ def verify_image() -> None:
     server = ImageMCP()
     if not check("خدمة الصور جاهزة", server.health()):
         return
-    resp = server.call(MCPRequest(
-        employee_id="verify", tool="generate_image",
-        params={"prompt": "شعار بسيط لروبوت ودود على خلفية بيضاء"}))
+    import tempfile
+    from unittest.mock import patch
+    from pathlib import Path
+    from app.db import database
+    from app.db.models import AIEmployee, User
+    from app.db.testing import use_temp_database
+    from app.aeos.security import gateway, media
+    engine = use_temp_database()
+    with database.SessionLocal() as db:
+        db.add(User(id=1, email="verify@example.com", password_hash="fixture"))
+        db.flush()
+        db.add(AIEmployee(id="verify", user_id=1, account_username="verify_acct"))
+        db.commit()
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(media, "_ROOT", Path(_tmp)), \
+            gateway.execution(1, "verify"):
+        resp = server.call(MCPRequest(
+            employee_id="verify", tool="generate_image",
+            params={"prompt": "شعار بسيط لروبوت ودود على خلفية بيضاء"}))
+    engine.dispose()
     ok = bool(getattr(resp, "success", False))
     detail = str(getattr(resp, "data", "") or getattr(resp, "error", ""))[:200]
     check("توليد صورة فعلي", ok, detail)

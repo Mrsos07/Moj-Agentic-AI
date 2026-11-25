@@ -24,11 +24,10 @@ class BrowserMCP(IMCPServer):
         if not url:
             return MCPResponse.fail("url is required")
         try:
-            import requests
+            from app.aeos.security.egress import read_page
             from bs4 import BeautifulSoup
 
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "AEOS/1.0"})
-            soup = BeautifulSoup(resp.text, "html.parser")
+            soup = BeautifulSoup(read_page(url), "html.parser")
             for tag in soup(["script", "style", "noscript"]):
                 tag.decompose()
             text = " ".join(soup.get_text(" ").split())

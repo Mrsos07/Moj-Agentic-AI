@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-import requests
+import time
 
 
 def is_url(s: str) -> bool:
@@ -57,24 +57,37 @@ def guess_ext_from_url_or_ct(url: str, content_type: Optional[str]) -> str:
     return ".bin"
 
 
-def download_to_temp(url: str, folder: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, stream=True, timeout=120, headers=headers, allow_redirects=True)
-    r.raise_for_status()
+def upload_path(folder, filename):
+    return str(Path(folder) / (uuid.uuid4().hex + (_sanitize_ext(Path(filename).suffix) or ".bin")))
 
-    # Guard against non-media responses (e.g. an og:image that redirects to an
-    # HTML page): attaching those to the X composer breaks the publish flow.
-    content_type = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-    if content_type and not (content_type.startswith("image/") or content_type.startswith("video/")):
-        raise ValueError(f"الرابط ليس ملف ميديا صالحاً (content-type={content_type or 'unknown'})")
 
-    ext = guess_ext_from_url_or_ct(url, r.headers.get("Content-Type"))
-    out_path = os.path.join(folder, f"dl_{uuid.uuid4().hex}{ext}")
-    with open(out_path, "wb") as f:
-        for chunk in r.iter_content(1024 * 1024):
-            if chunk:
-                f.write(chunk)
-    return out_path
+def download_to_temp(url: str, folder: str, label: str = "") -> str:
+    from app.aeos.security import egress, media
+
+    if url.startswith("https://media.moj.invalid/"):
+        with media.read(url, label) as payload:
+            dest = Path(upload_path(folder, ".media.png"))
+            dest.write_bytes(payload.read())
+            return str(dest)
+    limit = 40 * 1024 * 1024
+    deadline = time.monotonic() + 120
+    with egress.public_request("GET", url, stream=True, timeout=(5, 15)) as response:
+        if not 200 <= response.status_code < 300:
+            raise ValueError("تعذّر تنزيل الوسائط من الوجهة")
+        ct = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if not ct.startswith(("image/", "video/")):
+            raise ValueError("نوع ملف الوسائط غير مدعوم")
+        dest = Path(folder) / (uuid.uuid4().hex + guess_ext_from_url_or_ct(url, ct))
+        try:
+            with dest.open("xb") as output:
+                for chunk in response.iter_content(65536):
+                    if output.tell() + len(chunk) > limit or time.monotonic() > deadline:
+                        raise ValueError("تجاوز تنزيل الوسائط الحد المسموح")
+                    output.write(chunk)
+            return str(dest)
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
 
 
 def safe_label(label: str) -> str:

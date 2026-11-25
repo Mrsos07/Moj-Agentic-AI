@@ -11,8 +11,14 @@ import logging
 import re
 
 _PATTERNS = [
+    (re.compile(r"(/api/telegram/webhook/)[A-Za-z0-9_-]+"), r"\1***"),
+    (re.compile(r"\b\d{4,}:[A-Za-z0-9_-]{10,}"), "***"),
+    (re.compile(r"(/bot)\d+:[A-Za-z0-9_-]{10,}"), r"\1***"),
+    (re.compile(r"(?i)(X-Telegram-Bot-Api-Secret-Token[\s\x22\x27:=]+)[A-Za-z0-9_-]+"), r"\1***"),
     # ?token=… / &key=… / sig=… / ?tavilyApiKey=… في أي رابط (اسم المعامل يحوي الكلمة)
     (re.compile(r"(?i)([?&\s][\w.-]*(?:token|key|sig|secret|password|auth)[\w.-]*)=([^&\s\"']+)"), r"\1=***"),
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer|basic)\s+[^\s,;]+"), r"\1***"),
+    (re.compile(r"""(?i)(["']?(?:password|passwd|api[_-]?key|auth_token|ct0|refresh_token|access_token)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^,\s;}]+)"""), r"\1***"),
     # ترويسة Authorization
     (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+"), r"\1 ***"),
     # أي JWT ظاهر (ثلاثة مقاطع base64url تبدأ بـ eyJ)
@@ -35,6 +41,11 @@ class RedactSecretsFilter(logging.Filter):
         except Exception:  # noqa: BLE001 - رسالة لا تُنسَّق: اتركها كما هي
             return True
         clean = redact(msg)
+        if record.exc_info:
+            import traceback
+            record.exc_text = redact("".join(traceback.format_exception(*record.exc_info)))
+        if record.stack_info:
+            record.stack_info = redact(record.stack_info)
         if clean != msg:
             record.msg, record.args = clean, ()
         return True

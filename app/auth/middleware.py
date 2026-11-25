@@ -25,6 +25,8 @@ async def get_current_user(
             detail=_DETAIL.get(reason, "Could not validate credentials"),
             headers={"WWW-Authenticate": "Bearer"},
         )
+    from app.aeos.security.gateway import authenticated
+    authenticated(user)
     return user
 
 
@@ -41,9 +43,8 @@ async def get_current_user_optional(
 def require_permission(permission: str):
     """Decorator factory for permission checking (extensible)"""
     async def permission_checker(current_user: User = Depends(get_current_user)):
-        # Add permission logic here if needed
-        # For now, just check if user exists
-        if not current_user:
+        from app.auth.roles import has
+        if not has(current_user, permission):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not enough permissions"

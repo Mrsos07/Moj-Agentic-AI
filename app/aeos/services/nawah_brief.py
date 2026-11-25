@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from ..security.gateway import carry
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -86,7 +87,8 @@ def voice_for(cfg) -> Dict[str, Any]:
     """صوت الموظف لنداء brief: استنساخه المحفوظ إن وُجد، وإلا شخصيته (+ منشوراته) كصوت مؤقت."""
     vp = (getattr(cfg, "business_rules", None) or {}).get("voice_profile") or {}
     nid = (vp.get("nawah") or {}).get("id")
-    if nid and (NC.DATA_DIR / "clones" / f"{nid}.json").exists():
+    from app.aeos.security.sandbox import has_clone
+    if nid and has_clone(cfg, nid):
         return {"clone": nid, "count": 1}
     p = cfg.persona
     a = vp.get("analysis") or {}
@@ -232,7 +234,7 @@ def prepare(topic: str, user_id: Optional[int], employees=None) -> str:
     with _lock:
         running = key in _inflight
     if not running:
-        threading.Thread(target=build, args=(topic, user_id, employees), daemon=True,
+        threading.Thread(target=carry(build), args=(topic, user_id, employees), daemon=True,
                          name=f"nawah-brief-{abs(hash(key)) % 10000}").start()
     return "building"
 

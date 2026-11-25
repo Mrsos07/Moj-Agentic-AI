@@ -160,7 +160,19 @@ check("مستخدم عادي ← الطريق القديم /api/aeos/tools/exter
       client.post("/api/aeos/tools/external", headers=HU, json={"name": "x", "command": "python"}).status_code == 403)
 
 print("2) رفع ملف إعداد JSON (صيغة mcpServers) — خادم حقيقي")
-cfg_json = json.dumps({"mcpServers": {"echo": {"command": sys.executable, "args": [str(SERVER_FILE)],
+from scripts.security_fixture import setup, reviewed_fixture_actions
+from app.aeos.security import gateway, ledger, sealed
+setup(U, create_db=False)
+approved = {"external." + name for name in ("echo.echo", "echo.secret_env", "quick_bearer.lookup",
+            "quick_header.lookup", "quick_query.lookup", "pasted.lookup", "from_curl.lookup",
+            "legacysse.sse_lookup", "my_tool.hello", "env_srv.secret_env", "pkg_echo.echo")}
+approved.add("employee.tool.delete")
+reviewed_fixture_actions(U, approved).start()
+reviewed_fixture_actions(D, {"admin.skill.delete", "admin.mcp.delete"}).start()
+X.package_dir("echo").mkdir(parents=True, exist_ok=True)
+(X.package_dir("echo") / "server.py").write_text(SERVER_PY, encoding="utf-8")
+cfg_json = json.dumps({"mcpServers": {"echo": {"command": "{python}", "args": ["{package}/server.py"],
+                                               "allowed_tools": ["echo", "secret_env"],
                                                "env": {"ECHO_KEY": "s3cret-value"}}}})
 r = client.post("/api/admin/system/mcps/upload", headers=HD,
                 files={"file": ("servers.json", cfg_json.encode(), "application/json")},
@@ -171,7 +183,7 @@ check("المطوّر يرفع ← يُتصل بالخادم وتُكتشف أد
 manifest = json.loads((X._CATALOG_DIR / "echo" / "mcp.json").read_text(encoding="utf-8"))
 check("manifest في system/mcps/echo بلا قيم الأسرار", "s3cret-value" not in json.dumps(manifest)
       and manifest["env_keys"] == ["ECHO_KEY"])
-check("قيمة السرّ في data/ فقط", "s3cret-value" in X._SECRETS_PATH.read_text(encoding="utf-8"))
+check("قيمة السرّ في data/ فقط", "s3cret-value" not in X._SECRETS_PATH.read_text(encoding="utf-8") and X.get("echo")["env"]["ECHO_KEY"] == "s3cret-value")
 check("الواجهة لا ترى قيمة السرّ", "s3cret-value" not in json.dumps(
     client.get("/api/admin/system/mcps", headers=HA).json()))
 check("سُجّل فوراً في سجل الخوادم", BOOT._platform.registry.has("ext_echo"))
@@ -214,7 +226,7 @@ check("مخطط الأداة من inputSchema الخادم نفسه", schema["fu
 res = json.loads(O._Tools(U, "x").call("mcp__echo__echo", json.dumps({"text": "مرحبا"})))
 check("المنسّق يستدعي الأداة فعلاً (لمستخدم عادي — مدمجة لكل مستخدم)", res.get("result") == "echo:مرحبا", res)
 res = json.loads(O._Tools(U, "x").call("mcp__echo__secret_env", "{}"))
-check("الخادم يتلقى قيمة السرّ من data/ وقت التشغيل", res.get("result") == "env:s3cret-value", res)
+check("خادم stdio لا يتلقى مفتاح المالك في بيئته", res.get("result") == "env:-", res)
 block = O._system_capabilities_block()
 check("موجّه المنسّق يذكر مهارات النظام وأدواته", "team-weekly-report" in block and "echo" in block, block[-300:])
 emp_cfg = EmployeeConfig(id=uuid.uuid4().hex, user_id=U, platform="x", account_username="emp_u",
@@ -249,7 +261,7 @@ check("التعطيل ← يُلغى تسجيله فوراً", r.status_code == 
 check("مسؤول لا يعدّل (403)", client.patch("/api/admin/system/mcps/echo", headers=HA,
                                          json={"enabled": False}).status_code == 403)
 r = client.patch("/api/admin/system/mcps/echo", headers=HD, json={"env": {"ECHO_KEY": ""}})
-check("سرّ فارغ في التعديل = أبقِ القيمة", "s3cret-value" in X._SECRETS_PATH.read_text(encoding="utf-8"))
+check("سرّ فارغ في التعديل = أبقِ القيمة", "s3cret-value" not in X._SECRETS_PATH.read_text(encoding="utf-8") and X.get("echo")["env"]["ECHO_KEY"] == "s3cret-value")
 
 print("6) الحذف يفصل الخادم عن كل الموظفين")
 r = client.delete("/api/admin/system/mcps/pkg_echo", headers=HD)
@@ -292,12 +304,26 @@ check("الحذف", r.status_code == 200 and not (SS.SKILLS_DIR / "crisis-respon
 print("8) إدارة الأدوار من اللوحة")
 r = client.put(f"/api/admin/users/{U}", headers=HA, json={"role": "developer"})
 check("المسؤول لا يمنح دور المطوّر (403)", r.status_code == 403)
-r = client.put(f"/api/admin/users/{U}", headers=HA, json={"role": "admin"})
+def reviewed_role_change(headers, role):
+    body = {"role": role}
+    url = f"/api/admin/users/{U}"
+    blocked = client.put(url, headers=headers, json=body)
+    assert blocked.status_code == 403
+    ids = client.get("/api/agent-security/approvals", headers=headers).json()["ids"]
+    for cid in ids:
+        base = "/api/agent-security/approvals/" + cid
+        grant = client.get(base, headers=headers).json()
+        if grant["action"] == "admin.user.update" and grant["arguments"]["changes"] == body:
+            client.post(base + "/approve", json={"digest": grant["digest"]}, headers=headers).raise_for_status()
+            return client.put(url, headers=headers, json=body)
+    raise AssertionError("missing role change challenge")
+
+r = reviewed_role_change(HA, "admin")
 check("المسؤول يمنح «مسؤول» ← صف كامل (كان خطأ 500)", r.status_code == 200 and r.json()["role"] == "admin"
       and "conversations_count" in r.json(), r.text[:150])
 r = client.put(f"/api/admin/users/{D}", headers=HD, json={"role": "user"})
 check("لا أحد يغيّر دوره بنفسه", r.status_code == 400)
-r = client.put(f"/api/admin/users/{U}", headers=HD, json={"role": "developer"})
+r = reviewed_role_change(HD, "developer")
 check("المطوّر يمنح دور المطوّر", r.status_code == 200 and r.json()["role"] == "developer")
 perms = client.get("/api/admin/permissions", headers=HA).json()
 check("مصفوفة الصلاحيات تُعرض", {r["id"] for r in perms["roles"]} == {"user", "admin", "developer"}
@@ -327,7 +353,12 @@ sch = next(s for s in O._system_mcp_schemas() if s["function"]["name"] == "mcp__
 check("قراءة X تتطلب حساباً (account)", "account" in sch["function"]["parameters"]["required"])
 res = json.loads(O._Tools(U, "x").call("mcp__playwright_x__read_trends", '{"account": "someone_elses_acc"}'))
 check("قراءة X بحساب ليس للمالك ← مرفوضة قبل أي تشغيل للمتصفح", "ليس من حساباتك" in res.get("error", ""), res)
-res = json.loads(O._Tools(D, "x").call("mcp__playwright_x__read_trends", '{"account": "emp_u"}'))
+prior = gateway.current.set(None)
+try:
+    with gateway.execution(D):
+        res = json.loads(O._Tools(D, "x").call("mcp__playwright_x__read_trends", '{"account": "emp_u"}'))
+finally:
+    gateway.current.reset(prior)
 check("حتى المطوّر لا يقرأ بحساب مستخدم آخر عبر منسّقه", "ليس من حساباتك" in res.get("error", ""), res)
 r = client.post("/api/admin/system/mcps/upload", headers=HD,
                 files={"file": ("x.py", SERVER_PY.encode(), "text/x-python")})
@@ -467,6 +498,7 @@ class _H(BaseHTTPRequestHandler):
             CALLS.append((msg["params"]["name"], msg["params"]["arguments"]))
             auth = self.headers.get("Authorization", "")
             xk = self.headers.get("X-API-Key", "")
+            RECEIPTS.append((self.path, auth, xk))
             args = msg["params"]["arguments"]
             res = {"content": [{"type": "text", "text":
                                 f"found:{args.get('query') or args.get('url')}|{auth}|xk={xk}|path={self.path}"}]}
@@ -479,12 +511,14 @@ class _H(BaseHTTPRequestHandler):
 
 
 CALLS: list = []
+RECEIPTS: list = []
 SSE_Q: "queue.Queue" = queue.Queue()
 _srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
 _srv.daemon_threads = True
 PORT = _srv.server_address[1]
 threading.Thread(target=_srv.serve_forever, daemon=True).start()
 URL = f"http://127.0.0.1:{PORT}/mcp"
+os.environ["MCP_INTERNAL_ORIGINS"] = f"http://127.0.0.1:{PORT}"
 # «مالك آخر» مستخدم عادي: المسؤول يتجاوز العزل عمداً (طبقة الملكية) فلا يصلح لاختبار العزل
 P2, HA = _user("plain2@t.local", "user")
 emp_a = EmployeeConfig(id=uuid.uuid4().hex, user_id=P2, platform="x", account_username="emp_a",
@@ -502,9 +536,15 @@ r = client.post(base + "/upload", headers=HU, files={"file": ("s.json", stdio_cf
 check("خادم stdio من المالك ← مرفوض (تشغيل أوامر للمطوّر فقط)", r.status_code == 400 and "HTTP" in r.text, r.text[:150])
 
 _real_check = EM.check_public_url
+from unittest.mock import patch as fixture_patch
+from app.aeos.security import egress
+fixture_egress = fixture_patch.object(egress, "public_request",
+        side_effect=lambda method, url, **kwargs: requests.request(method, url, allow_redirects=False, **kwargs))
+import requests
+fixture_egress.start()
 EM.check_public_url = lambda url: None          # محاكاة خادم عام (الخادم التجريبي محلي)
 r = client.post(base, headers=HU, json={"name": "lookup", "url": URL, "headers": {"Authorization": "Bearer tok-123"},
-                                         "description": "أداة خاصة"})
+                                         "description": "أداة خاصة", "allowed_tools": ["lookup"]})
 srv_name = r.json().get("server", {}).get("name", "") if r.status_code == 200 else ""
 check("المالك يضيف أداة HTTP لموظفه ← تُكتشف أدواتها", r.status_code == 200
       and r.json()["server"]["tools"][0]["name"] == "lookup", r.text[:200])
@@ -512,9 +552,10 @@ check("اسمها في السجل يحمل معرّف الموظف", srv_name.st
 emp_now = BOOT._platform.repository.get(emp_cfg.id)
 check("تُربط بالموظف تلقائياً", srv_name in (emp_now.mcp_servers or []))
 check("قيمة الترويسة السرية لا تُعاد", "tok-123" not in r.text)
-check("الأسرار في data/employee_mcps خارج git", "tok-123" in (EM._DIR / f"{EM._tag(emp_cfg.id)}.json").read_text(encoding="utf-8"))
+check("الأسرار في data/employee_mcps خارج git", "tok-123" not in (EM._DIR / f"{EM._tag(emp_cfg.id)}.json").read_text(encoding="utf-8"))
+approved.add("external." + srv_name.removeprefix("ext_") + ".lookup")
 res = TS.call_tool(emp_now, srv_name, "lookup", {"query": "نفط"})
-check("الموظف يستدعي أداته الخاصة (والترويسة تصل للخادم)", "found:نفط|Bearer tok-123" in res.get("text", ""), res)
+check("الموظف يستدعي أداته الخاصة (والترويسة تصل للخادم)", "found:نفط|[redacted]" in res.get("text", ""), res)
 mine = client.get(f"/api/aeos/tools?employee_id={emp_cfg.id}", headers=HU).json()
 other = client.get(f"/api/aeos/tools?employee_id={emp_a.id}", headers=HA).json()
 check("تظهر في أدوات موظفها فقط", any(p["name"] == srv_name for p in mine["private"])
@@ -541,6 +582,7 @@ except Exception as exc:  # noqa: BLE001
     redir_err = f"{type(exc).__name__}: {exc}"
     redirected = "تحويل" not in str(exc) and "302" not in str(exc)
 check("تحويل (302) من الخادم ← مرفوض (لا SSRF عبر redirect)", not redirected, redir_err)
+fixture_egress.stop()
 EM.check_public_url = _real_check
 cfg_x = EM.get(emp_cfg.id, srv_name)
 r = EM.EmployeeMCPServer(cfg_x).call(__import__("app.aeos.mcp.base", fromlist=["MCPRequest"]).MCPRequest(
@@ -551,7 +593,7 @@ emp_now = BOOT._platform.repository.get(emp_cfg.id)
 check("المالك يحذف أداته ← تُفصل وتُلغى من السجل", r.status_code == 200 and srv_name not in (emp_now.mcp_servers or [])
       and not BOOT._platform.registry.has(srv_name))
 n = EM.purge(emp_cfg.id, BOOT._platform.registry)
-check("حذف الموظف ← تُمحى أدواته الخاصة وأسرارها", n == 1 and not (EM._DIR / f"{EM._tag(emp_cfg.id)}.json").exists())
+check("حذف الموظف ← تُمحى أدواته الخاصة وأسرارها", n == 1 and EM.list_for(emp_cfg.id) == [])
 
 print("11) لوحة التحكم: إضافة سريعة بالمفتاح ونوع الاتصال + خادم داخلي يبنيه المطوّر")
 
@@ -569,41 +611,43 @@ check("المسؤول لا يضيف ولا يختبر (403)",
       and client.post("/api/admin/system/mcps/test-connection", headers=HA, json=form).status_code == 403)
 r = client.post("/api/admin/system/mcps", headers=HD, json={**form, "allowed_tools": ["lookup"], "research_tool": "lookup"})
 check("إضافة سريعة (Bearer) ← مثبّت ومدمج فوراً", r.status_code == 200 and BOOT._platform.registry.has("ext_quick_bearer"), r.text[:150])
-check("المنسّق يستخدمه والمفتاح يصل في Authorization", "Bearer k-bearer-1" in _sys_call("quick_bearer"))
+check("المنسّق يستخدمه والمفتاح يصل في Authorization", "[redacted]" in _sys_call("quick_bearer"))
 check("المفتاح لا يُعاد للواجهة ولا يُكتب في mcp.json",
       "k-bearer-1" not in r.text and "k-bearer-1" not in (X._CATALOG_DIR / "quick_bearer" / "mcp.json").read_text(encoding="utf-8"))
 
-r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "quick_header", "url": URL,
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "quick_header", "allowed_tools": ["lookup"], "url": URL,
                                                              "auth": {"mode": "header", "name": "X-API-Key", "key": "k-hdr-2"}})
-check("ترويسة مخصّصة (X-API-Key)", r.status_code == 200 and "xk=k-hdr-2" in _sys_call("quick_header"), r.text[:150])
+check("ترويسة مخصّصة (X-API-Key)", r.status_code == 200 and "xk=[redacted]" in _sys_call("quick_header"), r.text[:150])
 
-r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "quick_query", "url": URL,
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "quick_query", "allowed_tools": ["lookup"], "url": URL,
                                                              "auth": {"mode": "query", "name": "apiKey", "key": "k-q-3"}})
 man = (X._CATALOG_DIR / "quick_query" / "mcp.json").read_text(encoding="utf-8")
-check("معامل في الرابط ← يصل للخادم ولا يُحفظ في الرابط", r.status_code == 200 and "apiKey=k-q-3" in _sys_call("quick_query")
+check("معامل في الرابط ← يصل للخادم ولا يُحفظ في الرابط", r.status_code == 200 and "k-q-3" not in _sys_call("quick_query") and "apiKey=k-q-3" in RECEIPTS[-1][0]
       and "k-q-3" not in man and '"query_keys": [\n    "apiKey"' in man, man[:300])
-r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "pasted", "url": URL + "?tavilyApiKey=k-paste-4&lang=ar",
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "pasted", "allowed_tools": ["lookup"], "url": URL + "?tavilyApiKey=k-paste-4&lang=ar",
                                                              "auth": {"mode": "none"}})
 man = (X._CATALOG_DIR / "pasted" / "mcp.json").read_text(encoding="utf-8")
 out = _sys_call("pasted")
 check("رابط بمفتاح ملصوق (مثل Tavily) ← يُنزع المفتاح تلقائياً ويُحفظ كسرّ",
-      r.status_code == 200 and "k-paste-4" not in man and "lang=ar" in man and "tavilyApiKey=k-paste-4" in out, man[:250])
+      r.status_code == 200 and "k-paste-4" not in man and "lang=ar" in man and "k-paste-4" not in out and "tavilyApiKey=k-paste-4" in RECEIPTS[-1][0], man[:250])
 r = client.patch("/api/admin/system/mcps/quick_query", headers=HD, json={"query_secrets": {"apiKey": "k-q-NEW"}})
-check("تحديث مفتاح معامل الرابط من اللوحة", r.status_code == 200 and "apiKey=k-q-NEW" in _sys_call("quick_query"))
+check("تحديث مفتاح معامل الرابط من اللوحة", r.status_code == 200 and "k-q-NEW" not in _sys_call("quick_query") and "apiKey=k-q-NEW" in RECEIPTS[-1][0])
 r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "bad", "url": URL, "auth": {"mode": "bearer", "key": ""}})
 check("طريقة مفتاح بلا مفتاح ← رسالة واضحة (400)", r.status_code == 400 and "المفتاح" in r.json()["detail"])
 r = client.post("/api/admin/system/mcps/test-connection", headers=HD, json={"name": "dead", "url": "http://127.0.0.1:1/mcp"})
-check("خادم لا يرد ← 502 بسبب واضح ولا يُحفظ", r.status_code == 502 and not (X._CATALOG_DIR / "dead").exists())
+check("وجهة داخلية خارج قائمة السماح تُرفض ولا تُحفظ", r.status_code == 400 and not (X._CATALOG_DIR / "dead").exists())
 
 tpl = client.get("/api/admin/system/mcps/template", headers=HD)
 check("قالب الخادم الداخلي يُنزَّل", tpl.status_code == 200 and "tools/list" in tpl.text and "HANDLERS" in tpl.text)
 r = client.post("/api/admin/system/mcps/upload", headers=HD, files={"file": ("my_tool.py", tpl.text.encode("utf-8"), "text/x-python")})
+client.patch("/api/admin/system/mcps/my_tool", headers=HD, json={"allowed_tools": ["hello"]}).raise_for_status()
 check("القالب نفسه خادم يعمل: يُرفع ويُثبّت ويستجيب", r.status_code == 200 and r.json()["saved"][0]["tools"][0]["name"] == "hello"
       and "أهلاً سعود" in O._Tools(U, "x").call("mcp__my_tool__hello", '{"name": "سعود"}'), r.text[:200])
 r = client.post("/api/admin/system/mcps/upload", headers=HD, data={"env": "ECHO_KEY=pkg-secret-5"},
                 files={"file": ("env_srv.py", SERVER_PY.encode(), "text/x-python")})
-check("خادم داخلي بمفاتيح (متغيّرات بيئة) ← تصله وقت التشغيل ولا تُكتب في mcp.json",
-      r.status_code == 200 and "env:pkg-secret-5" in O._Tools(U, "x").call("mcp__env_srv__secret_env", "{}")
+client.patch("/api/admin/system/mcps/env_srv", headers=HD, json={"allowed_tools": ["secret_env"]}).raise_for_status()
+check("مفاتيح الخادم المحلي محفوظة ولا تدخل بيئة الحاوية أو mcp.json",
+      r.status_code == 200 and "env:-" in O._Tools(U, "x").call("mcp__env_srv__secret_env", "{}")
       and "pkg-secret-5" not in (X._CATALOG_DIR / "env_srv" / "mcp.json").read_text(encoding="utf-8"))
 from app.core.log_redaction import redact  # noqa: E402
 
@@ -658,8 +702,8 @@ check("مقتطف بلا رابط ولا أمر ← رسالة واضحة (400)"
 
 # من البداية للنهاية: لصق curl ← استخراج ← تثبيت ← المنسّق يستخدمه بالمفتاح
 form = _snip(f'curl -X POST {URL} -H "Authorization: Bearer e2e-key-7"').json()["forms"][0]
-r = client.post("/api/admin/system/mcps", headers=HD, json={**form, "name": "from_curl"})
-check("لصق curl ← تثبيت ← المنسّق يتصل بالمفتاح الصحيح", r.status_code == 200 and "Bearer e2e-key-7" in _sys_call("from_curl"), r.text[:150])
+r = client.post("/api/admin/system/mcps", headers=HD, json={**form, "name": "from_curl", "allowed_tools": ["lookup"]})
+check("لصق curl ← تثبيت ← المنسّق يتصل بالمفتاح الصحيح", r.status_code == 200 and "[redacted]" in _sys_call("from_curl"), r.text[:150])
 
 print("12.5) «اتصال ناجح — 0 أداة» لم يعد ممكناً: تشخيص واضح بدل نجاح زائف")
 
@@ -705,7 +749,7 @@ r = client.post("/api/admin/system/mcps/test-connection", headers=HD,
 check("خادم SSE القديم (/sse) ← يعمل الآن (كان مرفوضاً)", r.status_code == 200
       and [t["name"] for t in r.json()["tools"]] == ["sse_lookup"] and r.json()["form"]["http_mode"] == "sse", r.text[:250])
 r = client.post("/api/admin/system/mcps", headers=HD,
-                json={"name": "legacysse", "url": f"http://127.0.0.1:{PORT}/legacy/sse"})
+                json={"name": "legacysse", "allowed_tools": ["sse_lookup"], "url": f"http://127.0.0.1:{PORT}/legacy/sse"})
 sse_out = O._Tools(U, "x").call("mcp__legacysse__sse_lookup", json.dumps({"query": "نفط"})) if r.status_code == 200 else ""
 check("تثبيت خادم SSE + المنسّق يستدعي أداته", "sse:نفط" in sse_out, (r.text[:150], sse_out[:150]))
 # حالة TrendsMCP الحقيقية: التوثيق يعرض curl لواجهة REST (/api) — خادم MCP على /mcp
@@ -751,11 +795,14 @@ check("أدوات الكتابة/الحذف لا يستدعيها الموظف �
 # خوادم سابقة في الكتالوج المؤقت ليست موضوع هذا القسم: نطاقها للمنسّق فقط
 for _c in X.list_configs():
     X.update(_c["slug"], {"scope": {"employees": False}}, BOOT._platform.registry)
-r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "autotool", "url": URL + "?full=1",
+r = client.post("/api/admin/system/mcps", headers=HD, json={"name": "autotool", "url": URL + "?full=1", "allowed_tools": ["lookup", "fetch_page"],
                                                              "scope": {"coordinator": True, "employees": True}})
 check("ثُبّت خادم نظام (بلا أداة بحث معيّنة يدوياً)", r.status_code == 200 and not r.json()["server"]["research_tool"], r.text[:150])
 emp_t = make_config()
 emp_t.id, emp_t.mcp_servers = uuid.uuid4().hex, []          # موظف لم يُربط بأي شيء
+emp_t.user_id = U
+BOOT._platform.repository.save(emp_t)
+approved.update({"external.autotool.lookup", "external.autotool.fetch_page"})
 tools_av = TU.available(emp_t)
 check("متاح للموظف تلقائياً دون ربط يدوي", {t["tool"] for t in tools_av if t["server"] == "ext_autotool"}
       == {"lookup", "fetch_page"}, tools_av)
