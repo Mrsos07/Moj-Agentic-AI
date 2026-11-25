@@ -67,12 +67,13 @@ IS._ROOT = TMP / "employees"
 IS.generated_dir = lambda: GEN
 
 
-def fake_png(tag):
+def fake_png(tag, employee=None):
     """صورة معاينة مزيّفة كما يحفظها سيرفر الهويات: /static/generated/<32 hex>.png"""
     data = b"\x89PNG\r\n\x1a\n" + hashlib.sha256(tag.encode()).digest() * 4
     name = hashlib.sha256(("n" + tag).encode()).hexdigest()[:32]
     (GEN / f"{name}.png").write_bytes(data)
-    return f"{identity_bridge.IDENTITY_BASE_URL}/static/generated/{name}.png", data
+    url = f"{identity_bridge.IDENTITY_BASE_URL}/static/generated/{name}.png"
+    return (IS.preview_url(employee, url) if employee else url), data
 
 
 # ── حدود النظام مُستبدَلة ──
@@ -120,10 +121,23 @@ def emp(i, user=1):
                           persona=Persona(display_name=f"اسم {i}", bio="نبذة البرسونا", role="محلل سياسي"))
 
 
+from scripts.security_fixture import setup, reviewed_fixture_actions
+from app.aeos.security import gateway
+from app.db import database
+from app.db.models import User, AIEmployee
+setup(1, [(f"emp{i}", f"acc{i}") for i in (1, 2, 3, 5, 6, 8, 11)])
+with database.SessionLocal() as db:
+    db.add(User(id=7, email="second@example.com", password_hash="fixture"))
+    db.flush()
+    db.add(AIEmployee(id="emp4", user_id=7, account_username="acc4"))
+    db.commit()
+reviewed_fixture_actions(1, {"identity.apply"}).start()
+reviewed_fixture_actions(7, {"identity.apply"}).start()
+
 print("1) الاعتماد يثبّت بايتات الصور نفسها ويرفعها كملفات")
 cfg = emp(1)
-a_url, a_bytes = fake_png("avatar-1")
-b_url, b_bytes = fake_png("banner-1")
+a_url, a_bytes = fake_png("avatar-1", cfg)
+b_url, b_bytes = fake_png("banner-1", cfg)
 ack = SVC.request_apply_identity(cfg, 1, identity={"name": "رأي وتحليل", "bio": "نبذة معتمدة",
                                                    "avatar_url": a_url, "banner_url": b_url})
 label, sent = CALLS[-1]
@@ -144,7 +158,7 @@ check("نسخة الصورة المطبَّقة محفوظة في مجلد ال�
       Path(IS.media_path(applied, "avatar")).read_bytes() == a_bytes)
 
 NEXT["res"] = {"success": True, "media": {"avatar": "unconfirmed"}}
-a2_url, a2_bytes = fake_png("avatar-2")
+a2_url, a2_bytes = fake_png("avatar-2", cfg)
 SVC.request_apply_identity(cfg, 1, identity={"avatar_url": a2_url})
 msg = PUSHED[-1][1]
 check("بلا تأكيد صريح من X ← لا «✓» بل «لم يصلني تأكيد»", "لم يصلني تأكيد" in msg and "✓" not in msg, msg)
@@ -157,7 +171,7 @@ NEXT["res"] = {"success": True, "media": {"avatar": "confirmed", "banner": "conf
 
 print("2) ما لم يعتمده المالك لا يُطبَّق أبداً")
 n = len(CALLS)
-gone_url, _ = fake_png("expired")
+gone_url, _ = fake_png("expired", cfg)
 (GEN / Path(gone_url).name).unlink()
 e1 = raises(lambda: SVC.request_apply_identity(cfg, 1, identity={"avatar_url": gone_url}), IS.IdentityError)
 check("صورة معاينة حذفها المولّد (بعد ساعة) ← رفض «أعد توليد» لا تطبيق صورة أخرى",
@@ -173,7 +187,7 @@ check("رابط غير صور المعاينة (خارجي/داخلي/مسار �
 bogus = hashlib.sha256(b"bogus").hexdigest()[:32]
 (GEN / f"{bogus}.png").write_bytes(b"<html>not an image</html>")
 e2 = raises(lambda: SVC.request_apply_identity(
-    cfg, 1, identity={"avatar_url": f"/static/generated/{bogus}.png"}), IS.IdentityError)
+    cfg, 1, identity={"avatar_url": IS.preview_url(cfg, f"/static/generated/{bogus}.png")}), IS.IdentityError)
 check("ملف ليس صورة ← مرفوض", bool(e2) and "تالف" in str(e2) and len(CALLS) == n, e2)
 check("هوية بلا أي حقل ← مرفوضة", bool(raises(lambda: SVC.request_apply_identity(
     cfg, 1, identity={"name": " "}), IS.IdentityError)))
@@ -198,8 +212,8 @@ cfg2 = emp(2)
 REPO = {cfg2.id: cfg2}
 B.get_platform = lambda: NS(repository=NS(get=lambda i: REPO.get(i)))
 SVC._start = lambda cfg, record: None            # العملية ماتت قبل أن يُنفَّذ
-a3_url, a3_bytes = fake_png("avatar-3")
-b3_url, b3_bytes = fake_png("banner-3")
+a3_url, a3_bytes = fake_png("avatar-3", cfg2)
+b3_url, b3_bytes = fake_png("banner-3", cfg2)
 SVC.request_apply_identity(cfg2, 1, identity={"name": "ن", "avatar_url": a3_url, "banner_url": b3_url})
 check("الاعتماد محفوظ على القرص قبل التنفيذ", IS._read("emp2", "pending.json") is not None)
 for f in GEN.glob("*"):
@@ -215,7 +229,7 @@ check("ويُبلَّغ المالك أن التطبيق استُؤنف ثم ب�
 check("ولا يُستأنف مرة ثانية", SVC.resume_pending() == 0)
 
 SVC._start = lambda cfg, record: None
-a4_url, _ = fake_png("avatar-4")
+a4_url, _ = fake_png("avatar-4", cfg2)
 rec = IS.create_pending(cfg2, 1, {"avatar_url": a4_url})
 rec["attempts"] = IS.MAX_ATTEMPTS
 IS._write("emp2", "pending.json", rec)
@@ -225,12 +239,12 @@ check("قُطع 3 مرات ← لا محاولة رابعة، ويُطلب إع�
       SVC.resume_pending() == 0 and len(CALLS) == n and "أعد توليد المعاينة واعتمادها" in PUSHED[-1][1]
       and IS._read("emp2", "pending.json") is None)
 SVC._start = lambda cfg, record: None
-a5_url, _ = fake_png("avatar-5")
+a5_url, _ = fake_png("avatar-5", cfg2)
 rec = IS.create_pending(cfg2, 1, {"avatar_url": a5_url})
 rec["approved_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 IS._write("emp2", "pending.json", rec)
 cfg3 = emp(3)
-a6_url, _ = fake_png("avatar-6")
+a6_url, _ = fake_png("avatar-6", cfg3)
 IS.create_pending(cfg3, 1, {"avatar_url": a6_url})   # موظف حُذف لاحقاً (ليس في المستودع)
 SVC._start = sync_start
 n = len(CALLS)
@@ -238,8 +252,8 @@ check("اعتماد عمره يومان أو لموظف محذوف ← لا يُ
       SVC.resume_pending() == 0 and len(CALLS) == n and IS._read("emp3", "pending.json") is None)
 
 SVC._start = lambda cfg, record: None
-a7_url, _ = fake_png("avatar-7")
-a8_url, a8_bytes = fake_png("avatar-8")
+a7_url, _ = fake_png("avatar-7", cfg2)
+a8_url, a8_bytes = fake_png("avatar-8", cfg2)
 old = IS.create_pending(cfg2, 1, {"avatar_url": a7_url})
 new = IS.create_pending(cfg2, 1, {"avatar_url": a8_url})
 n = len(CALLS)
@@ -252,7 +266,7 @@ SVC._start = sync_start
 import app.aeos.mcp.employee_mcp as EMCP  # noqa: E402
 
 EMCP.purge = lambda *a, **k: None
-IS.create_pending(cfg2, 1, {"avatar_url": fake_png("avatar-9")[0]})
+IS.create_pending(cfg2, 1, {"avatar_url": fake_png("avatar-9", cfg2)[0]})
 fake_self = NS(_repo=NS(get=lambda i: cfg2, save=lambda c: c, delete=lambda i: True),
                _graph_memory=NS(clear=lambda i: None), container=NS(resolve=lambda k: None))
 B.AEOSPlatform.delete_employee(fake_self, "emp2")
@@ -266,7 +280,7 @@ GEN_CALLS = []
 
 def fake_generate(cfg, entities=None, with_images=True):
     GEN_CALLS.append(cfg.id)
-    u, _ = fake_png(f"gen-{len(GEN_CALLS)}")
+    u, _ = fake_png(f"gen-{len(GEN_CALLS)}", cfg)
     return {"name": "مولّد", "bio": "جديد", "avatar_url": u, "banner_url": ""}
 
 
@@ -278,9 +292,8 @@ shown = IS.recent_preview(cfg4.id, 7)
 check("معاينة الشات تُحفظ وتعرض الصورة وتدلّ على «طبّق الهوية»",
       shown is not None and shown["identity"]["avatar_url"] in txt and "طبّق الهوية على الموظف" in txt, txt)
 shown_bytes = (GEN / Path(shown["identity"]["avatar_url"]).name).read_bytes()
-RAN_NEW = []
-REAL_RUN_NEW = SVC._run_new
-SVC._run_new = lambda cfg, user_id, entities: RAN_NEW.append((cfg.id, user_id))
+principal_token = gateway.current.set(None)
+gateway.bind(7)
 gen_before = len(GEN_CALLS)
 REPO4 = NS(get_by_account=lambda p, a: cfg4 if a == "acc4" else None, list_all=lambda: [cfg4],
            get=lambda i: cfg4 if i == cfg4.id else None)
@@ -289,21 +302,19 @@ from app.aeos.services import employee_commands as EC  # noqa: E402
 
 out = EC.handle("employee_apply_identity", {}, "طبّق الهوية على الموظف", None, 7)
 check("«طبّق الهوية على الموظف» ← تُطبَّق الصورة المعروضة نفسها بلا توليد جديد",
-      CALLS[-1][1].get("avatar_bytes") == shown_bytes and len(GEN_CALLS) == gen_before and not RAN_NEW, out)
+      CALLS[-1][1].get("avatar_bytes") == shown_bytes and len(GEN_CALLS) == gen_before, out)
 check("والمعاينة تُستهلك (لا تُطبَّق مرة أخرى بالخطأ)", IS.recent_preview(cfg4.id, 7) is None)
 IS.remember_preview(cfg4.id, 7, shown["identity"])
-SVC.apply_from_chat(cfg4, 8, {})
-check("معاينة مالك آخر لا تُستخدم ← توليد صريح جديد", wait_for(lambda: RAN_NEW == [(cfg4.id, 8)]))
+check("معاينة مالك آخر تُرفض", bool(raises(lambda: SVC.apply_from_chat(cfg4, 8, {}), PermissionError)))
 old_preview = IS._read(cfg4.id, "preview.json")
 old_preview["at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
 IS._write(cfg4.id, "preview.json", old_preview)
+prior_calls = len(CALLS)
 SVC.apply_from_chat(cfg4, 7, {})
-check("معاينة أقدم من صلاحية صورها ← لا تُطبَّق", wait_for(lambda: len(RAN_NEW) == 2))
-SVC._run_new = REAL_RUN_NEW
-n = len(CALLS)
-SVC._run_new(cfg4, 7, {})
-check("طلب «هوية جديدة» بلا معاينة ← يُثبَّت ما وُلّد ويُرفع كملف",
-      len(CALLS) == n + 1 and CALLS[-1][1].get("avatar_bytes", b"").startswith(b"\x89PNG"))
+check("انتهاء صلاحية المعاينة يولّد معاينة جديدة وينتظر الاعتماد",
+      len(CALLS) == prior_calls and IS.recent_preview(cfg4.id, 7) is not None)
+gateway.current.reset(principal_token)
+
 
 print("5) الإنشاء التلقائي لا يرفع صورة لم يعتمدها المالك")
 cfg5 = emp(5)
@@ -314,7 +325,7 @@ check("اسم + نبذة البرسونا فقط — بلا أي صورة", res[
 check("لا مولّد صور في مسار الإنشاء", "mcp" not in inspect.signature(ONCREATE.apply_persona_identity_async).parameters
       and not hasattr(ONCREATE, "_generate_avatar"))
 SVC._start = lambda cfg, record: None
-IS.create_pending(cfg5, 1, {"avatar_url": fake_png("avatar-10")[0]})
+IS.create_pending(cfg5, 1, {"avatar_url": fake_png("avatar-10", cfg5)[0]})
 SVC._start = sync_start
 n = len(CALLS)
 res = ONCREATE.apply_persona_identity(cfg5)
@@ -590,8 +601,8 @@ IS.save_x_profile(cfg11.id, "acc11", {"name": "قبل", "avatar_url": "https://p
 NEXT["res"] = {"success": True, "media": {"avatar": "unconfirmed", "banner": "unconfirmed"}}
 X_AFTER["snap"] = {"name": "بعد", "avatar_url": "https://pbs.twimg.com/profile_images/2/new_400x400.jpg",
                    "banner_url": "https://pbs.twimg.com/profile_banners/1/100/1500x500"}
-a11, _ = fake_png("avatar-11")
-b11, _ = fake_png("banner-11")
+a11, _ = fake_png("avatar-11", cfg11)
+b11, _ = fake_png("banner-11", cfg11)
 SVC.request_apply_identity(cfg11, 1, identity={"avatar_url": a11, "banner_url": b11})
 msg = PUSHED[-1][1]
 avatar_line = next((ln for ln in msg.splitlines() if "الصورة الشخصية" in ln), "")
@@ -615,33 +626,45 @@ identity_bridge.generate_profile = lambda params, with_images=False: {"success":
     "name": "م", "bio": "ب", "profilePictureUrl": p_av, "headerImageUrl": p_bn}}
 ident = REAL_PREVIEW(cfg, {})
 check("المعاينة: مسارات نسبية على أصل الصفحة — بلا عنوان سيرفر الهويات الداخلي",
-      ident["avatar_url"] == p_av and ident["banner_url"] == p_bn and "5990" not in str(ident), ident)
+      ident["avatar_url"] == IS.preview_url(cfg, p_av) and ident["banner_url"] == IS.preview_url(cfg, p_bn) and "5990" not in str(ident), ident)
 identity_bridge.generate_profile = lambda params, with_images=False: {"success": True, "data": {
     "profilePictureUrl": BASE + p_av, "headerImageUrl": ""}}
 check("ولو أعاد المولّد رابطه الداخلي كاملاً ← يصل المتصفح المسار النسبي",
-      REAL_PREVIEW(cfg, {})["avatar_url"] == p_av)
+      REAL_PREVIEW(cfg, {})["avatar_url"] == IS.preview_url(cfg, p_av))
 identity_bridge.construct_prompts = lambda params: {"success": True, "data": {
     "profilePicPrompt": "p", "headerImagePrompt": "h"}}
 identity_bridge.generate_image = lambda prompt, image_type="profile": {"success": True, "data": {"imageUrl": p_f}}
 patch = SVC.generate_field(cfg, "avatar", "خلفية زرقاء")
-check("«تعديل عنصر ← الصورة» يعيد المسار النسبي نفسه", patch == {"avatar_url": p_f}, patch)
+check("«تعديل عنصر ← الصورة» يعيد المسار النسبي نفسه", patch == {"avatar_url": IS.preview_url(cfg, p_f)}, patch)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app.main as MAIN  # noqa: E402
 
 client = TestClient(MAIN.app)
-got = [client.get(u) for u in (ident["avatar_url"], ident["banner_url"], patch["avatar_url"])]
-check("التطبيق الحقيقي يخدم الصور بمساراتها، بلا توكن (<img> لا يرسله) وبالبايتات نفسها",
+from scripts.security_fixture import setup
+from app.auth.security import create_access_token
+from app.db import database
+from app.db.models import User
+setup(cfg.user_id, [(cfg.id, cfg.account_username)])
+with database.SessionLocal() as db:
+    db.add(User(id=937, email="preview@example.com", password_hash="fixture"))
+    db.commit()
+def bearer(uid):
+    return {"Authorization": "Bearer " + create_access_token({"sub": str(uid)})}
+check("المعاينة تتطلب تسجيل الدخول وملكية الموظف",
+      client.get(ident["avatar_url"]).status_code in (401, 403)
+      and client.get(ident["avatar_url"], headers=bearer(937)).status_code == 404
+      and bool(raises(lambda: IS.source_file(emp(17), ident["avatar_url"]), IS.IdentityError)))
+got = [client.get(u, headers=bearer(cfg.user_id)) for u in (ident["avatar_url"], ident["banner_url"], patch["avatar_url"])]
+check("التطبيق الحقيقي يخدم الصور بمساراتها، بهوية المالك وبالبايتات نفسها",
       [(r.status_code, r.headers.get("content-type"), r.content) for r in got]
       == [(200, "image/png", av_bytes), (200, "image/png", bn_bytes), (200, "image/png", f_bytes)],
       [(r.status_code, r.headers.get("content-type")) for r in got])
 bad = [client.get(u).status_code for u in ("/static/generated/" + "0" * 32 + ".png",
                                            "/static/generated/..%2F..%2F..%2Fapp%2Fmain.py", "/static/generated/")]
 check("صورة غير موجودة / مسار ملتفّ / فهرس المجلد ← 404", bad == [404, 404, 404], bad)
-mounts = [r.path for r in MAIN.app.routes if type(r).__name__ == "Mount"]
-check("مسار الصور قبل /static العام (أول Mount مطابق يفوز)", "/static/generated" in mounts
-      and "/static" in mounts and mounts.index("/static/generated") < mounts.index("/static"), mounts)
+check("روابط الصور السابقة خارج المسار الموثق مغلقة", client.get(p_av).status_code == 404)
 FRONT = Path(__file__).resolve().parent / "frontend"
 ngx = (FRONT / "nginx.conf").read_text(encoding="utf-8")
 vite = (FRONT / "vite.config.js").read_text(encoding="utf-8")

@@ -5,6 +5,7 @@ import ToolsPanel from './ToolsPanel'
 import ChatModelPicker from './ChatModelPicker'
 import VoiceProfileView from './VoiceProfileView'
 import MemoryPanel from './MemoryPanel'
+import usePrivateMedia from '../hooks/usePrivateMedia'
 import clonePersona from '../hooks/clonePersona'
 import { PenLine } from 'lucide-react'
 import {
@@ -27,6 +28,11 @@ import {
 } from 'react-icons/md'
 
 // تسميات عربية للمهارات و MCPs
+function IdentityPreviewImage({ src, alt, className }) {
+  const url = usePrivateMedia(src)
+  return url ? <img src={url} alt={alt} className={className} /> : null
+}
+
 const SKILL_LABELS = {
   on_this_day: 'أحداث في مثل هذا اليوم (توثيق تاريخي)',
   daily_content_creator: 'إنشاء محتوى يومي',
@@ -1250,13 +1256,13 @@ const AgentsDrawer = ({ open, onClose, onNotify }) => {
                     <div className="mt-2 rounded-xl border border-primary/40 overflow-hidden bg-gray-50 dark:bg-card-dark/40">
                       {/* معاينة بشكل بروفايل X مصغّر */}
                       {identPreview[label].banner_url && (
-                        <img src={identPreview[label].banner_url} alt="header"
+                        <IdentityPreviewImage src={identPreview[label].banner_url} alt="header"
                           className="w-full h-20 object-cover" />
                       )}
                       <div className="px-3 pb-3">
                         <div className="flex items-end gap-2 -mt-6">
                           {identPreview[label].avatar_url && (
-                            <img src={identPreview[label].avatar_url} alt="avatar"
+                            <IdentityPreviewImage src={identPreview[label].avatar_url} alt="avatar"
                               className="size-14 rounded-full border-4 border-card-light dark:border-card-dark object-cover shrink-0" />
                           )}
                           <div className="min-w-0 pt-7">

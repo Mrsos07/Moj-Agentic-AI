@@ -21,11 +21,8 @@ from app.db.testing import use_temp_database  # noqa: E402
 import app.db.database as _DB  # noqa: E402
 from app.db.models import AIEmployee as _AIE  # noqa: E402
 
-use_temp_database()
-# الموظف الذي تكتب الفحوص ذاكرته (verify_creator.make_config) — PostgreSQL يفرض الـFK
-with _DB.SessionLocal() as _s:
-    _s.add(_AIE(id="verify-creator", platform="x", account_username="mazen_edu", cookie_label="mazen_edu"))
-    _s.commit()
+from scripts.security_fixture import setup
+setup(1, [("verify-creator", "mazen_edu")])
 
 from app.aeos.cognition import critique as C                       # noqa: E402
 from app.aeos.cognition import learning as L                       # noqa: E402

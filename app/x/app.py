@@ -7,6 +7,11 @@ import threading
 import time as _time
 from pathlib import Path
 
+import sys
+# Standalone xsuite shares the backend's security policy and installed packages.
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from dotenv import load_dotenv
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
@@ -27,7 +32,7 @@ from modules.db import (
     get_tweet,
     delete_tweet_from_db,
 )
-from modules.utils import download_to_temp, is_url, safe_label, normalize_cookies
+from modules.utils import download_to_temp, upload_path, is_url, safe_label, normalize_cookies
 from modules.x_login import TwitterLoginAdvanced
 from modules.x_post import post_to_x, post_thread_to_x
 from modules.x_profile import update_profile_on_x
@@ -85,9 +90,21 @@ bulk_login_tasks = {}
 bulk_task_counter = 0
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 42 * 1024 * 1024
 # كان 'change-me': من يعرفه (المستودع عام) يزوّر جلسة دخول للوحة ويتحكم بكل الحسابات
 app.secret_key = _strong_secret('XSUITE_SECRET_KEY')
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict')
+
+
+@app.before_request
+def check_form_origin():
+    from urllib.parse import urlsplit
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and not (
+            request.headers.get("Authorization") or request.headers.get("X-API-Key")):
+        origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        source = urlsplit(origin)
+        if source.scheme != request.scheme or source.netloc != request.host:
+            return jsonify({"error": "untrusted form origin"}), 403
 
 
 @app.before_request
@@ -194,8 +211,8 @@ def cookies_page():
             
             # حفظ الكوكيز بالصيغة الرسمية
             dst = COOKIES_DIR / f"{label}.json"
-            with open(dst, 'w', encoding='utf-8') as out_file:
-                json.dump(normalized_data, out_file, indent=2, ensure_ascii=False)
+            from app.aeos.security.sealed import save_browser_state
+            save_browser_state(dst, normalized_data)
             
             upsert_cookie(label, dst.name)
             log_operation('cookie_upload', label, 'success', f'تم حفظ الكوكيز بالصيغة الرسمية: {dst.name} ({len(normalized_data["cookies"])} كوكيز)')
@@ -271,8 +288,8 @@ def login_page():
             return redirect(url_for('login_page'))
 
         dst = COOKIES_DIR / f"{label}.json"
-        with open(dst, 'w', encoding='utf-8') as fw:
-            json.dump(playwright_data, fw, ensure_ascii=False, indent=2)
+        from app.aeos.security.sealed import save_browser_state
+        save_browser_state(dst, playwright_data)
 
         upsert_cookie(label, dst.name)
         log_operation('upload_cookies', label, 'success', f'تم حفظ الكوكيز: {dst.name}')
@@ -332,11 +349,11 @@ def post_page():
     with tempfile.TemporaryDirectory() as tmp:
         media_path = None
         if media_file and media_file.filename:
-            media_path = os.path.join(tmp, media_file.filename)
+            media_path = upload_path(tmp, media_file.filename)
             media_file.save(media_path)
         elif media_url and is_url(media_url):
             try:
-                media_path = download_to_temp(media_url, tmp)
+                media_path = download_to_temp(media_url, tmp, cookie_label)
             except Exception as e:
                 flash(f'فشل تنزيل الميديا: {e}', 'error')
                 return redirect(url_for('post_page'))
@@ -387,16 +404,16 @@ def profile_page():
         banner_path = None
         try:
             if avatar_file and avatar_file.filename:
-                avatar_path = os.path.join(tmp, avatar_file.filename)
+                avatar_path = upload_path(tmp, avatar_file.filename)
                 avatar_file.save(avatar_path)
             elif avatar_url and is_url(avatar_url):
-                avatar_path = download_to_temp(avatar_url, tmp)
+                avatar_path = download_to_temp(avatar_url, tmp, cookie_label)
 
             if banner_file and banner_file.filename:
-                banner_path = os.path.join(tmp, banner_file.filename)
+                banner_path = upload_path(tmp, banner_file.filename)
                 banner_file.save(banner_path)
             elif banner_url and is_url(banner_url):
-                banner_path = download_to_temp(banner_url, tmp)
+                banner_path = download_to_temp(banner_url, tmp, cookie_label)
 
             update_profile_on_x(
                 storage_state_path=storage_state_path,
@@ -672,11 +689,11 @@ def quote_page():
     with tempfile.TemporaryDirectory() as tmp:
         media_path = None
         if media_file and media_file.filename:
-            media_path = os.path.join(tmp, media_file.filename)
+            media_path = upload_path(tmp, media_file.filename)
             media_file.save(media_path)
         elif media_url and is_url(media_url):
             try:
-                media_path = download_to_temp(media_url, tmp)
+                media_path = download_to_temp(media_url, tmp, cookie_label)
             except Exception as e:
                 flash(f'فشل تنزيل الميديا: {e}', 'error')
                 return redirect(url_for('quote_page'))
@@ -772,8 +789,8 @@ def api_cookie_upload():
         
         # حفظ الكوكيز بالصيغة الرسمية
         dst = COOKIES_DIR / f"{label}.json"
-        with open(dst, 'w', encoding='utf-8') as out_file:
-            json.dump(normalized_data, out_file, indent=2, ensure_ascii=False)
+        from app.aeos.security.sealed import save_browser_state
+        save_browser_state(dst, normalized_data)
         
         upsert_cookie(label, dst.name)
         op_id = log_operation('cookie_upload', label, 'success', f'تم حفظ الكوكيز بالصيغة الرسمية: {dst.name} ({len(normalized_data["cookies"])} كوكيز)')
@@ -835,7 +852,7 @@ def api_post():
             media_path = None
             if media_url and is_url(media_url):
                 try:
-                    media_path = download_to_temp(media_url, tmp)
+                    media_path = download_to_temp(media_url, tmp, cookie_label)
                 except Exception as e:
                     log_operation('post', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
                     return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400
@@ -868,11 +885,11 @@ def api_post():
     with tempfile.TemporaryDirectory() as tmp:
         media_path = None
         if media_file and media_file.filename:
-            media_path = os.path.join(tmp, media_file.filename)
+            media_path = upload_path(tmp, media_file.filename)
             media_file.save(media_path)
         elif media_url and is_url(media_url):
             try:
-                media_path = download_to_temp(media_url, tmp)
+                media_path = download_to_temp(media_url, tmp, cookie_label)
             except Exception as e:
                 log_operation('post', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
                 return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400
@@ -917,7 +934,7 @@ def api_post_thread():
         media_path = None
         if media_url and is_url(media_url):
             try:
-                media_path = download_to_temp(media_url, tmp)
+                media_path = download_to_temp(media_url, tmp, cookie_label)
             except Exception as e:
                 log_operation('post', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
                 media_path = None
@@ -977,16 +994,16 @@ def api_profile_update():
         banner_path = None
         try:
             if avatar_file and avatar_file.filename:
-                avatar_path = os.path.join(tmp, avatar_file.filename)
+                avatar_path = upload_path(tmp, avatar_file.filename)
                 avatar_file.save(avatar_path)
             elif avatar_url and is_url(avatar_url):
-                avatar_path = download_to_temp(avatar_url, tmp)
+                avatar_path = download_to_temp(avatar_url, tmp, cookie_label)
 
             if banner_file and banner_file.filename:
-                banner_path = os.path.join(tmp, banner_file.filename)
+                banner_path = upload_path(tmp, banner_file.filename)
                 banner_file.save(banner_path)
             elif banner_url and is_url(banner_url):
-                banner_path = download_to_temp(banner_url, tmp)
+                banner_path = download_to_temp(banner_url, tmp, cookie_label)
 
             media = update_profile_on_x(
                 storage_state_path=storage_state_path,
@@ -1164,7 +1181,7 @@ def api_reply():
             media_path = None
             if media_url and is_url(media_url):
                 try:
-                    media_path = download_to_temp(media_url, tmp)
+                    media_path = download_to_temp(media_url, tmp, cookie_label)
                 except Exception as e:
                     log_operation('reply', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
                     return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400
@@ -1197,11 +1214,11 @@ def api_reply():
     with tempfile.TemporaryDirectory() as tmp:
         media_path = None
         if media_file and media_file.filename:
-            media_path = os.path.join(tmp, media_file.filename)
+            media_path = upload_path(tmp, media_file.filename)
             media_file.save(media_path)
         elif media_url and is_url(media_url):
             try:
-                media_path = download_to_temp(media_url, tmp)
+                media_path = download_to_temp(media_url, tmp, cookie_label)
             except Exception as e:
                 log_operation('reply', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
                 return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400
@@ -1265,7 +1282,7 @@ def api_quote():
             media_path = None
             if media_url and is_url(media_url):
                 try:
-                    media_path = download_to_temp(media_url, tmp)
+                    media_path = download_to_temp(media_url, tmp, cookie_label)
                 except Exception as e:
                     log_operation('quote', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
                     return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400
@@ -1297,11 +1314,11 @@ def api_quote():
     with tempfile.TemporaryDirectory() as tmp:
         media_path = None
         if media_file and media_file.filename:
-            media_path = os.path.join(tmp, media_file.filename)
+            media_path = upload_path(tmp, media_file.filename)
             media_file.save(media_path)
         elif media_url and is_url(media_url):
             try:
-                media_path = download_to_temp(media_url, tmp)
+                media_path = download_to_temp(media_url, tmp, cookie_label)
             except Exception as e:
                 log_operation('quote', cookie_label, 'error', f'فشل تنزيل الميديا: {e}')
                 return jsonify({'success': False, 'task_id': op_id, 'error': f'فشل تنزيل الميديا: {e}'}), 400

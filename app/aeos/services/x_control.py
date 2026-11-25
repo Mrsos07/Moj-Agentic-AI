@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from ..security.gateway import carry
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -283,7 +284,7 @@ def drop_stale(user_id, turn: str) -> int:
     return len(stale)
 
 
-def take_pending(user_id, turn: str, cid: str, cfg, action: str) -> Dict[str, Any]:
+def take_pending(user_id, turn: str, cid: str, cfg, action: str, start=None) -> Dict[str, Any]:
     """أعد الطلب المعلّق واحذفه — فقط من رسالة لاحقة للمالك، لنفس الموظف ونفس الإجراء."""
     with _LOCK:
         _gc()
@@ -298,6 +299,8 @@ def take_pending(user_id, turn: str, cid: str, cfg, action: str) -> Dict[str, An
         if req["action"] != action:
             raise PermissionError(f"معرّف التأكيد يخص «{ACTIONS[req['action']]['label']}» "
                                   f"لا «{ACTIONS.get(action, {}).get('label', action)}»")
+        if start:
+            start(cfg, action, req["targets"], req["fields"])
         return _PENDING.pop((user_id, str(cid).strip()))
 
 
@@ -402,4 +405,9 @@ def run_background(cfg, action: str, targets: List[Dict[str, Any]], fields: Dict
             logger.exception("x_control %s failed", action)
             notify(f"❌ تعذّر تنفيذ «{ACTIONS[action]['label']}» على @{cfg.account_username}: {exc}")
 
-    threading.Thread(target=run, daemon=True).start()
+    from ..security import gateway
+    p = gateway.current.get()
+    with gateway.execution(p.user_id, cfg.id):
+        params = [_mcp_params(action, cfg, t, fields) for t in targets]
+        with gateway.x_batch(cfg.id, cfg.cookie_label, ACTIONS[action]["tool"], params):
+            threading.Thread(target=carry(run), daemon=True).start()

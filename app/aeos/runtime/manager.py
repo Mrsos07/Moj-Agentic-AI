@@ -270,7 +270,13 @@ class RuntimeManager(IRuntimeManager):
             return {"skipped": True, "reason": "cycle_already_running",
                     "employee_id": employee_id}
         try:
-            return self._run_cycle_locked(employee_id, event, lease, budget, queue)
+            from app.aeos.security.gateway import execution, owner
+            cfg = self._repo.get(employee_id)
+            if cfg is None or not cfg.user_id:
+                return {"skipped": True, "reason": "missing_owner"}
+            with execution(cfg.user_id, employee_id):
+                owner(employee_id)
+                return self._run_cycle_locked(employee_id, event, lease, budget, queue)
         finally:
             guard.release()
 
@@ -684,16 +690,18 @@ class RuntimeManager(IRuntimeManager):
 
             db = SessionLocal()
             try:
-                conversation = memory_service.get_or_create_conversation(
-                    db=db, user_id=int(user_id),
-                    session_id=(f"emp_{account}" if account else None),
-                    title=(f"🤖 الموظف @{account}" if account else None),
-                )
-                memory_service.add_message(
-                    db=db, conversation_id=conversation.id, role="assistant",
-                    content=text, intent=intent, agent="AEOS",
-                )
-                db.commit()
+                from app.aeos.security import gateway
+                with gateway.execution(int(user_id), agent=getattr(gateway.current.get(), 'agent', '')):
+                    conversation = memory_service.get_or_create_conversation(
+                        db=db, user_id=int(user_id),
+                        session_id=(f"emp_{account}" if account else None),
+                        title=(f"🤖 الموظف @{account}" if account else None),
+                    )
+                    memory_service.add_message(
+                        db=db, conversation_id=conversation.id, role="assistant",
+                        content=text, intent=intent, agent="AEOS",
+                    )
+                    db.commit()
             finally:
                 db.close()
         except Exception:  # noqa: BLE001

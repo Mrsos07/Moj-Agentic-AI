@@ -20,10 +20,7 @@ Tools:
 
 سلوك آمن:
 - بلا مفتاح (OpenRouter أو OpenAI) يعيد فشلاً نظيفاً فيستمر المنشور نصّاً.
-- إن أعاد المزوّد صورة base64 (نماذج gpt-image) نحفظها في ``static/uploads``
-  ونبني رابطاً محلياً (``AEOS_PUBLIC_BASE_URL`` أو 127.0.0.1:PORT) — سيرفر X
-  يعمل على نفس الجهاز فيصل إليه.
-- الصور المولّدة تُنظَّف تلقائياً: نحتفظ بأحدث ``_KEEP_FILES`` صورة فقط.
+- تُحفظ الصور المولدة مشفّرة في مجلد المالك والموظف ويستلم سيرفر X مرجعاً محلياً مقيداً بالحساب.
 
 متغيرات البيئة:
 - ``OPENROUTER_IMAGE_MODEL`` — الافتراضي ``openai/gpt-image-1`` (اسم مؤهَّل
@@ -31,25 +28,17 @@ Tools:
 - ``AEOS_IMAGE_MODEL``       — موديل الصور على مسار OpenAI (``gpt-image-1``؛
   أزالت OpenAI ‏dall-e-3).
 - ``AEOS_IMAGE_SIZE``        — الافتراضي ``1024x1024``.
-- ``AEOS_PUBLIC_BASE_URL``   — أصل الرابط العام للملفات الثابتة.
 - ``AEOS_IMAGES_ENABLED``    — "0" لتعطيل التوليد.
 """
 from __future__ import annotations
 
-import base64
 import logging
 import os
-import uuid
-from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from app.aeos.mcp.base import IMCPServer, MCPRequest, MCPResponse
 
 logger = logging.getLogger("aeos.mcp.image")
-
-_UPLOADS_DIR = Path(__file__).resolve().parents[3] / "static" / "uploads"
-_KEEP_FILES = 60
-
 
 class ImageMCP(IMCPServer):
     name = "image"
@@ -71,37 +60,6 @@ class ImageMCP(IMCPServer):
         from app.core.llm_provider import resolve_llm
 
         return resolve_llm()
-
-    @staticmethod
-    def _public_base() -> str:
-        base = (os.getenv("AEOS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
-        if base:
-            return base
-        port = os.getenv("PORT", "8000").strip() or "8000"
-        return f"http://127.0.0.1:{port}"
-
-    @classmethod
-    def _save_b64(cls, b64: str) -> Optional[Path]:
-        try:
-            _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-            path = _UPLOADS_DIR / f"aeos-img-{uuid.uuid4().hex}.png"
-            path.write_bytes(base64.b64decode(b64))
-            cls._prune()
-            return path
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("saving generated image failed: %s", exc)
-            return None
-
-    @staticmethod
-    def _prune() -> None:
-        """احتفظ بأحدث الصور المولّدة فقط حتى لا ينمو المجلد بلا حد."""
-        try:
-            files = sorted(_UPLOADS_DIR.glob("aeos-img-*.png"),
-                           key=lambda f: f.stat().st_mtime, reverse=True)
-            for old in files[_KEEP_FILES:]:
-                old.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
 
     # ---- MCP -------------------------------------------------------------
     def call(self, request: MCPRequest) -> MCPResponse:
@@ -143,11 +101,9 @@ class ImageMCP(IMCPServer):
         if not url:
             if not b64:
                 return MCPResponse.fail("image provider returned neither url nor b64")
-            saved = self._save_b64(b64)
-            if saved is None:
-                return MCPResponse.fail("could not persist generated image")
-            local_path = str(saved)
-            url = f"{self._public_base()}/static/uploads/{saved.name}"
+            from app.aeos.security import media
+            url = media.save(request.employee_id, b64)
+            local_path = url
 
         logger.info("generated image for employee %s (%s/%s, %s, %s)",
                     request.employee_id, endpoint.provider, model, aspect, quality)

@@ -101,10 +101,12 @@ def _deliver(camp: Dict[str, Any], text: str) -> None:
     session_id = camp.get("session_id") or (f"emp_{camp['expected'][0]}" if camp["expected"] else None)
     db = SessionLocal()
     try:
-        conv = memory_service.get_or_create_conversation(db=db, user_id=int(user_id), session_id=session_id)
-        memory_service.add_message(db=db, conversation_id=conv.id, role="assistant", content=text,
-                                   intent="aeos_campaign_result", agent="Coordinator")
-        db.commit()
+        from app.aeos.security import gateway
+        with gateway.execution(int(user_id), agent=getattr(gateway.current.get(), 'agent', ''), conversation=session_id or ''):
+            conv = memory_service.get_or_create_conversation(db=db, user_id=int(user_id), session_id=session_id)
+            memory_service.add_message(db=db, conversation_id=conv.id, role="assistant", content=text,
+                                       intent="aeos_campaign_result", agent="Coordinator")
+            db.commit()
     finally:
         db.close()
     realtime_bus.publish_chat(int(user_id), {

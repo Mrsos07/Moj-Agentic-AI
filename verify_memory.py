@@ -45,6 +45,13 @@ _fx.add(DBM.AIEmployee(id="emp1", user_id=2, platform="x", account_username="ema
 _fx.commit()
 _fx.close()
 AM._session = Session
+from app.db.testing import bind_app
+from scripts.security_fixture import setup, reviewed_fixture_actions
+from app.aeos.security import gateway
+bind_app(engine)
+fixture_token = setup(2, [("emp2", "sara")], create_db=False)
+reviewed_fixture_actions(2, {"memory.delete", "chat.order_publish", "chat.remember", "chat.forget"}).start()
+
 
 # ── تضمين مزيّف: محاور مفاهيم + بصمة كلمات خفيفة (نصّان مختلفان ≠ متجه واحد) ──
 AXES = {"سياس": 0, "حكوم": 0, "جمعة": 1, "إجاز": 1, "اقتصاد": 2, "نفط": 4, "إيموجي": 3, "رموز": 3}
@@ -148,7 +155,7 @@ sent = big.calls[0][1] if big.calls else ""
 check("محادثة ضخمة: التلخيص مسقوف الحجم (قيس 511 ألف توكن قبل الإصلاح)",
       big.calls and len(sent) < AM._COMPACT_MAX_CHARS + 2000, len(sent))
 hist = AM.history_messages(ctx)
-check("الملخّص يُقدَّم رسالة نظام في المقدمة", hist[0]["role"] == "system" and "ملخّص" in hist[0]["content"])
+check("الملخّص يُقدَّم كبيانات محادثة مستقلة", hist[0]["role"] == "user" and json.loads(hist[0]["content"])["untrusted_data"] == "conversation_summary")
 db.close()
 
 print("5) الاستخراج طويل المدى")
@@ -216,7 +223,14 @@ check("remember عن موظف يُحفظ في نطاقه", rem["scope"] == "@ema
       and any("الرياضة" in m["content"] for m in AM.core([E1])))
 rec = json.loads(tools.call("recall_memory", json.dumps({"query": "وش طلبت عن الذهب؟", "include_events": True})))
 check("recall_memory يعيد الأحداث", any("الذهب" in e["content"] for e in rec["recent_events"]))
-foreign = AM.add(AM.coordinator_scope(99), "ذاكرة مستخدم آخر", "fact")
+db = Session()
+db.add(DBM.User(id=99, email="other@example.com", password_hash="fixture"))
+db.commit()
+db.close()
+gateway.current.reset(fixture_token)
+with gateway.execution(99):
+    foreign = AM.add(AM.coordinator_scope(99), "ذاكرة مستخدم آخر", "fact")
+gateway.bind(2)
 check("forget لا يحذف ذاكرة مستخدم آخر",
       "error" in json.loads(tools.call("forget", json.dumps({"memory_id": foreign["id"]}))))
 

@@ -1,3 +1,4 @@
+import uuid
 import os
 import csv
 import json
@@ -7,9 +8,14 @@ import time
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for
 from werkzeug.utils import secure_filename
+import sys
+from pathlib import Path
+if __name__ == '__main__':
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from j4 import LDPlayerChromeAutomation, load_accounts
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 
 
 def _strong_secret(name):
@@ -44,6 +50,17 @@ def _require_api_key():
     return None
 
 
+@app.before_request
+def check_form_origin():
+    from urllib.parse import urlsplit
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and not (
+            request.headers.get("Authorization") or request.headers.get("X-API-Key")):
+        origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        source = urlsplit(origin)
+        if source.scheme != request.scheme or source.netloc != request.host:
+            return jsonify({"error": "untrusted form origin"}), 403
+
+
 @app.after_request
 def _remember_key(resp):
     if request.args.get("key") and resp.status_code < 400:
@@ -60,7 +77,8 @@ def _safe_callback(url):
     if not url:
         return None
     p = urlparse(url)
-    return url if p.scheme in ("http", "https") and p.hostname in ("127.0.0.1", "localhost") else None
+    return url if (p.scheme == "http" and p.netloc == "127.0.0.1:8000"
+                   and p.path == "/api/internal/login-callback" and p.query and not p.fragment) else None
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 COOKIES_FOLDER = os.path.join(os.path.dirname(__file__), "CookiesBackup")
@@ -103,7 +121,8 @@ def _finalize_login_for_moj(username, user_id, log_fn):
         main_cookies_dir.mkdir(parents=True, exist_ok=True)
         dest = main_cookies_dir / f"{username}.json"
 
-        shutil.copy2(source, dest)
+        from app.aeos.security import sealed
+        sealed.save_browser_state(dest, sealed.load_browser_state(source))
         log_fn(f"✅ تم نسخ الكوكيز إلى موج: {dest.name}", "SUCCESS")
 
         # ─── تسجيل الكوكي في قاعدة بيانات سيرفر app/x ───
@@ -284,7 +303,7 @@ def api_login_single():
         if not username or not password:
             return jsonify({"success": False, "error": "اسم المستخدم وكلمة المرور مطلوبان"}), 400
 
-        session_id = f"s_{int(time.time() * 1000)}"
+        session_id = "s_" + uuid.uuid4().hex
         accounts = [{"username": username, "password": password, "email": email}]
 
         tasks[session_id] = {
@@ -333,7 +352,7 @@ def api_login_bulk():
         if not clean_accounts:
             return jsonify({"success": False, "error": "لا يوجد حسابات صالحة"}), 400
 
-        session_id = f"s_{int(time.time() * 1000)}"
+        session_id = "s_" + uuid.uuid4().hex
         tasks[session_id] = {
             "status": "starting", "accounts": clean_accounts, "results": [],
             "user_id": user_id, "callback_url": callback_url,
@@ -396,7 +415,7 @@ def start_single():
     if not username or not password:
         return jsonify({"error": "اسم المستخدم وكلمة المرور مطلوبان"}), 400
 
-    session_id = f"s_{int(time.time()*1000)}"
+    session_id = "s_" + uuid.uuid4().hex
     accounts = [{"username": username, "password": password, "email": email}]
 
     tasks[session_id] = {"status": "starting", "accounts": accounts, "results": []}
@@ -429,7 +448,7 @@ def start_bulk():
     if not accounts:
         return jsonify({"error": "الملف فارغ أو بصيغة خاطئة"}), 400
 
-    session_id = f"s_{int(time.time()*1000)}"
+    session_id = "s_" + uuid.uuid4().hex
     tasks[session_id] = {"status": "starting", "accounts": accounts, "results": []}
     get_or_create_queue(session_id)
 
@@ -458,22 +477,9 @@ def stream(session_id):
 
 
 @app.route("/cookies/<filename>")
-def view_cookie(filename):
-    fpath = os.path.join(COOKIES_FOLDER, filename)
-    if not os.path.exists(fpath):
-        return "الملف غير موجود", 404
-    with open(fpath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return jsonify(data)
-
-
 @app.route("/cookies/download/<filename>")
-def download_cookie(filename):
-    fpath = os.path.join(COOKIES_FOLDER, filename)
-    if not os.path.exists(fpath):
-        return "الملف غير موجود", 404
-    from flask import send_file
-    return send_file(fpath, as_attachment=True)
+def private_session_file(filename):
+    return jsonify({"error": "session export unavailable"}), 403
 
 
 @app.route("/status/<session_id>")

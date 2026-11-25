@@ -85,16 +85,31 @@ def generated_dir() -> Path:
     return identity_bridge.IDENTITY_DIR / "static" / "generated"
 
 
-def source_file(url: str) -> Path:
-    """رابط صورة المعاينة ← ملفها في مجلد سيرفر الهويات (غير ذلك مرفوض)."""
-    from app.services import identity_bridge
+def preview_url(cfg, generated_url: str) -> str:
+    from app.aeos.security.ledger import fingerprint
+    from app.services.identity_bridge import IDENTITY_BASE_URL
 
-    url = str(url or "").strip()
-    base = identity_bridge.IDENTITY_BASE_URL
-    m = _GENERATED.fullmatch(url[len(base):] if url.startswith(base + "/") else url)
-    if not m:
-        raise IdentityError("رابط صورة غير معروف — تُقبل صور معاينة الهوية فقط. أعد توليد المعاينة.")
-    f = generated_dir() / f"{m.group(1)}.{m.group(2)}"
+    if not generated_url:
+        return ""
+    relative = generated_url.removeprefix(IDENTITY_BASE_URL)
+    match = _GENERATED.fullmatch(relative)
+    if not match or not cfg.user_id or not _ID.fullmatch(cfg.id):
+        raise IdentityError("تعذّر إثبات مصدر صورة المعاينة.")
+    filename = f"{match[1]}.{match[2]}"
+    proof = fingerprint(["identity-preview", cfg.user_id, cfg.id, filename])
+    return f"/api/aeos/employees/{cfg.id}/identity/media/{proof}/{filename}"
+
+
+def source_file(cfg, url: str) -> Path:
+    import hmac
+
+    filename = url.rsplit("/", 1)[-1]
+    expected = preview_url(cfg, "/static/generated/" + filename)
+    if not hmac.compare_digest(url.encode(), expected.encode()):
+        raise IdentityError("أعد توليد المعاينة لهذا الموظف ثم اعتمدها.")
+    f = generated_dir() / filename
+    if f.is_symlink():
+        raise IdentityError("ملف معاينة غير صالح.")
     if not f.is_file():
         raise IdentityError("صور المعاينة لم تعد متاحة (يحذفها مولّد الهويات بعد ساعة من توليدها) — "
                             "أعد توليد المعاينة ثم اعتمدها.")
@@ -111,7 +126,7 @@ def create_pending(cfg, user_id: Optional[int], identity: Dict[str, Any]) -> Dic
         url = str(identity.get(f"{kind}_url") or "").strip()
         if not url:
             continue
-        src = source_file(url)
+        src = source_file(cfg, url)
         data = src.read_bytes()
         if not _is_image(data):
             raise IdentityError("ملف صورة المعاينة تالف — أعد توليد المعاينة.")

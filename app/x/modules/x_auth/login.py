@@ -440,16 +440,9 @@ async def x_login(username, password, email=None, cookies_dir="cookies"):
 
     # 6. حفظ الكوكيز بصيغة Playwright
     playwright_cookies = _to_playwright_format(http.cookies, COOKIES_DOMAIN)
-    with open(cookie_file, 'w', encoding='utf-8') as f:
-        json.dump({"cookies": playwright_cookies, "origins": []}, f, ensure_ascii=False, indent=2)
-    print(f'[+] تم حفظ الكوكيز في: {cookie_file}')
-
-    # حفظ في coo.txt
-    cookies_dict = {c['name']: c['value'] for c in playwright_cookies}
-    ct0 = cookies_dict.get('ct0', '')
-    at = cookies_dict.get('auth_token', '')
-    if ct0 and at:
-        _save_to_coo(ct0, at, username, cookies_dir)
+    from app.aeos.security import sealed
+    sealed.save_browser_state(cookie_file, {"cookies": playwright_cookies, "origins": []})
+    cookies_dict = {c["name"]: c["value"] for c in playwright_cookies}
 
     await http.close()
     return cookies_dict
@@ -457,8 +450,8 @@ async def x_login(username, password, email=None, cookies_dir="cookies"):
 
 async def x_login_with_cookies(cookie_file):
     """تسجيل دخول بكوكيز محفوظة (صيغة Playwright)"""
-    with open(cookie_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    from app.aeos.security import sealed
+    data = sealed.load_browser_state(cookie_file)
 
     # دعم الصيغتين: Playwright {cookies: [...]} أو dict قديم {key: value}
     if isinstance(data, dict) and 'cookies' in data:
@@ -559,18 +552,3 @@ def _to_playwright_format(cookie_jar, domain):
             "sameSite": "Lax" if name in LAX_COOKIES else "None"
         })
     return playwright_cookies
-
-
-def _save_to_coo(ct0, auth_token, username, cookies_dir="cookies"):
-    """حفظ الكوكيز في coo.txt بجانب مجلد الكوكيز"""
-    coo_path = os.path.join(os.path.dirname(os.path.abspath(cookies_dir)), "coo.txt")
-    line = f"{ct0},{auth_token}"
-    existing = ""
-    if os.path.exists(coo_path):
-        existing = open(coo_path, 'r', encoding='utf-8').read()
-    if line not in existing:
-        with open(coo_path, 'a', encoding='utf-8') as f:
-            f.write(f"\n{line}")
-        print(f'[+] تم إضافة الكوكيز إلى coo.txt ({username})')
-    else:
-        print(f'[*] الكوكيز موجودة مسبقاً في coo.txt')

@@ -46,12 +46,14 @@ class AIService:
         if not self.client:
             return None
 
-        messages = [
-            {"role": "system", "content": system_prompt or FALLBACK_SYSTEM_PROMPT},
-        ]
-        if history:
-            messages.extend(history[-20:])
-        messages.append({"role": "user", "content": user_message})
+        from app.aeos.security.data import clean, evidence
+        messages = [{"role": "system", "content": FALLBACK_SYSTEM_PROMPT}]
+        if system_prompt:
+            messages.append(evidence("conversation context", system_prompt))
+        for entry in (history or [])[-20:]:
+            if entry.get("role") in {"assistant", "user"}:
+                messages.append({"role": entry["role"], "content": clean(str(entry.get("content", "")))})
+        messages.append({"role": "user", "content": clean(user_message)})
 
         try:
             response = await self.client.chat.completions.create(
@@ -60,7 +62,7 @@ class AIService:
                 max_tokens=self._endpoint.max_tokens,
                 temperature=self._endpoint.temperature,
             )
-            return response.choices[0].message.content
+            return clean(response.choices[0].message.content)
         except Exception as e:
             error_str = str(e)
             print(f"[AIService] Fallback error: {error_str[:200]}")

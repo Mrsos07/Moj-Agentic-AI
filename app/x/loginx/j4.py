@@ -661,8 +661,8 @@ class LDPlayerChromeAutomation:
             filename = f"{account_name}.json" if account_name else "playwright_cookies.json"
             out_path = os.path.join(out_dir, filename)
 
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(output, f, ensure_ascii=False, indent=2)
+            from app.aeos.security import sealed
+            sealed.save_browser_state(out_path, output)
 
             self.log(
                 f"تم إنشاء ملف كوكيز بصيغة موج/Playwright في: {out_path}\n"
@@ -1715,8 +1715,8 @@ class LDPlayerChromeAutomation:
         self.log("تشغيل Playwright واستخدام الكوكيز للدخول على X...", "PLAY")
 
         try:
-            with open(self.playwright_cookies_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            from app.aeos.security import sealed
+            data = sealed.load_browser_state(self.playwright_cookies_path)
             # الصيغة الجديدة: {"cookies": [...], "origins": []}
             # الصيغة القديمة (legacy): [...]
             if isinstance(data, dict) and "cookies" in data:

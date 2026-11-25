@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from ..security.gateway import memory as authorize_memory
+from ..security.data import clean
 from .base import IMemoryLayer, MemoryLayerType, MemoryRecord
 from .layers import (
     ConversationMemory,
@@ -44,14 +46,15 @@ class MemoryManager:
         importance: int = 1,
         metadata: Optional[Dict] = None,
     ) -> None:
+        authorize_memory([f"employee:{employee_id}"], "remember")
         self._layers[layer].store(
             employee_id,
             MemoryRecord(
                 layer=layer,
-                content=content,
+                content=clean(content),
                 key=key,
                 importance=importance,
-                metadata=metadata or {},
+                metadata=clean(metadata or {}),
             ),
         )
 
@@ -65,10 +68,12 @@ class MemoryManager:
     def recall(
         self, employee_id: str, layer: MemoryLayerType, query: str = "", limit: int = 10
     ) -> List[MemoryRecord]:
+        authorize_memory([f"employee:{employee_id}"], "recall")
         return self._layers[layer].recall(employee_id, query, limit)
 
     def recall_all(self, employee_id: str, query: str = "", limit: int = 5) -> Dict[str, List[MemoryRecord]]:
         """Snapshot across every layer — used when building execution context."""
+        authorize_memory([f"employee:{employee_id}"], "recall_all")
         return {
             layer.value: self._layers[layer].recall(employee_id, query, limit)
             for layer in self._layers
@@ -76,4 +81,5 @@ class MemoryManager:
 
     def clear_working(self, employee_id: str) -> None:
         """Wipe ephemeral working memory (on runtime destroy)."""
+        authorize_memory([f"employee:{employee_id}"], "clear_working")
         self._layers[MemoryLayerType.WORKING].clear(employee_id)

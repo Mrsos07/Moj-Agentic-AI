@@ -140,7 +140,7 @@ def _store(key: tuple, value) -> None:
 def _call(context: "ExecutionContext", entry: Dict[str, Any], value: str) -> str:
     from ..mcp.base import MCPRequest
 
-    key = (entry["server"], entry["tool"], value)
+    key = (context.config.id, entry["server"], entry["tool"], value)
     hit = _cached(key)
     if hit is not None:
         return hit
@@ -416,7 +416,7 @@ def _call_planned(context: "ExecutionContext", entry: Dict[str, Any], topic: str
     params = dict(entry.get("args") or {})
     if entry.get("topic_arg"):
         params[entry["topic_arg"]] = topic
-    key = (entry["server"], entry["tool"], json.dumps(params, ensure_ascii=False, sort_keys=True))
+    key = (context.config.id, entry["server"], entry["tool"], json.dumps(params, ensure_ascii=False, sort_keys=True))
     with _cache_lock:
         hit = _cache.get(key)
         if hit and time.time() - hit[0] < ttl:

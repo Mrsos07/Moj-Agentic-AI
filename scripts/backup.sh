@@ -33,10 +33,11 @@ umask 077
 echo "▶ نسخة متّسقة من قاعدة SQLite (online backup) إن وُجدت…"
 docker compose exec -T backend python -c "
 import os, sqlite3
-if not os.path.exists('data/app.db'):
-    print('  لا data/app.db (القاعدة على PostgreSQL)'); raise SystemExit(0)
-src = sqlite3.connect('file:data/app.db?mode=ro', uri=True); dst = sqlite3.connect('data/app.db.backup')
-src.backup(dst); dst.close(); src.close()
+for path in ('data/app.db', 'data/agent_security.sqlite3'):
+    if os.path.exists(path):
+        src = sqlite3.connect('file:' + path + '?mode=ro', uri=True)
+        dst = sqlite3.connect(path + '.backup')
+        src.backup(dst); dst.close(); src.close()
 print('  ok')"
 
 PG=$(docker compose ps -q postgres 2>/dev/null || true)
@@ -51,7 +52,7 @@ echo "▶ أرشفة أحجام الخادم الخلفي…"
 docker run --rm --volumes-from "$BACKEND" -v "$MOUNT":/backup alpine:3.20 \
   tar czf /backup/backend.tgz -C / \
   app/data app/app/x/cookies app/static/uploads app/app/identity/static/generated
-docker compose exec -T backend rm -f data/app.db.backup
+docker compose exec -T backend rm -f data/app.db.backup data/agent_security.sqlite3.backup
 
 if [ "$WITH_NEO4J" = "1" ]; then
   NEO4J=$(docker compose ps -q neo4j)

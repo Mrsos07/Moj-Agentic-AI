@@ -56,6 +56,11 @@ def main() -> None:
             rid = req.get("id")
             op = req.get("op", "")
             kwargs = req.get("kwargs") or {}
+            from app.aeos.security import gateway
+            gateway.current.set(None)
+            if op not in {"available", "ping"}:
+                # This pipe is private to the authenticated supervisor process.
+                gateway.current.set(gateway.Principal(**req["principal"]))
             if op == "ingest":
                 # داخل المخزن هي «أطلق وانسَ» أصلاً؛ الردّ فوري والاستخراج
                 # (نداء LLM ‏~40ث ثم كتابة Kuzu) يجري في خيط الحلقة الخلفي.

@@ -547,9 +547,11 @@ interrupted = TC.mark_interrupted_on_boot()
 BOOT._platform.notified.clear()
 MAIN._announce_interrupted(interrupted)
 from app.services.memory_service import memory_service  # noqa: E402
+from app.aeos.security import gateway as _gw  # noqa: E402
 
 db = DB.SessionLocal()
-conv = memory_service.get_or_create_conversation(db=db, user_id=A, session_id="s-boot")
+with _gw.execution(A, conversation="s-boot"):
+    conv = memory_service.get_or_create_conversation(db=db, user_id=A, session_id="s-boot")
 texts = [m.content for m in conv.messages]
 db.close()
 check("طلب الشات المقطوع: إشعار محفوظ في محادثته", any("انقطع تنفيذ طلبك" in t for t in texts), texts)

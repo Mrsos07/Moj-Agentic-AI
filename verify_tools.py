@@ -155,6 +155,9 @@ from app.aeos.employee import tool_use as _tu  # noqa: E402
 
 _real_available = _tu.available
 _tu.available = lambda cfg: []   # هذا القسم للبحث المدمج فقط — لا يلمس خوادم الكتالوج الحقيقية (رصيد Tavily)
+from scripts.security_fixture import setup, reviewed_fixture_actions
+setup(1, [("e", "fixture")])
+reviewed_fixture_actions(1, {"external.notes.search_notes"}).start()
 reg = MCPRegistry()
 reg.register(srv)
 progress = []
@@ -360,9 +363,11 @@ else:
         reg.unregister("ext_notes")
         check(f"[{label}] الإزالة تمسح الفهرس", reg.server_for_tool("ext_notes.search_notes") is None)
 
-    run_suite("stdio", {"name": "notes", "command": str(py), "args": [str(server_py)],
-                        "env": {"NOTES_TOKEN": "s3cret"}, "allowed_tools": ["search_notes"],
-                        "research_tool": "search_notes"})
+    pkg = X.package_dir("notes")
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "server.py").write_bytes(server_py.read_bytes())
+    run_suite("stdio", {"name": "notes", "command": "{python}", "args": ["{package}/server.py"],
+                        "allowed_tools": ["search_notes"], "research_tool": "search_notes"})
 
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -376,6 +381,7 @@ else:
                 break
             except OSError:
                 time.sleep(0.25)
+        os.environ["MCP_INTERNAL_ORIGINS"] = f"http://127.0.0.1:{port}"
         run_suite("http", {"name": "notes", "transport": "http", "url": f"http://127.0.0.1:{port}/mcp",
                            "headers": {"Authorization": "Bearer s3cret"},
                            "allowed_tools": ["search_notes"], "research_tool": "search_notes"})

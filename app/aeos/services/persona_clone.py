@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from ..security.gateway import carry
 import time
 import uuid
 from datetime import date, timedelta
@@ -70,9 +71,12 @@ def scrape_profile(cookie_label: str, handle: str, limit: int = SAMPLE["limit"],
     if deep:
         params.update({"replies_budget_seconds": 120.0, "history_windows": history_windows(),
                        "history_budget_seconds": 10.0, "history_per_window": 40})
-    res = PlaywrightXMCP().call(MCPRequest(
-        employee_id="persona_clone", tool="read_user_profile",
-        params=params, context={"cookie_label": cookie_label},
+    from app.aeos.services.tools_service import registry
+    from app.aeos.security.gateway import current
+    principal = current.get()
+    res = registry().call(MCPRequest(
+        employee_id=principal.agent if principal else "", tool="read_user_profile",
+        params=params, context={"server": "playwright_x", "cookie_label": cookie_label},
     ))
     if not res.success:
         raise RuntimeError(res.error or "failed to scrape target profile")
@@ -320,7 +324,7 @@ def start_job(owner_id: Any, run: Callable[[Callable[[str], None]], Dict[str, An
             job["error"] = str(exc) or exc.__class__.__name__
             job["status"] = "error"
 
-    threading.Thread(target=worker, daemon=True, name=f"clone-{job_id}").start()
+    threading.Thread(target=carry(worker), daemon=True, name=f"clone-{job_id}").start()
     return job_id
 
 

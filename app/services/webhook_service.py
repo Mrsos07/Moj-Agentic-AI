@@ -1,4 +1,17 @@
+import asyncio
+import hashlib
+import hmac
+import json
+import os
+import time
+import uuid
+from urllib.parse import urlsplit
+
 import httpx
+from fastapi import HTTPException
+from app.aeos.security import gateway
+from app.aeos.security.data import clean
+
 from app.core.config import settings
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -12,6 +25,32 @@ class WebhookService:
         self.enabled = settings.N8N_WEBHOOK_ENABLED and self.webhook_url is not None
         self.client = httpx.AsyncClient(timeout=10.0)
     
+    async def _post(self, payload):
+        parts = urlsplit(str(self.webhook_url))
+        key = os.environ.get("N8N_WEBHOOK_SIGNING_KEY", "")
+        if len(key) < 32 or parts.scheme != "https" or parts.username or parts.password:
+            raise PermissionError("اضبط وجهة HTTPS ومفتاح توقيع webhook")
+        message = clean(payload)
+        owner = gateway.current.get()
+        if not owner or str(payload.get("user_id")) != str(owner.user_id):
+            raise PermissionError("webhook owner mismatch")
+        scope = {k: v for k, v in message.items() if k != "timestamp"}
+        scope["destination"] = hashlib.sha256(str(self.webhook_url).encode()).hexdigest()
+        await asyncio.to_thread(gateway.api_decision, "webhook.disclose", owner.agent, scope)
+        body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
+        stamp, nonce = str(int(time.time())), uuid.uuid4().hex
+        sig = hmac.new(key.encode(), stamp.encode() + b"." + nonce.encode() + b"." + body, hashlib.sha256)
+        async with self.client.stream("POST", str(self.webhook_url), content=body, follow_redirects=False,
+                headers={"Content-Type": "application/json", "X-Moj-Timestamp": stamp,
+                         "X-Moj-Nonce": nonce, "X-Moj-Signature": sig.hexdigest()}) as response:
+            response.raise_for_status()
+            raw = bytearray()
+            async for chunk in response.aiter_bytes(16384):
+                raw.extend(chunk)
+                if len(raw) > 262144:
+                    raise ValueError("webhook response too large")
+            return clean(json.loads(raw)) if raw else None
+
     async def send_message_to_n8n(
         self,
         user_message: str,
@@ -59,26 +98,9 @@ class WebhookService:
                 payload["metadata"] = metadata
             
             # إرسال الطلب إلى n8n webhook وانتظار الرد
-            response = await self.client.post(
-                self.webhook_url,
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "Moj-AI-Chatbot/2.0"
-                }
-            )
-            
-            response.raise_for_status()
-            logger.info(f"Message sent to n8n webhook successfully. Status: {response.status_code}")
-            
-            # استخراج الرد من n8n
-            response_data = response.json()
-            logger.info(f"Full n8n response: {response_data}")
-            
-            # n8n يرجع البيانات في صيغة array، نأخذ أول عنصر
+            response_data = await self._post(payload)
             if isinstance(response_data, list) and len(response_data) > 0:
                 n8n_response = response_data[0]
-                logger.info(f"First item in array: {n8n_response}")
                 
                 # البحث عن الرد في جميع الحقول الممكنة
                 reply = None
@@ -103,14 +125,11 @@ class WebhookService:
                 if not reply:
                     reply = str(n8n_response)
                 
-                logger.info(f"Extracted reply type: {type(reply)}, length: {len(str(reply))}")
-                logger.info(f"Extracted reply: {reply[:200] if len(str(reply)) > 200 else reply}")
                 
                 # تأكد من إرجاع الرد حتى لو كان string فارغ ظاهرياً
                 return reply if reply else str(n8n_response)
                 
             elif isinstance(response_data, dict):
-                logger.info(f"Response is dict: {response_data}")
                 # إذا كان الرد dictionary مباشرة
                 reply = (
                     response_data.get("response") or 
@@ -125,10 +144,9 @@ class WebhookService:
                 if not reply:
                     reply = str(response_data)
                     
-                logger.info(f"Extracted reply: {reply[:200] if len(str(reply)) > 200 else reply}")
                 return reply
             else:
-                logger.warning(f"Unexpected response format from n8n: {response_data}")
+                logger.warning("Unexpected webhook response shape")
                 # حتى لو كان التنسيق غير متوقع، أرجع البيانات
                 return str(response_data) if response_data else None
             
@@ -136,10 +154,12 @@ class WebhookService:
             logger.error("Timeout while sending message to n8n webhook")
             return None
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error while sending to n8n webhook: {e.response.status_code} - {e.response.text}")
+            logger.warning("webhook rejected request: %s", e.response.status_code)
             return None
+        except (PermissionError, HTTPException):
+            raise
         except Exception as e:
-            logger.error(f"Error sending message to n8n webhook: {str(e)}")
+            logger.warning("webhook send failed (%s)", type(e).__name__)
             return None
     
     async def send_ai_response_to_n8n(
@@ -179,20 +199,13 @@ class WebhookService:
             if user_id:
                 payload["user_id"] = user_id
             
-            response = await self.client.post(
-                self.webhook_url,
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "Moj-AI-Chatbot/2.0"
-                }
-            )
-            
-            response.raise_for_status()
+            await self._post(payload)
             return True
             
+        except (PermissionError, HTTPException):
+            raise
         except Exception as e:
-            logger.error(f"Error sending AI response to n8n webhook: {str(e)}")
+            logger.warning("webhook reply failed (%s)", type(e).__name__)
             return False
     
     async def close(self):

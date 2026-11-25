@@ -326,6 +326,11 @@ def update_mcp(slug: str, patch: Dict[str, Any], rediscover: bool = False) -> Di
 
 def delete_mcp(slug: str) -> bool:
     _guard_builtin(slug)
+    from app.aeos.security import gateway, ledger
+    cfg = X.get(slug)
+    if cfg is None:
+        return False
+    gateway.api_decision("admin.mcp.delete", "", {"server": slug, "revision": ledger.fingerprint(cfg)})
     return TS.remove_external(slug)   # يحذف ويفصله عن كل الموظفين
 
 

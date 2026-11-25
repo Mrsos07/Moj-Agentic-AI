@@ -42,6 +42,22 @@ services:
     networks: [moj_network]
     logging: *logging
 
+  agent-sandbox:
+    build: { context: ./deploy/agent_sandbox }
+    image: moj-agent-sandbox:local
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, KILL]
+    pids_limit: 48
+    mem_limit: 256m
+    cpus: 1
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=48m"]
+    volumes: [moj_agent_socket:/run/moj-agent]
+    logging: *logging
+
   backend:
     build: { context: ., dockerfile: Dockerfile.backend }
     image: moj-backend:${MOJ_TAG:-latest}
@@ -53,6 +69,7 @@ services:
       # لا يصل للخادم الخلفي إلا nginx (شبكة داخلية + 127.0.0.1)، ويرسل عنوان العميل الحقيقي
       # وحده في X-Forwarded-For؛ بدون هذا يرى الخادم عنوان nginx لكل المستخدمين فيحظر حدُّ
       # محاولات الدخول (20 لكل عنوان) الجميعَ معاً.
+      MCP_SANDBOX_SOCKET: /run/moj-agent/runner.sock
       FORWARDED_ALLOW_IPS: "*"
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
@@ -65,12 +82,21 @@ services:
     # للوصول المباشر من الخادم نفسه فقط (تشخيص) — لا يُفتح للإنترنت
     ports: ["127.0.0.1:${BACKEND_LOCAL_PORT:-8000}:8000"]
     volumes:
+      - moj_agent_socket:/run/moj-agent:ro
       - moj_data:/app/data                                   # قاعدة البيانات، ذاكرة الموظفين، الإبطال، الأسرار
       - moj_cookies:/app/app/x/cookies                       # جلسات X (حساسة)
       - moj_identity_imgs:/app/app/identity/static/generated
       - moj_uploads:/app/static/uploads
+    cap_drop: [ALL]
+    cap_add: [SYS_CHROOT]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./deploy/chromium-seccomp.json
+    pids_limit: 768
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-4g}
     shm_size: "1gb"                                          # Chromium يتعطّل بذاكرة /dev/shm الافتراضية (64MB)
     depends_on:
+      agent-sandbox: { condition: service_started }
       neo4j: { condition: service_healthy }
       redis: { condition: service_healthy }
     networks: [moj_network]
@@ -129,6 +155,7 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  moj_agent_socket:
   moj_data:
   moj_cookies:
   moj_identity_imgs:

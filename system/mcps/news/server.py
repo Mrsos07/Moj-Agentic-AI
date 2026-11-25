@@ -42,14 +42,10 @@ class NewsMCP(IMCPServer):
         if not feed_url:
             return MCPResponse.fail("feed_url is required")
         try:
-            import requests
+            from app.aeos.security.egress import read_page
             from bs4 import BeautifulSoup
 
-            resp = requests.get(
-                feed_url, timeout=15,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; AEOS/1.0)"},
-            )
-            soup = BeautifulSoup(resp.content, "xml")
+            soup = BeautifulSoup(read_page(feed_url), "xml")
             items = []
             for item in soup.find_all("item")[: int(request.params.get("limit", 10))]:
                 # summary from <description> (strip any HTML tags)

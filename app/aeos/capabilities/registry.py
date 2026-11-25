@@ -52,6 +52,11 @@ class CapabilityRegistry:
                 f"employee lacks required MCP server(s): {missing}", capability=cap.name
             )
 
+        from ..security.gateway import capability
+        try:
+            capability(cap.name, context, request.params, cap.required_mcp)
+        except PermissionError as exc:
+            return CapabilityResult.fail(str(exc), capability=cap.name)
         result = cap.execute(request, context)
 
         if self._event_bus:

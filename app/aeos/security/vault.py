@@ -43,9 +43,9 @@ class ISecretVault(_abc.ABC):
 class FernetVault(ISecretVault):
     """Fernet-backed vault."""
 
-    def __init__(self, master_key: Optional[str] = None) -> None:
+    def __init__(self, master_key: Optional[str] = None, previous_keys=()) -> None:
         try:
-            from cryptography.fernet import Fernet
+            from cryptography.fernet import Fernet, MultiFernet
         except Exception as exc:  # noqa: BLE001
             raise SecurityError("cryptography package is required for the vault") from exc
 
@@ -60,7 +60,9 @@ class FernetVault(ISecretVault):
                 "Encrypted secrets will NOT survive a restart."
             )
             key = Fernet.generate_key()
-        self._fernet = Fernet(key)
+        old = [Fernet(base64.urlsafe_b64encode(hashlib.sha256(k.strip().encode()).digest()))
+               for k in previous_keys if k.strip()]
+        self._fernet = MultiFernet([Fernet(key), *old])
 
     def encrypt(self, plaintext: str) -> str:
         try:
@@ -77,12 +79,7 @@ class FernetVault(ISecretVault):
 
 def build_vault() -> ISecretVault:
     """Factory reading the master key from app settings."""
-    try:
-        from app.core.config import settings
+    import os
+    from app.auth.security import ENCRYPTION_KEY
 
-        return FernetVault(settings.ENCRYPTION_KEY)
-    except SecurityError:
-        raise
-    except Exception:  # noqa: BLE001
-        logger.exception("vault init failed; using ephemeral key")
-        return FernetVault(None)
+    return FernetVault(ENCRYPTION_KEY, os.getenv("AEOS_PREVIOUS_ENCRYPTION_KEYS", "").split(","))

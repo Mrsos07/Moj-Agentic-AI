@@ -4,7 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
-from app.agents.agent_manager import agent_manager
+import hmac
+import json
+from app.aeos.security import gateway, ledger
 from app.auth.dependencies import require_current_user
 from app.db.database import get_db
 from app.db.models import User
@@ -54,14 +56,13 @@ async def get_telegram_status(
 @router.post("/connect", response_model=TelegramMessageResponse)
 async def connect_telegram(
     payload: TelegramConnectRequest,
-    request: Request,
     current_user: User = Depends(require_current_user),
     db: Session = Depends(get_db)
 ):
     try:
         bot_token = (payload.bot_token or "").strip()
         chat_id = (payload.chat_id or "").strip()
-        base_url = (payload.webhook_base_url or str(request.base_url)).strip().rstrip("/")
+        base_url = telegram_service._normalize_base_url(payload.webhook_base_url)
 
         if not bot_token:
             raise HTTPException(status_code=400, detail="Bot Token مطلوب")
@@ -69,6 +70,8 @@ async def connect_telegram(
         if not chat_id:
             raise HTTPException(status_code=400, detail="Chat ID مطلوب")
 
+        gateway.api_decision("telegram.connect", "", {"chat": chat_id, "base": base_url,
+                        "credential_digest": ledger.fingerprint(bot_token)})
         integration = telegram_service.upsert_integration(
             db=db,
             user=current_user,
@@ -81,10 +84,12 @@ async def connect_telegram(
             message="تم ربط Telegram بنجاح",
             integration=integration.to_dict(),
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"فشل ربط Telegram: {str(exc)}")
+        raise HTTPException(status_code=502, detail="فشل ربط Telegram") from None
 
 
 @router.post("/toggle", response_model=TelegramMessageResponse)
@@ -98,16 +103,20 @@ async def toggle_telegram(
         raise HTTPException(status_code=404, detail="لا يوجد تكامل Telegram لهذا المستخدم")
 
     try:
+        gateway.api_decision("telegram.toggle", "", {"integration": integration.id,
+                             "configuration": ledger.fingerprint(integration.webhook_token), "enabled": payload.is_enabled})
         integration = telegram_service.set_enabled(db, integration, payload.is_enabled)
         return TelegramMessageResponse(
             success=True,
             message="تم تحديث حالة Telegram",
             integration=integration.to_dict(),
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"فشل تحديث حالة Telegram: {str(exc)}")
+        raise HTTPException(status_code=502, detail="فشل تحديث حالة Telegram") from None
 
 
 @router.delete("", response_model=TelegramMessageResponse)
@@ -119,6 +128,8 @@ async def disconnect_telegram(
     if not integration:
         raise HTTPException(status_code=404, detail="لا يوجد تكامل Telegram لهذا المستخدم")
 
+    gateway.api_decision("telegram.disconnect", "", {"integration": integration.id,
+                         "configuration": ledger.fingerprint(integration.webhook_token)})
     telegram_service.delete_integration(db, integration)
     return TelegramMessageResponse(success=True, message="تم فصل Telegram بنجاح", integration=None)
 
@@ -126,16 +137,31 @@ async def disconnect_telegram(
 @router.post("/webhook/{webhook_token}")
 async def telegram_webhook(
     webhook_token: str,
-    update: Dict[str, Any],
+    request: Request,
     db: Session = Depends(get_db)
 ):
+    supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if (not supplied.isascii() or len(webhook_token) > 80 or
+            not hmac.compare_digest(telegram_service.callback_secret(webhook_token), supplied)):
+        raise HTTPException(403, "invalid webhook")
     integration = telegram_service.get_integration_by_webhook_token(db, webhook_token)
-    if not integration:
-        raise HTTPException(status_code=404, detail="Telegram webhook غير معروف")
-
+    if not integration or not integration.is_enabled:
+        raise HTTPException(404, "unknown webhook")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 65536:
+            raise HTTPException(413, "update too large")
+        body.extend(chunk)
     try:
-        return telegram_service.process_webhook_update(db, integration, update, agent_manager)
-    except Exception as exc:
-        integration.last_error = str(exc)
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"Telegram webhook failed: {str(exc)}")
+        update = json.loads(body)
+    except (ValueError, RecursionError):
+        raise HTTPException(400, "invalid update") from None
+    if not isinstance(update, dict):
+        raise HTTPException(400, "invalid update")
+    try:
+        return telegram_service.process_webhook_update(db, integration, update)
+    except PermissionError:
+        raise HTTPException(403, "webhook action denied") from None
+    except Exception:
+        db.rollback()
+        raise HTTPException(502, "webhook processing failed") from None

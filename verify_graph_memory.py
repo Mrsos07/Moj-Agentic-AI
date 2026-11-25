@@ -174,7 +174,7 @@ def run_phases(store: GraphitiStore, employee_id: str) -> None:
     from app.aeos.employee.models import EmployeeConfig, Persona
 
     cfg = EmployeeConfig(
-        id=employee_id, user_id=None, platform="x", account_username="mazen_edu",
+        id=employee_id, user_id=1, platform="x", account_username="mazen_edu",
         persona=Persona(display_name="مازن", role="معلّم تقني", tone="ودّي",
                         language="ar", interests=["الذكاء الاصطناعي في التعليم"]),
     )
@@ -233,15 +233,26 @@ def main() -> int:
     db = args.db or os.path.join(tempfile.gettempdir(), f"graphiti_verify_{int(time.time())}")
     # الفحص لا يُصلح شيئاً: قاعدة Kuzu أحادية العملية، وفتحها أثناء عمل التطبيق
     # يفشل بخطأ قفل — يجب ألا يُفهم أبداً كتلف فتُزاح قاعدة سليمة.
-    store = GraphitiStore(db_path=db, min_score=args.min_score,
+    provider = "kuzu" if args.db or not args.inspect_only else None
+    store = GraphitiStore(db_path=db, provider=provider, min_score=args.min_score,
                           auto_repair=not args.inspect_only)
     print(f"قاعدة الرسم: {db}\n")
 
     if args.inspect_only:
-        inspect(store, args.employee)
+        from app.aeos.security.gateway import execution
+        from app.db import database
+        from app.db.models import AIEmployee
+        with database.SessionLocal() as session:
+            employee = session.get(AIEmployee, args.employee)
+            if employee is None:
+                ap.error("يلزم معرّف موظف مسجّل في قاعدة بيانات المشروع")
+            with execution(employee.user_id, agent=employee.id):
+                inspect(store, employee.id)
         store.close()
         return 0
 
+    from scripts.security_fixture import setup
+    setup(1, [(args.employee, "fixture"), (args.employee + "-other", "fixture_other")])
     run_full(store, args.employee)
     print()
     run_phases(store, args.employee)

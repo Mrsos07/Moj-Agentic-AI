@@ -29,6 +29,13 @@ def _dir() -> Path:
     return X._CATALOG_DIR
 
 
+_TRUSTED_CLASSES = {
+    "browser": "BrowserMCP", "content": "ContentMCP", "image": "ImageMCP", "memory": "MemoryMCP",
+    "news": "NewsMCP", "pixabay": "PixabayMCP", "playwright_x": "PlaywrightXMCP",
+    "search": "SearchMCP", "x": "XPlatformMCP",
+}
+
+
 def builtin_manifests(directory: Optional[Path] = None) -> List[Dict[str, Any]]:
     out = []
     for path in sorted((directory or _dir()).glob(f"*/{MANIFEST}")):
@@ -37,7 +44,8 @@ def builtin_manifests(directory: Optional[Path] = None) -> List[Dict[str, Any]]:
         except Exception:  # noqa: BLE001
             logger.exception("unreadable MCP manifest %s", path)
             continue
-        if isinstance(m, dict) and m.get("kind") == "builtin":
+        if (isinstance(m, dict) and m.get("kind") == "builtin" and path.parent.name in _TRUSTED_CLASSES
+                and m.get("class") == _TRUSTED_CLASSES[path.parent.name] and not path.parent.is_symlink()):
             m["slug"] = path.parent.name
             out.append(m)
     out.sort(key=lambda m: (int(m.get("order", 100)), m["slug"]))

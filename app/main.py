@@ -203,6 +203,9 @@ app.include_router(llm_router)
 
 # Include AEOS (AI Employee Operating System) routes
 app.include_router(aeos_router)
+from app.aeos.security.api import router as agent_security_router
+app.include_router(agent_security_router)
+from app.aeos.security.gateway import carry
 
 # CORS Configuration - تقييد النطاقات المسموحة
 import os
@@ -232,7 +235,7 @@ def _origin_allowed(origin: str) -> bool:
         return True
     if ALLOWED_ORIGIN_REGEX and _re.fullmatch(ALLOWED_ORIGIN_REGEX, origin):
         return True
-    return urlparse(origin).hostname in ("localhost", "127.0.0.1")
+    return False
 
 app.add_middleware(
     CORSMiddleware,
@@ -246,16 +249,37 @@ app.add_middleware(
 
 static_path = Path(__file__).parent.parent / "static"
 static_path.mkdir(exist_ok=True)
-# صور معاينة الهوية: سيرفر الهويات (5990، داخلي) يحفظها ويعيد مسارها /static/generated/<uuid>.<ext>،
-# فيخدمها هذا الخادم بالمسار ذاته ليحمّلها المتصفح من أصل الصفحة. رابط 5990 لا يصله متصفح المالك في
-# الإنتاج (قيس 2026-11-17: المعاينة بلا صورة ولا هيدر). قبل /static: أول Mount مطابق يفوز.
-from app.aeos.services import identity_store as _identity_store  # noqa: E402
-_identity_previews = _identity_store.generated_dir()
-_identity_previews.mkdir(parents=True, exist_ok=True)
-app.mount("/static/generated", StaticFiles(directory=str(_identity_previews)), name="identity_previews")
-app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+from app.aeos.services import identity_store as _identity_store
 
-uploads_path = static_path / "uploads"
+
+@app.exception_handler(PermissionError)
+async def permission_denied(request, exc):
+    from app.aeos.security import ledger
+    pending = ledger.challenge.get()
+    if pending:
+        return JSONResponse({"detail": f"راجع طلب الموافقة {pending}", "approval_id": pending}, status_code=403)
+    return JSONResponse({"detail": "العملية غير مصرح بها"}, status_code=403)
+
+
+@app.get("/api/aeos/employees/{employee_id}/identity/media/{proof}/{filename}")
+def identity_media(employee_id: str, proof: str, filename: str, user=Depends(_require_user)):
+    from app.aeos.security.gateway import owner, decision
+    try:
+        employee = owner(employee_id)
+        url = f"/api/aeos/employees/{employee_id}/identity/media/{proof}/{filename}"
+        path = _identity_store.source_file(employee, url)
+        decision("identity.preview.read", employee.id, {"file": filename})
+    except (PermissionError, _identity_store.IdentityError):
+        raise HTTPException(404, "المعاينة غير متاحة") from None
+    return FileResponse(path, headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/static/{path:path}", include_in_schema=False)
+def retired_static_files(path: str):
+    raise HTTPException(404, "الملف غير متاح")
+
+
+uploads_path = static_path.parent / "data" / "chat_uploads"
 uploads_path.mkdir(parents=True, exist_ok=True)
 
 # ─── واجهة React المبنية (frontend/dist) ───
@@ -397,7 +421,7 @@ def _maybe_engage_employee(message: str, pinned_account: Optional[str]) -> Optio
         # المُرسِل المضمون: يعيد المحاولة إن كانت هناك دورة جارية، ويتحقّق من أن
         # الفعل وقع فعلاً على X، ويُبلّغ الشات بالسبب إن لم يقع.
         _threading.Thread(
-            target=_EM.dispatch_directed,
+            target=carry(_EM.dispatch_directed),
             args=(cfg, {"force_fresh": True, "directed_engagement": {
                 "text": content, "handle": handle, "url": url,
                 "actions": sorted(actions),
@@ -485,7 +509,7 @@ def _maybe_direct_employee(message: str, pinned_account: Optional[str]) -> Optio
         from app.aeos.services import employee_mission as _EM
 
         _threading.Thread(
-            target=_EM.dispatch_directed,
+            target=carry(_EM.dispatch_directed),
             args=(cfg, {"directed_topic": topic},
                   ["publish_content", "publish_thread"],
                   f"نشر منشور عن «{snippet}»"),
@@ -736,7 +760,7 @@ def _remember_turn(user_id, session_id: Optional[str], user_message: str, reply:
         except Exception as e:  # noqa: BLE001
             print(f"Warning: memory update failed: {e}")
 
-    _threading.Thread(target=run, daemon=True).start()
+    _threading.Thread(target=carry(run), daemon=True).start()
 
 
 async def _send_employee_reply(websocket: WebSocket, db, user_id, session_id,
@@ -938,9 +962,11 @@ def _announce_interrupted(tasks: List[Dict[str, Any]]) -> None:
                 "جزء منه قبل الانقطاع. راجع النتيجة ثم اضغط «استئناف» من سجل التنفيذ إن أردت إعادته.")
         db = SessionLocal()
         try:
-            conv = memory_service.get_or_create_conversation(db=db, user_id=uid, session_id=t.get("session_id"))
-            memory_service.add_message(db=db, conversation_id=conv.id, role="assistant", content=text,
-                                       intent="task_interrupted", agent="System")
+            from app.aeos.security import gateway
+            with gateway.execution(int(uid), conversation=t.get('session_id') or ''):
+                conv = memory_service.get_or_create_conversation(db=db, user_id=uid, session_id=t.get("session_id"))
+                memory_service.add_message(db=db, conversation_id=conv.id, role="assistant", content=text,
+                                           intent="task_interrupted", agent="System")
         except Exception as e:  # noqa: BLE001
             print(f"Warning: persist interrupted notice failed: {e}")
         finally:
@@ -1044,6 +1070,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 }, websocket)
                 continue
             
+            if not isinstance(message_data, dict):
+                await websocket.close(code=1008)
+                return
+            from app.aeos.security import gateway
+            gateway.current.set(None)
+            gateway.bind(auth_uid)
             # نبضة على مستوى التطبيق: المتصفح لا يرى ping/pong الخاص بالبروتوكول،
             # فبدونها يظل السوكت «مفتوحاً» ظاهرياً بعد موت الخادم ولا تصل رسائل.
             # يجب أن تُعالج قبل أي شيء، وإلا حُسبت رسالةً فارغة وأُزعج الوكيل بها.
@@ -1078,7 +1110,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 if claimed["kind"] == "cycle":
                     import threading as _threading
-                    _threading.Thread(target=get_platform().resume_cycle, args=(claimed,),
+                    _threading.Thread(target=carry(get_platform().resume_cycle), args=(claimed,),
                                       daemon=True, name=f"resume-{tid[:20]}").start()
                     continue
                 # طلب شات: يُعاد بنصّه وسياقه الأصليين عبر المسار نفسه أدناه
@@ -1086,6 +1118,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 message_data = {**(claimed.get("request") or {}), "task_id": tid}
 
             user_message = message_data.get("message", "")
+            from app.aeos.security.ledger import admit
+            if not await asyncio.to_thread(admit, auth_uid, "chat", 60):
+                await manager.send_message({"type": "error", "message": "تجاوزت حد رسائل الدقيقة"}, websocket)
+                continue
             session_id = message_data.get("session_id", None)
             # user_id/user_email في الرسالة يُتجاهلان: الهوية من توكن الاتصال فقط
             user_id = auth_uid
@@ -1093,12 +1129,46 @@ async def websocket_endpoint(websocket: WebSocket):
             attachment = message_data.get("attachment", None)
             file_upload = message_data.get("file_upload", None)
             pinned_account = message_data.get("pinned_account", None)
+            if attachment:
+                import re as attachment_re
+                ref = attachment_re.fullmatch(r"/api/uploads/([a-f0-9]{32}\.[a-z0-9]{1,5})",
+                                              str(attachment.get("url", ""))) if isinstance(attachment, dict) else None
+                if not ref or not (uploads_path / str(auth_uid) / ref[1]).is_file():
+                    await manager.send_message({"type": "error", "message": "المرفق غير متاح"}, websocket)
+                    continue
+                attachment = {k: attachment.get(k) for k in ("url", "original_name", "size", "kind", "content_type")}
             # التثبيت على حساب لا يملكه المستخدم يُسقَط (كان يوجّه موظف غيره)
             if pinned_account and not await asyncio.to_thread(owns_label, pinned_account, auth_user):
                 pinned_account = None
             # سياق المحادثة الجارية لذاكرة الموظف قصيرة المدى (انظر agent_memory.CURRENT_CHAT)
             from app.aeos.memory.agent_memory import CURRENT_CHAT
-            CURRENT_CHAT.set({"user_id": _norm_uid(user_id), "session_id": session_id})
+            from app.aeos.security.gateway import bind
+            if session_id is not None and (not isinstance(session_id, str) or len(session_id) > 128):
+                await websocket.close(code=1008)
+                return
+            bind(auth_uid, conversation=session_id or "")
+            from app.aeos.security import ledger as approval_ledger
+            import re as approval_regex
+            command = str(user_message or "").strip()
+            review = approval_regex.fullmatch(r"معاينة ([a-f0-9]{32})", command)
+            confirm = approval_regex.fullmatch(r"موافقة ([a-f0-9]{32}) ([a-f0-9]{64})", command)
+            if resumed_task is None and (command == "الموافقات" or review or confirm):
+                try:
+                    if review:
+                        grant = await asyncio.to_thread(approval_ledger.view, auth_uid, review[1])
+                        reply = json.dumps(grant, ensure_ascii=False, indent=2)
+                        reply += f"\nللموافقة على هذه الوسائط خلال المهلة أرسل: موافقة {review[1]} {grant['digest']}"
+                    elif confirm:
+                        await asyncio.to_thread(approval_ledger.approve, auth_uid, confirm[1], confirm[2])
+                        reply = "اعتمدت العملية لمرة واحدة. أعِد طلب تنفيذها قبل انتهاء المهلة."
+                    else:
+                        ids = await asyncio.to_thread(approval_ledger.pending, auth_uid)
+                        reply = "\n".join("معاينة " + i for i in ids) or "لا توجد موافقات معلّقة."
+                except LookupError:
+                    reply = "الموافقة غير متاحة أو انتهت مدتها."
+                await manager.send_message({"type": "assistant_message", "message": reply, "session_id": session_id}, websocket)
+                continue
+            CURRENT_CHAT.set({"user_id": auth_uid, "session_id": session_id})
             # نداءات LLM أثناء معالجة هذه الرسالة (نقاش الموظف، الردود المساعدة) تذهب لنموذج
             # «الشات» الذي اختاره المستخدم؛ asyncio.to_thread ينقل السياق للخيوط تلقائياً
             from app.core.llm_provider import LLM_OWNER
@@ -1170,6 +1240,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 }, websocket)
                                 continue
                             
+                            from app.aeos.security import gateway as login_gateway, ledger as login_ledger
+                            login_gateway.login_accounts(user_id, accounts)
                             await manager.send_message({
                                 "type": "typing",
                                 "status": False
@@ -1194,6 +1266,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 data = resp.json()
                                 if data.get("success"):
                                     session_id = data.get("session_id")
+                                    login_ledger.login_session(user_id, session_id, register=True)
                                     await manager.send_message({
                                         "type": "assistant_message",
                                         "message": f"✅ بدأت عملية تسجيل الدخول الجماعي\n\n📊 عدد الحسابات: {len(accounts)}\n🔑 Session ID: `{session_id}`\n\nسيتم إعلامك عند الانتهاء.",
@@ -1589,7 +1662,7 @@ async def upload_file(file: UploadFile = File(...), current_user=Depends(_requir
     if ext not in allowed:
         raise HTTPException(status_code=400, detail="نوع الملف غير مسموح")
 
-    data = await file.read()
+    data = await file.read(max_size_bytes + 1)
     if len(data) > max_size_bytes:
         raise HTTPException(status_code=400, detail="حجم الملف كبير جدًا")
 
@@ -1614,16 +1687,34 @@ async def upload_file(file: UploadFile = File(...), current_user=Depends(_requir
             raise HTTPException(status_code=400, detail="ملف غير صالح")
 
     safe_name = f"{uuid.uuid4().hex}{ext}"
-    out_path = uploads_path / safe_name
-    out_path.write_bytes(data)
+    owner_dir = uploads_path / str(current_user.id)
+    owner_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    from app.auth.security import cipher
+    (owner_dir / safe_name).write_bytes(cipher.encrypt(data))
 
     return {
-        "url": f"/static/uploads/{safe_name}",
+        "url": f"/api/uploads/{safe_name}",
         "original_name": filename,
         "content_type": file.content_type,
         "size": len(data),
         "kind": kind
     }
+
+@app.get("/api/uploads/{filename}")
+def read_upload(filename: str, current_user=Depends(_require_user)):
+    import mimetypes
+    import re
+    from fastapi import Response
+    from app.auth.security import cipher
+    if not re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]{1,5}", filename):
+        raise HTTPException(404)
+    target = uploads_path / str(current_user.id) / filename
+    if not target.is_file():
+        raise HTTPException(404)
+    return Response(cipher.decrypt(target.read_bytes()), media_type=mimetypes.guess_type(filename)[0]
+                    or "application/octet-stream", headers={"Cache-Control": "private, no-store",
+                    "Content-Disposition": f'attachment; filename="{filename}"'})
+
 
 @app.post("/api/send-message")
 async def send_message_to_n8n(request: MessageRequest, current_user=Depends(_require_user)):
@@ -1659,6 +1750,10 @@ async def send_message_to_n8n(request: MessageRequest, current_user=Depends(_req
                     "timestamp": datetime.now().isoformat()
                 }
             )
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1739,7 +1834,9 @@ async def serve_react_spa(full_path: str):
         raise HTTPException(status_code=404, detail="React build not found")
 
     # لو الملف موجود فعلياً في dist (favicon, robots.txt, ...) → نخدمه مباشرة
-    file_path = FRONTEND_DIST / full_path
+    file_path = (FRONTEND_DIST / full_path).resolve()
+    if not file_path.is_relative_to(FRONTEND_DIST.resolve()):
+        raise HTTPException(status_code=404)
     if file_path.is_file():
         return FileResponse(file_path)
 

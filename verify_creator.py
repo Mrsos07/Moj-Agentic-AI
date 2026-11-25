@@ -38,7 +38,7 @@ def check(name: str, passed: bool, detail: str = "") -> bool:
 # ─────────────────────────── fixtures ───────────────────────────
 def make_config(**rules) -> EmployeeConfig:
     cfg = EmployeeConfig(
-        id="verify-creator", user_id=None, platform="x",
+        id="verify-creator", user_id=1, platform="x",
         account_username="mazen_edu", cookie_label="mazen_edu",
         persona=Persona(
             display_name="مازن", role="صانع محتوى تقني", tone="ودّي",
@@ -1483,6 +1483,10 @@ def check_decision_review_consistency() -> None:
 
 
 def main() -> int:
+    from scripts.security_fixture import setup
+    from app.aeos.employee.repository import SqlEmployeeRepository
+    setup(1)
+    SqlEmployeeRepository().save(make_config())
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", default="", help="cookie_label للنشر الحقيقي")
     ap.add_argument("--handle", default="", help="يوزر الحساب (بلا @)")

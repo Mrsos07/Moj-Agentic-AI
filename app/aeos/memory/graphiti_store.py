@@ -98,6 +98,21 @@ _NEAR_DUP_THRESHOLD = 0.65
 _MAX_PER_SUBJECT = 3
 
 
+def _guard_graph(fn):
+    from functools import wraps
+    from app.aeos.security import gateway
+    from app.aeos.security.data import clean
+
+    @wraps(fn)
+    def guarded(self, employee_id=None, *args, **kwargs):
+        if not employee_id:
+            gateway._deny("graph-scope")
+        gateway.owner(employee_id)
+        gateway.decision("graph." + fn.__name__, employee_id, {})
+        return fn(self, employee_id, *(clean(a) for a in args), **clean(kwargs))
+    return guarded
+
+
 class GraphitiStore:
     """جسر متزامن حول Graphiti + Kuzu، معزول لكل موظف عبر group_id."""
 
@@ -524,6 +539,7 @@ class GraphitiStore:
         return str(payload or "").strip()[:_MAX_EPISODE_CHARS], EpisodeType.text
 
     # ---- public API ------------------------------------------------------
+    @_guard_graph
     def ingest(self, employee_id: str, payload: Union[str, Dict[str, Any]],
                name: str = "cycle",
                source_description: str = "aeos cognitive cycle") -> Optional[Future]:
@@ -606,6 +622,7 @@ class GraphitiStore:
             self._search_cache.clear()
         self._search_cache[key] = (time.monotonic(), self._ingest_epoch, list(facts))
 
+    @_guard_graph
     def search_facts(self, employee_id: str, queries: Sequence[str], limit: int = 10,
                      timeout: float = 30.0, include_recent: bool = True) -> List[str]:
         """بحث بعدّة استعلامات مركّزة ودمج مرتّب بلا تكرار.
@@ -649,6 +666,7 @@ class GraphitiStore:
         self._cache_put(cache_key, facts)
         return facts
 
+    @_guard_graph
     def facts_about(self, employee_id: str, entities: Sequence[str],
                     limit: int = 3, timeout: float = 30.0) -> Dict[str, List[str]]:
         """ما يعرفه الرسم المعرفي عن **كيانات محدّدة** (حسابات/مواضيع).
@@ -762,6 +780,7 @@ class GraphitiStore:
         facts = [str(r.get("fact") or "").strip() for r in (records or [])]
         return _drop_near_duplicates(_dedup([f for f in facts if f]))[:limit]
 
+    @_guard_graph
     def recent_facts(self, employee_id: str, limit: int = 10,
                      timeout: float = 15.0) -> List[str]:
         """نسخة متزامنة من الاحتياطي الزمني (تشخيص/عرض)."""
@@ -780,6 +799,7 @@ class GraphitiStore:
         except Exception:  # noqa: BLE001
             return []
 
+    @_guard_graph
     def stats(self, employee_id: Optional[str] = None,
               timeout: float = 15.0) -> Dict[str, Any]:
         """عدّادات تحقّق: هل تُغذّى الذاكرة فعلاً ويُستخرج منها حقائق؟"""
@@ -826,6 +846,7 @@ class GraphitiStore:
             info["employee_id"] = employee_id
         return info
 
+    @_guard_graph
     def clear(self, employee_id: str) -> None:
         """احذف كل حقائق موظف واحد (عند حذف الموظف)."""
         self._last_digest.pop(employee_id, None)
@@ -994,6 +1015,18 @@ class GraphitiStoreProxy:
     def _call(self, op: str, rpc_timeout: float = 30.0, default: Any = None,
               **kwargs: Any) -> Any:
         """طلب/ردّ واحد. موت العامل (انهيار Kuzu) يعيد القيمة الآمنة فوراً."""
+        from app.aeos.security import gateway
+        from app.aeos.security.data import clean
+        identity = None
+        if op not in {"available", "ping"}:
+            employee_id = kwargs.get("employee_id")
+            if not employee_id:
+                gateway._deny("graph-scope")
+            gateway.owner(employee_id)
+            p = gateway.current.get()
+            identity = {"user_id": p.user_id, "agent": employee_id,
+                        "conversation": p.conversation, "correlation": p.correlation}
+        kwargs = clean(kwargs)
         with self._io_lock:
             if not self._spawn():
                 return default
@@ -1002,7 +1035,7 @@ class GraphitiStoreProxy:
             rid = self._next_id
             try:
                 proc.stdin.write(json.dumps(
-                    {"id": rid, "op": op, "kwargs": kwargs}, ensure_ascii=False
+                    {"id": rid, "op": op, "kwargs": kwargs, "principal": identity}, ensure_ascii=False
                 ) + "\n")
                 proc.stdin.flush()
                 # readline يعود بسطر فارغ إذا مات العامل (أنبوب مقطوع) — وهذا

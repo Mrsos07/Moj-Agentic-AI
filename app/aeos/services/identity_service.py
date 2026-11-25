@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from ..security.gateway import carry
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("aeos.identity_service")
@@ -99,19 +100,6 @@ def persona_identity_params(persona) -> Dict[str, Any]:
     }
 
 
-def _preview_path(url: str) -> str:
-    """صور المولّد تبقى مسارات نسبية ``/static/generated/<uuid>.<ext>``: يخدمها الخادم الخلفي نفسه
-    (main.py)، فيحمّلها المتصفح من أصل الصفحة (nginx في الإنتاج وvite في التطوير يمرّران /static).
-    كانت تُحوَّل إلى http://127.0.0.1:5990/… — عنوان سيرفر الهويات داخل الخادم، يطلبه متصفح المالك
-    في الإنتاج من جهازه هو، فظهرت المعاينة بلا صورة ولا هيدر (2026-11-17). التطبيق على X لا يحتاج
-    رابطاً: يرفع البايتات المثبّتة (identity_store)."""
-    from app.services import identity_bridge
-
-    url = (url or "").strip()
-    base = identity_bridge.IDENTITY_BASE_URL
-    return url[len(base):] if url.startswith(base + "/") else url
-
-
 # ─────────────────────────── public API ───────────────────────────
 def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None,
                      with_images: bool = True) -> Dict[str, Any]:
@@ -121,6 +109,7 @@ def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None,
     Raises ``RuntimeError`` with a user-facing Arabic message on failure.
     """
     from app.services import identity_bridge
+    from . import identity_store
 
     entities = entities or {}
     if not identity_bridge.start_identity_server():
@@ -141,8 +130,8 @@ def generate_preview(cfg, entities: Optional[Dict[str, Any]] = None,
         "name": (data.get("name") or "").strip(),
         "username": (data.get("username") or "").strip(),
         "bio": (data.get("bio") or "").strip(),
-        "avatar_url": _preview_path(data.get("profilePictureUrl")),
-        "banner_url": _preview_path(data.get("headerImageUrl")),
+        "avatar_url": identity_store.preview_url(cfg, data.get("profilePictureUrl")),
+        "banner_url": identity_store.preview_url(cfg, data.get("headerImageUrl")),
     }
 
     # الهوية من التعليمات والبرسونا فقط: ما كتبه المستخدم في البرسونا
@@ -175,6 +164,7 @@ def generate_field(cfg, field: str, prompt: str = "") -> Dict[str, str]:
     Returns ``{<identity_key>: <new_value>}`` — نفس مفاتيح dict الهوية.
     """
     from app.services import identity_bridge
+    from . import identity_store
 
     if field not in IDENTITY_FIELDS:
         raise RuntimeError(f"حقل غير معروف: {field}")
@@ -204,7 +194,7 @@ def generate_field(cfg, field: str, prompt: str = "") -> Dict[str, str]:
         if not img_res.get("success"):
             raise RuntimeError(f"فشل توليد الصورة: "
                                f"{img_res.get('error') or img_res.get('message', 'خطأ غير معروف')}")
-        url = _preview_path(img_res.get("data", {}).get("imageUrl"))
+        url = identity_store.preview_url(cfg, img_res.get("data", {}).get("imageUrl"))
         if not url:
             raise RuntimeError("المولّد لم يُرجع رابط صورة.")
         return {("avatar_url" if field == "avatar" else "banner_url"): url}
@@ -240,19 +230,23 @@ def request_apply_identity(cfg, user_id: Optional[int],
     إن لم تعد صور المعاينة متاحة: لا تُطبَّق أبداً صورة غير التي اعتمدها المالك."""
     from . import identity_store
 
-    if identity:
-        record = identity_store.create_pending(cfg, user_id, identity)
-        _start(cfg, record)
-        what = " + ".join(lbl for lbl, on in (
-            ("اسم", record["name"]), ("بايو", record["bio"]),
-            ("صورة", "avatar" in record["media"]), ("هيدر", "banner" in record["media"])) if on)
-        return (f"🪩 جارِ تطبيق الهوية التي اعتمدتها على حساب **@{cfg.account_username}** "
-                f"في X ({what}) — بالصورة والهيدر نفسيهما كما في المعاينة. قد يستغرق ذلك "
-                "دقيقة، وستصلك النتيجة المؤكَّدة في محادثة الموظف. ⏳")
-    threading.Thread(target=_run_new, args=(cfg, user_id, entities or {}), daemon=True).start()
-    return (f"🎨 جارِ توليد هوية جديدة من برسونا الموظف **@{cfg.account_username}** "
-            "وتطبيقها على حسابه في X (اسم + بايو + صورة + هيدر)…\n"
-            "قد يستغرق ذلك ٢-٣ دقائق، وسأوافيك بالنتيجة هنا. ⏳")
+    from app.aeos.security import gateway
+    employee = gateway.owner(cfg.id)
+    if employee.user_id != user_id or employee.account_username != cfg.account_username:
+        gateway._deny("identity-owner")
+    if not identity:
+        identity = generate_preview(cfg, entities or {})
+        identity_store.remember_preview(cfg.id, user_id, identity)
+        return f"أُعدّت معاينة جديدة للموظف @{cfg.account_username}. راجعها ثم اطلب تطبيق الهوية."
+    gateway.decision("identity.apply", cfg.id, {"account": cfg.account_username, "identity": identity}, sensitive=True)
+    record = identity_store.create_pending(cfg, user_id, identity)
+    _start(cfg, record)
+    what = " + ".join(lbl for lbl, on in (
+        ("اسم", record["name"]), ("بايو", record["bio"]),
+        ("صورة", "avatar" in record["media"]), ("هيدر", "banner" in record["media"])) if on)
+    return (f"🪩 جارِ تطبيق الهوية التي اعتمدتها على حساب **@{cfg.account_username}** "
+            f"في X ({what}) — بالصورة والهيدر نفسيهما كما في المعاينة. قد يستغرق ذلك "
+            "دقيقة، وستصلك النتيجة المؤكَّدة في محادثة الموظف. ⏳")
 
 
 def apply_from_chat(cfg, user_id: Optional[int], entities: Optional[Dict[str, Any]] = None) -> str:
@@ -302,21 +296,8 @@ def resume_pending() -> int:
 
 # ─────────────────────────── worker ───────────────────────────
 def _start(cfg, record: Dict[str, Any]) -> None:
-    threading.Thread(target=_run, args=(cfg, record), daemon=True,
+    threading.Thread(target=carry(_run), args=(cfg, record), daemon=True,
                      name=f"identity-apply-{cfg.account_username}").start()
-
-
-def _run_new(cfg, user_id: Optional[int], entities: Dict[str, Any]) -> None:
-    from . import identity_store
-    from .employee_data import _push
-
-    try:
-        record = identity_store.create_pending(cfg, user_id, generate_preview(cfg, entities))
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("identity generation failed for %s", cfg.account_username)
-        _push(user_id, f"⚠️ تعذّر توليد هوية لـ@{cfg.account_username}: {exc}", cfg)
-        return
-    _run(cfg, record)
 
 
 def _run(cfg, record: Dict[str, Any]) -> None:

@@ -173,6 +173,9 @@ async def update_user(
         touches_dev = "developer" in (new_role, role_of(user))
         if touches_dev and not has(admin_user, "admin.roles.grant_developer"):
             raise HTTPException(status_code=403, detail="منح دور المطوّر أو سحبه للمطوّر فقط")
+    from app.aeos.security.gateway import api_decision
+    api_decision("admin.user.update", "", {"account": user.id, "changes": request.model_dump(exclude_unset=True)})
+    if new_role is not None and new_role != role_of(user):
         set_role(user, new_role)
     if request.is_active is not None:
         user.is_active = request.is_active
@@ -284,6 +287,8 @@ async def delete_user(
     
     # كل ما يخص المستخدم يُمحى معه: كان الحذف يترك موظفيه يعملون بلا مالك، ومحادثاته
     # وذاكرة منسّقه يتيمة في قاعدة البيانات (app.aeos.memory.lifecycle)
+    from app.aeos.security.gateway import api_decision
+    api_decision("admin.user.delete", "", {"account": user.id})
     from app.aeos.memory.lifecycle import purge_user
 
     from app.auth.token_guard import revoke_user

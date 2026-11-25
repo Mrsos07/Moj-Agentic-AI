@@ -5,7 +5,7 @@ import bcrypt
 from pydantic import BaseModel
 import os
 from dotenv import load_dotenv
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, MultiFernet
 import base64
 import secrets
 
@@ -40,11 +40,12 @@ if not ENCRYPTION_KEY:
     else:
         raise ValueError(
             "ENCRYPTION_KEY must be set in .env. "
-            "Generate one with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+            "Generate one with: python -c 'from cryptography.fernet import Fernet, MultiFernet; print(Fernet.generate_key().decode())'"
         )
 
 try:
-    cipher = Fernet(ENCRYPTION_KEY.encode())
+    previous = [Fernet(key.strip().encode()) for key in os.getenv("AEOS_PREVIOUS_ENCRYPTION_KEYS", "").split(",") if key.strip()]
+    cipher = MultiFernet([Fernet(ENCRYPTION_KEY.encode()), *previous])
 except Exception as e:
     raise ValueError(f"Invalid ENCRYPTION_KEY format: {e}")
 

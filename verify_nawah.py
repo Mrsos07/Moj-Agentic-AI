@@ -188,19 +188,15 @@ check("بلا مزوّد: env كما هي", X.runtime_env({"slug": "none", "env"
 X.register_env_provider("zz_bad", lambda: 1 / 0)
 check("مزوّد يفشل لا يُسقط الاتصال", X.runtime_env({"slug": "zz_bad", "env": {"K": "v"}}) == {"K": "v"})
 check("مزوّد nawah_clone مسجّل بعد install()", (NC.install() or True) and X._ENV_PROVIDERS.get("nawah_clone") is NC.runtime_env)
-# إعادة الاتصال عند تغيّر البيئة: نحاكي نقلاً حيّاً
-state = {"env": {"A": "1"}}
-X.register_env_provider("zz_re", lambda: state["env"])
-client = X.MCPClient({"slug": "zz_re", "transport": "stdio", "command": "node", "args": [], "env": {}})
-closed = []
-client._t = SimpleNamespace(alive=True, close=lambda: closed.append(1))
-client._env_sig = X._env_signature(X.runtime_env(client._cfg))
-client._connect = lambda: closed.append("connect")
-client._ensure()
-check("بيئة ثابتة → لا إعادة اتصال", closed == [])
-state["env"] = {"A": "2"}
-client._ensure()
-check("بيئة تغيّرت → إغلاق ثم اتصال جديد", closed == [1, "connect"])
+# stdio has a fresh container for every discovery, even when using the same client.
+from unittest.mock import patch as sandbox_patch
+from app.aeos.security import sandbox
+cfg_probe = {"slug": "zz_re", "transport": "stdio", "command": "node", "args": [], "env": {}}
+client = X.MCPClient(cfg_probe)
+with sandbox_patch.object(sandbox, "operate", return_value=({"capabilities": {}}, [])) as run:
+    client.list_tools()
+    client.list_tools()
+    check("كل اكتشاف stdio يستخدم حاوية منفصلة", run.call_count == 2 and client._t is None)
 X._ENV_PROVIDERS.pop("zz_test", None); X._ENV_PROVIDERS.pop("zz_bad", None); X._ENV_PROVIDERS.pop("zz_re", None)
 
 # ─────────────────────────── 7) التوجيه الإعلامي (nawah_brief) — بلا شبكة ───────────────────────────
@@ -240,14 +236,10 @@ def _emp(handle, **kw):
                                           instructions="اكتب بإيجاز"), **kw)
 
 cloned = _emp("cloned_emp", business_rules={"voice_profile": {"version": 2, "nawah": {"id": "cloned_emp__src"}}})
-(NC.DATA_DIR / "clones").mkdir(parents=True, exist_ok=True)
-tmp_clone = NC.DATA_DIR / "clones" / "cloned_emp__src.json"
-tmp_clone.write_text("{}", encoding="utf-8")
-try:
+from unittest.mock import patch
+with patch("app.aeos.security.sandbox.has_clone", return_value=True):
     v1 = NB.voice_for(cloned)
     check("موظف مستنسَخ ← استنساخه المحفوظ", v1 == {"clone": "cloned_emp__src", "count": 1})
-finally:
-    tmp_clone.unlink(missing_ok=True)
 plain = _emp("plain_emp")
 v2 = NB.voice_for(plain)
 check("موظف غير مستنسَخ ← persona من شخصيته", "persona" in v2 and v2["persona"]["handle"] == "plain_emp" and "محلّل اقتصادي" in v2["persona"]["description"]
