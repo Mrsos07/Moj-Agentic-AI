@@ -1,7 +1,7 @@
 """
 run_verify.py — يشغّل كل verify_*.py (أو المحدّدة) واحداً تلو الآخر ويحفظ النتيجة في JSON.
 
-    .\\venv\\Scripts\\python.exe scripts\\run_verify.py --out backups\\verify-sqlite.json
+    .\\venv\\Scripts\\python.exe scripts\\run_verify.py --out backups\\verify-postgres.json
     .\\venv\\Scripts\\python.exe scripts\\run_verify.py verify_checkpoints.py verify_database.py
 
 لكل ملف: رمز الخروج، المدة، عدد ✅/❌، وآخر 40 سطراً من المخرجات. المتغيّرات الحالية تُمرَّر كما هي

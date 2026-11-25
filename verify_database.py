@@ -126,7 +126,7 @@ def seed(engine) -> dict:
 
 # ═════════════════════════════ 1) الإعداد ═════════════════════════════
 print("1) الإعداد: الرابط، الخيارات، لا رجوع صامت إلى SQLite")
-check("DATABASE_URL فارغ ⇒ SQLite data/app.db كما كان", DB.resolve_database_url({}) == DB.SQLITE_URL)
+check("PostgreSQL is the default and SQLite runtime URLs are rejected", DB.resolve_database_url({}).startswith("postgresql+") and raises(lambda: DB.resolve_database_url({"DATABASE_URL": "sqlite:///legacy.db"}), ValueError))
 check("postgres:// ⇒ postgresql+psycopg2", DB.resolve_database_url({"DATABASE_URL": "postgres://u:p@h:5432/d"})
       .startswith("postgresql+psycopg2://"))
 check("لهجة غير مدعومة تُرفض", raises(lambda: DB.resolve_database_url({"DATABASE_URL": "mysql://u:p@h/d"}), ValueError))

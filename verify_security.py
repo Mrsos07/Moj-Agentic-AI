@@ -234,12 +234,11 @@ check("caddy يضع ترويسات الأمان وHSTS لكل الردود",
           for h in ("Strict-Transport-Security", "X-Frame-Options", "X-Content-Type-Options")))
 check("إعادة إنشاء backend تعيد تشغيل nginx (يحل الاسم مرة عند إقلاعه ⇒ 502 بعنوان قديم)",
       compose["frontend"]["depends_on"]["backend"].get("restart") is True)
-pgc = yaml.safe_load(Path("docker-compose.postgres.yml").read_text(encoding="utf-8"))["services"]
-check("PostgreSQL (الملف الإضافي): بلا منافذ منشورة، صورة مثبّتة، ترتيب C.UTF-8، والخادم ينتظر migrate",
-      not any(svc.get("ports") for svc in pgc.values())
-      and pgc["postgres"]["image"].startswith("postgres:18.") and "C.UTF-8" in pgc["postgres"]["environment"]["POSTGRES_INITDB_ARGS"]
-      and pgc["backend"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
-      and "DATABASE_URL" not in str(compose["backend"].get("environment")))
+check("PostgreSQL is required and private; schema migration precedes backend startup",
+      not compose["postgres"].get("ports") and compose["postgres"]["image"].startswith("postgres:18.")
+      and "C.UTF-8" in compose["postgres"]["environment"]["POSTGRES_INITDB_ARGS"]
+      and compose["backend"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+      and compose["backend"]["environment"]["DATABASE_URL"] == compose["migrate"]["environment"]["DATABASE_URL"])
 envx = Path(".env.docker.example").read_text(encoding="utf-8")
 check("قالب الإنتاج: التسجيل مغلق وDEBUG معطّل", "ALLOW_REGISTRATION=false" in envx and "DEBUG=False" in envx)
 check("سكربتات الخادم بنهايات LF (CRLF يكسر bash)",

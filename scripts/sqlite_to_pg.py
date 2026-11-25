@@ -66,9 +66,9 @@ def _dry_run(src, dst) -> dict:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="نقل قاعدة موج بين SQLite وPostgreSQL")
+    ap = argparse.ArgumentParser(description="استيراد قاعدة التطبيق الرئيسية القديمة أو تصدير مخططها الرئيسي للأرشيف")
     ap.add_argument("--source", default=str(ROOT / "data" / "app.db"), help="ملف SQLite الأصلي (قراءة فقط)")
-    ap.add_argument("--target", required=True, help="رابط PostgreSQL (postgresql+psycopg2://…)")
+    ap.add_argument("--target", default=None, help="رابط PostgreSQL (postgresql+psycopg2://…)")
     ap.add_argument("--out-dir", default=str(ROOT / "backups"))
     ap.add_argument("--snapshot", default=None, help="لقطة موجودة (للاستئناف/التحقق) بدل لقطة جديدة")
     ap.add_argument("--batch", type=int, default=T.BATCH)
@@ -79,7 +79,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None, help="مع --reverse: مسار ملف SQLite جديد (يجب ألا يكون موجوداً)")
     args = ap.parse_args(argv)
 
-    dst = DB.build_engine(DB.resolve_database_url({"DATABASE_URL": args.target}))
+    dst = DB.build_engine(DB.resolve_database_url({"DATABASE_URL": args.target} if args.target else None))
     if dst.dialect.name != "postgresql":
         ap.error("--target يجب أن يكون PostgreSQL")
     print(f"PostgreSQL: {DB.safe_url(dst)}")

@@ -119,6 +119,7 @@
       JWT_SECRET_KEY=...            (64 حرفاً من الأمر أعلاه)
       ENCRYPTION_KEY=...            (44 حرفاً تنتهي بـ =)
       NEO4J_PASSWORD=...
+      POSTGRES_PASSWORD=...         (كلمة مستقلة من openssl rand -hex 24)
       OPENROUTER_API_KEY=sk-or-v1-...
       OPENROUTER_MODEL=openai/gpt-4o-mini     (اسم مؤهَّل بالمزوّد دائماً)
       ALLOW_REGISTRATION=false                 (الحسابات يُنشئها المشرف — الخطوة ٧)
@@ -214,6 +215,8 @@
 ■ ١٠. التحديث لإصدار جديد
 ═══════════════════════════
 
+   إذا كان الإصدار الحالي يستخدم SQLite لأي مخزن، اتبع ١١ب قبل أي إعادة بناء كي تحفظ قاعدة X داخل الحاوية القديمة.
+
       cd /opt/moj
       ./scripts/backup.sh                  ← نسخة احتياطية قبل أي تحديث
       git pull --ff-only
@@ -247,49 +250,43 @@
    مع PostgreSQL تضم النسخة postgres.dump (pg_dump -Fc) ويستعيده restore.sh بـ pg_restore --clean.
 
 
-■ ١١ب. التحويل إلى PostgreSQL (اختياري — الافتراضي SQLite ولا يتغيّر شيء بدون هذه الخطوات)
-══════════════════════════════════════════════════════════════════════════════════════
+■ ١١ب. PostgreSQL والترحيل أثناء نافذة الصيانة
 
-   نافذة صيانة قصيرة (دقائق للبيانات الحالية). الأصل data/app.db لا يُعدَّل أبداً.
+   عند التثبيت الجديد ضع POSTGRES_PASSWORD في .env ثم شغّل docker compose up -d --build.
+   يبدأ postgres على الشبكة الداخلية، ثم ينفذ migrate ترقية Alembic ويبدأ backend بعد نجاحها.
+   للتشغيل المحلي اضبط DATABASE_URL على رابط PostgreSQL وشغّل python scripts/db_migrate.py upgrade.
+   تشمل نسخة PostgreSQL المخطط الرئيسي ومخططات xsuite وtimeline وagent_security.
 
-   ١) نسخة احتياطية:            ./scripts/backup.sh
-   ٢) في .env أزل # من السطرين (كلمة مرور حروف وأرقام فقط: openssl rand -hex 24):
-         COMPOSE_FILE=docker-compose.yml:docker-compose.postgres.yml
-         POSTGRES_PASSWORD=...
-   ٣) أوقف الخادم الخلفي (لا كتابة بعد اللقطة) وأنشئ القاعدة ومخططها:
-         docker compose stop backend
+   على تثبيت قديم، نفّذ الخطوات التالية في نافذة صيانة. احتفظ بإصدار التطبيق السابق ومفاتيحه
+   ونسخة احتياطية منه. إذا كان PostgreSQL مستخدمًا للقاعدة الرئيسية أصلًا فاحتفظ بحجم pg_data
+   وبيانات اتصاله، وخذ pg_dump قبل الترقية وانقل المخازن الجانبية فقط.
+
+   ١. شغّل backup.sh من الإصدار السابق. أوقف جميع عمليات الكتابة بما فيها backend والجدولة.
+      قبل إعادة إنشاء حاوية backend القديمة استخرج مجلد instance كاملًا لأنه كان في طبقة الحاوية:
+         mkdir -p backups/legacy-xsuite
+         docker cp "$(docker compose ps -aq backend):/app/app/x/instance/." backups/legacy-xsuite/
+      احتفظ بملفات WAL/SHM مع ملفاتها الأساسية أثناء أخذ النسخ الموقوفة.
+   ٢. حدّث الكود والإعدادات، ثم أنشئ المخطط داخل PostgreSQL مع إبقاء backend متوقفًا:
+         docker compose build backend agent-sandbox
          docker compose up -d postgres
          docker compose run --rm migrate
-   ٤) تجربة بلا كتابة (الأعداد، الأيتام التي ستُعزل، ترتيب النصوص):
-         docker compose run --rm --no-deps backend sh -c \
-           'python scripts/sqlite_to_pg.py --out-dir data/backups --target "$DATABASE_URL" --dry-run'
-   ٥) النقل الفعلي (يتحقق تلقائياً: العدد والبصمة لكل جدول، وأن الأصل لم يتغيّر):
-         docker compose run --rm --no-deps backend sh -c \
-           'python scripts/sqlite_to_pg.py --out-dir data/backups --target "$DATABASE_URL"'
-      انقطع؟ أعد الأمر نفسه مع --resume --snapshot data/backups/premigration-<ts>/app.db
-      رمز خروج غير 0 ⇒ لا تكمل؛ التقرير في data/backups/premigration-<ts>/transfer-report.json
-   ٦) شغّل وتحقق:
-         docker compose up -d
-         docker compose logs backend | grep "Database schema"      ← (postgresql)
-      ثم سجّل الدخول وافتح محادثة وموظفاً.
-
-   ما يحدث للبيانات:
-   • صفوف تشير لأب محذوف (SQLite لا يفرض المفاتيح الأجنبية) لا تُحذف: تُنسخ كاملة إلى الجدول
-     _migration_quarantine مع السبب، وتعود لجداولها في النقل العكسي.
-   • المعرّفات وأرقام التسلسل محفوظة (التوكنات المفتوحة تبقى صالحة، والمتصفح لا يفقد رسائل).
-
-   التراجع:
-   • قبل أي استخدام على PostgreSQL: احذف سطر COMPOSE_FILE ثم
-         docker compose up -d --remove-orphans          ← يعود على data/app.db الأصلي
-   • بعد كتابات على PostgreSQL (تُنقل للخلف إلى ملف SQLite جديد، والقديم يبقى):
-         docker compose stop backend
-         docker compose run --rm --no-deps backend sh -c \
-           'python scripts/sqlite_to_pg.py --reverse --target "$DATABASE_URL" --out data/app.db.from_pg'
-         docker compose run --rm --no-deps backend sh -c \
-           'mv data/app.db data/app.db.before_pg && mv data/app.db.from_pg data/app.db'
-      ثم احذف سطر COMPOSE_FILE و: docker compose up -d --remove-orphans
-   • حجم pg_data يبقى بعد التراجع (لا يُحذف تلقائياً).
-
+   ٣. استورد القاعدة الرئيسية القديمة إلى هدف فارغ. تستخدم الأداة DATABASE_URL من حاوية التشغيل.
+         docker compose run --rm --no-deps backend python scripts/sqlite_to_pg.py --out-dir data/backups
+      قارِن العدد والبصمة لكل جدول وراجع صفوف _migration_quarantine في تقرير النقل.
+      عند انقطاع النقل استخدم --resume --snapshot مع مسار نفس اللقطة.
+   ٤. انقل قواعد الخدمات الموجودة حسب مساراتها. أعد الأمر مع --verify-only للتحقق المستقل.
+         docker compose run --rm --no-deps -v "$PWD/backups/legacy-xsuite:/legacy:ro" backend python scripts/import_service_store.py xsuite /legacy/app.db
+         docker compose run --rm --no-deps backend python scripts/import_service_store.py timeline data/x_timeline.db
+         docker compose run --rm --no-deps backend python scripts/import_service_store.py agent_security data/agent_security.sqlite3
+      حافظ على مفاتيح التطبيق الأصلية للتحقق من سلسلة التدقيق وقراءة الموافقات المشفّرة.
+      عند فقدان ملف كان مستخدمًا، أو وجود اختلاف في البصمات، أوقف التحويل واستعد الملف من النسخة.
+   ٥. بعد نجاح التقارير، انقل ملفات SQLite القديمة وملحقاتها إلى أرشيف محمي خارج مسارات التشغيل.
+      يرفض backend بدء التشغيل إذا بقي ملف قديم في موقعه النشط. احتفظ بالأرشيف للعودة إلى الإصدار السابق
+      قبل استئناف الكتابة. بعد بدء الكتابة خذ نسخة PostgreSQL حديثة قبل أي استرداد.
+         docker compose up -d --build
+         docker compose ps
+         docker compose exec -T backend python scripts/db_migrate.py current
+      افحص /health والدخول والموظفين والجدولة، ثم شغّل scripts/backup.sh للاحتفاظ بـ postgres.dump.
 
 ■ ١٢. حل المشاكل الشائعة
 ══════════════════════════
@@ -359,7 +356,7 @@ docker build -t moj-agent-sandbox:local deploy/agent_sandbox
 يمكن التحقق من عزل المستخدم والملفات والشبكة عبر verify_agent_sandbox.py.
 
 اضبط AGENT_SECURITY_KEY بمفتاح مستقل عشوائي محفوظ في مدير الأسرار. عند تركه فارغًا يُشتق مفتاح السجل من JWT_SECRET_KEY.
-احفظ المفتاح ونسخة متسقة من data/agent_security.sqlite3 مع النسخ الاحتياطية. تغيير المفتاح يقطع إمكانية التحقق من السجل القديم.
+احفظ المفتاح ونسخة PostgreSQL متسقة تشمل مخطط agent_security مع النسخ الاحتياطية. تغيير المفتاح يقطع إمكانية التحقق من السجل القديم.
 للتحقق من سلسلة القرارات واستخراج بصمة آخر حدث شغّل
 docker compose exec backend python -c "from app.aeos.security.ledger import verify; print(verify())"
 احتفظ بالبصمة ووقت استخراجها في مخزن تدقيق مستقل محمي من الكتابة. تكشف السلسلة تعديل الأحداث، وتتطلب مقارنة خارجية لاكتشاف حذف نهايتها.

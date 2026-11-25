@@ -53,7 +53,7 @@ flowchart TB
 
     subgraph DATA["التخزين"]
         direction TB
-        SQL[("SQLite — data/app.db<br/>مستخدمون · محادثات · موظفون<br/>ذاكرة · سجلات تنفيذ")]
+        SQL[("PostgreSQL<br/>مستخدمون · محادثات · موظفون<br/>ذاكرة · سجلات تنفيذ")]
         NEO[("Neo4j (7687)<br/>Graphiti — ذاكرة معرفية")]
         FILES[("ملفات<br/>كوكيز X · external_mcp.json<br/>workspaces")]
     end
@@ -282,7 +282,7 @@ flowchart LR
 flowchart TB
     DE["حذف موظف"] --> P1["معاملة واحدة: execution_logs · employee_memories<br/>execution_jobs · agent_memories employee:&lt;id&gt;"]
     DE --> P2["مسح رسمه المعرفي (Graphiti)"]
-    DC["حذف محادثة"] --> P3["حذف ملخّصها conv:&lt;id&gt;<br/>(SQLite يعيد استخدام المعرّف — بلا هذا<br/>ترث محادثة جديدة ملخّص غيرها)"]
+    DC["حذف محادثة"] --> P3["حذف ملخّصها conv:&lt;id&gt;<br/>حذف بيانات المحادثة المرتبطة"]
     DU["حذف مستخدم (مشرف)"] --> P4["purge_user: موظفوه ← كل ما سبق<br/>محادثاته ورسائلها وملخّصاتها<br/>ذاكرة منسّقه · سجلات حساباته"]
     OV["GET /api/aeos/memory/overview"] --> V["صورة موحّدة لكل أنظمة الذاكرة<br/>للموظف أو للمنسّق"]
     OR["lifecycle.orphan_report()"] --> V2["تشخيص: بيانات بلا مالك موجود"]

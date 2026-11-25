@@ -25,7 +25,6 @@ class SecurityTests(TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.tmp.cleanup)
         root = Path(cls.tmp.name)
-        ledger._PATH = root / "audit.db"
         engine = use_temp_database(root)
         cls.addClassCleanup(engine.dispose)
         with database.SessionLocal() as db:
@@ -252,11 +251,11 @@ class SecurityTests(TestCase):
         self.assertTrue(ledger.verify())
         with ledger.transaction() as db:
             event, = db.execute("SELECT event FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
-            db.execute("UPDATE audit SET event='edited' WHERE event=?", (event,))
+            db.execute("UPDATE audit SET event='edited' WHERE event=%s", (event,))
         with self.assertRaises(ValueError):
             ledger.verify()
         with ledger.transaction() as db:
-            db.execute("UPDATE audit SET event=? WHERE event='edited'", (event,))
+            db.execute("UPDATE audit SET event=%s WHERE event='edited'", (event,))
 
 
 if __name__ == "__main__":

@@ -190,8 +190,8 @@ def _process_due_posts():
                 from modules.db import connect as _conn
                 with _conn() as con:
                     con.execute(
-                        "UPDATE scheduled_posts SET status='SCHEDULED', run_at=?, "
-                        "error_message=?, updated_at=? WHERE event_id=?",
+                        "UPDATE scheduled_posts SET status='SCHEDULED', run_at=%s, "
+                        "error_message=%s, updated_at=%s WHERE event_id=%s",
                         (next_run, error, _utc_now_iso(), event_id)
                     )
                 logger.warning(f"[Scheduler] {event_id} attempt {new_attempts}/{max_attempts} "

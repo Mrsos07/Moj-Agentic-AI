@@ -2,7 +2,7 @@
 #                  نظام موج — تشغيل الإنتاج بالدوكر
 # ════════════════════════════════════════════════════════════════
 # دليل التثبيت الكامل على الخادم: دليل_الدوكر.txt
-# التجهيز:  cp .env.docker.example .env   ثم املأ القيم (المفاتيح/كلمة مرور Neo4j/النطاق)
+# التجهيز:  cp .env.docker.example .env   ثم املأ القيم (المفاتيح وكلمتي مرور PostgreSQL وNeo4j والنطاق)
 # التشغيل:  docker compose up -d --build
 # الحالة:   docker compose ps        السجلات: docker compose logs -f backend
 # الإيقاف:  docker compose down      (البيانات باقية في الأحجام؛ لا تستخدم -v إلا للمسح الكامل)
@@ -17,7 +17,46 @@ x-logging: &logging
   driver: json-file
   options: { max-size: "20m", max-file: "5" }
 
+x-db-url: &db_url
+  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-moj}:${POSTGRES_PASSWORD:?ضع POSTGRES_PASSWORD في .env}@postgres:5432/${POSTGRES_DB:-moj}
+
 services:
+  postgres:
+    image: postgres:18.7-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-moj}
+      POSTGRES_USER: ${POSTGRES_USER:-moj}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ضع POSTGRES_PASSWORD في .env}
+      # ترتيب النصوص بنقاط الترميز (C.UTF-8) = ترتيب SQLite؛ الافتراضي en_US يغيّر ORDER BY على النصوص
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=builtin --locale=C.UTF-8"
+    # صورة 18: البيانات في /var/lib/postgresql/18/docker — يُركَّب المجلد الأب
+    volumes: [pg_data:/var/lib/postgresql]
+    shm_size: "256mb"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [moj_network]
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  migrate:
+    build: { context: ., dockerfile: Dockerfile.backend }
+    image: moj-backend:${MOJ_TAG:-latest}
+    restart: "no"
+    env_file: [.env]
+    environment:
+      <<: *db_url
+      DB_APPLICATION_NAME: moj-migrate
+    command: ["python", "scripts/db_migrate.py", "upgrade"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [moj_network]
+
 
   caddy:
     image: caddy:2.10-alpine
@@ -64,6 +103,7 @@ services:
     restart: unless-stopped
     env_file: [.env]
     environment:
+      <<: *db_url
       RELOAD: "0"
       BIND_HOST: 0.0.0.0
       # لا يصل للخادم الخلفي إلا nginx (شبكة داخلية + 127.0.0.1)، ويرسل عنوان العميل الحقيقي
@@ -96,6 +136,8 @@ services:
     mem_limit: ${BACKEND_MEMORY_LIMIT:-4g}
     shm_size: "1gb"                                          # Chromium يتعطّل بذاكرة /dev/shm الافتراضية (64MB)
     depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
       agent-sandbox: { condition: service_started }
       neo4j: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -153,6 +195,7 @@ networks:
     driver: bridge
 
 volumes:
+  pg_data:
   caddy_data:
   caddy_config:
   moj_agent_socket:

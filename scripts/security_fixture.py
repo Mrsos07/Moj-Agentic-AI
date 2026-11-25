@@ -1,6 +1,4 @@
 """Authenticated principals and explicit human consent for offline integration fixtures."""
-from pathlib import Path
-import tempfile
 from unittest.mock import patch
 
 from app.aeos.security import gateway, ledger
@@ -10,10 +8,8 @@ from app.db.testing import use_temp_database
 
 
 def setup(user_id, employees=(), *, create_db=True):
-    root = Path(tempfile.mkdtemp(prefix="moj-verify-security-"))
-    ledger._PATH = root / "ledger.db"
     if create_db:
-        use_temp_database(root)
+        use_temp_database()
     with database.SessionLocal() as db:
         if not db.get(User, user_id):
             db.add(User(id=user_id, email=f"owner{user_id}@example.com", password_hash="fixture"))

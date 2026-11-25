@@ -1,18 +1,8 @@
-"""
-testing — قاعدة مؤقتة معزولة لكل اختبار، مبنية بـAlembic (لا ``create_all``)، على SQLite أو PostgreSQL.
-
-* افتراضياً: ملف SQLite في مجلد مؤقت.
-* ``MOJ_TEST_DATABASE_URL=postgresql+psycopg2://user:pass@host:port/any`` ⇒ قاعدة PG جديدة باسم فريد
-  (ترتيب نقاط الترميز C.UTF-8 مثل SQLite) تُحذف عند خروج العملية. يجب ألا يساوي ``DATABASE_URL``.
-
-    from app.db.testing import use_temp_database
-    engine = use_temp_database()      # يربط app.db.database.engine/SessionLocal بها
-"""
+"""Disposable PostgreSQL databases for verification. Legacy imports use explicit SQLite snapshots."""
 from __future__ import annotations
 
 import atexit
 import os
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -74,11 +64,9 @@ def test_database_url() -> Optional[str]:
 
 def temp_database(migrate: bool = True, sqlite_dir: Optional[Path] = None) -> Engine:
     base = test_database_url()
-    if base:
-        eng = DB.build_engine(create_pg_database(base), env={"DB_APPLICATION_NAME": "moj-tests"})
-    else:
-        d = Path(sqlite_dir) if sqlite_dir else Path(tempfile.mkdtemp())
-        eng = DB.build_engine(f"sqlite:///{(d / 'app.db').as_posix()}")
+    if not base:
+        raise RuntimeError("Set MOJ_TEST_DATABASE_URL to a disposable PostgreSQL server")
+    eng = DB.build_engine(create_pg_database(base), env={"DB_APPLICATION_NAME": "moj-tests"})
     if migrate:
         MIG.upgrade(eng, "head")
     return eng

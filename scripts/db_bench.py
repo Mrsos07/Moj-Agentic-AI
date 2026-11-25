@@ -3,7 +3,7 @@ db_bench.py — قياس زمن عمليات قاعدة البيانات الت�
 
 يعمل على قاعدة **مؤقتة** فقط (لا يلمس data/app.db):
 
-    .\\venv\\Scripts\\python.exe scripts\\db_bench.py --out backups\\bench-sqlite.json
+    .\\venv\\Scripts\\python.exe scripts\\db_bench.py --out backups\\bench-postgres.json
     .\\venv\\Scripts\\python.exe scripts\\db_bench.py --url postgresql+psycopg2://moj:…@127.0.0.1:55432/bench --out …
 
 ``--url`` لـPostgreSQL يجب أن يشير لقاعدة فارغة مخصّصة للقياس (تُبنى بـAlembic). ``--schema create_all``
@@ -16,7 +16,6 @@ import json
 import os
 import statistics
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -180,8 +179,12 @@ def main(argv=None) -> int:
     ap.add_argument("--per-thread", type=int, default=25)
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
-    url = args.url or f"sqlite:///{(Path(tempfile.mkdtemp()) / 'bench.db').as_posix()}"
-    eng = setup(url, args.schema)
+    from app.db.testing import test_database_url, create_pg_database
+    if not args.url and not test_database_url():
+        ap.error("Set MOJ_TEST_DATABASE_URL for a disposable PostgreSQL benchmark")
+    url = args.url or create_pg_database(test_database_url(), prefix="moj_bench")
+    from app.db.database import resolve_database_url
+    eng = setup(resolve_database_url({"DATABASE_URL": url}), args.schema)
     uid, cfg, repo, mem = seed()
     results = {"dialect": eng.dialect.name, "schema": args.schema, "per_thread": args.per_thread, "ops": {}}
     for name, fn in ops(uid, cfg, repo, mem).items():

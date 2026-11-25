@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
+from app.db.stores import transaction
 import time
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +22,6 @@ import requests
 # ─── مسارات ────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 COOKIES_DIR = BASE_DIR / "app" / "x" / "cookies"
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "x_timeline.db"
 
 
 # ─── إعدادات X GraphQL API (نفس اللي في twitter_scraper.py الأصلي) ─
@@ -76,52 +74,8 @@ GRAPHQL_FEATURES = {
 #                        قاعدة البيانات
 # ═══════════════════════════════════════════════════════════════════
 
-def _connect_db() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(DB_PATH))
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def init_timeline_db() -> None:
-    """ينشئ جدول التغريدات لو ما موجود."""
-    with _connect_db() as con:
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS x_timeline_tweets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_username TEXT NOT NULL,
-                user_id INTEGER,
-                tweet_id TEXT NOT NULL,
-                full_text TEXT,
-                author_screen_name TEXT,
-                author_name TEXT,
-                created_at TEXT,
-                favorite_count INTEGER DEFAULT 0,
-                retweet_count INTEGER DEFAULT 0,
-                reply_count INTEGER DEFAULT 0,
-                quote_count INTEGER DEFAULT 0,
-                views_count TEXT,
-                tweet_url TEXT,
-                lang TEXT,
-                is_retweet INTEGER DEFAULT 0,
-                is_reply INTEGER DEFAULT 0,
-                is_quote INTEGER DEFAULT 0,
-                media_urls TEXT,
-                raw_data TEXT,
-                fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_username, tweet_id)
-            )
-            """
-        )
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timeline_account "
-            "ON x_timeline_tweets(account_username, created_at DESC)"
-        )
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timeline_user "
-            "ON x_timeline_tweets(user_id, fetched_at DESC)"
-        )
+def _connect_db():
+    return transaction("timeline")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -264,7 +218,6 @@ def fetch_and_save_timeline(
     يسحب Home Timeline للحساب باستخدام كوكيزه ويحفظ التغريدات في DB.
     يرجع dict فيه: success, saved, total_fetched, message
     """
-    init_timeline_db()
 
     auth_token, ct0 = extract_tokens_from_cookies(account_username)
     if not auth_token or not ct0:
@@ -410,9 +363,9 @@ def fetch_and_save_timeline(
 
     # ─── حفظ في قاعدة البيانات ───
     saved_count = 0
-    with _connect_db() as con:
-        for t in tweets_data:
-            try:
+    for t in tweets_data:
+        try:
+            with _connect_db() as con:
                 con.execute(
                     """
                     INSERT INTO x_timeline_tweets (
@@ -421,14 +374,14 @@ def fetch_and_save_timeline(
                         favorite_count, retweet_count, reply_count, quote_count,
                         views_count, tweet_url, lang,
                         is_retweet, is_reply, is_quote, media_urls, raw_data
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT(account_username, tweet_id) DO UPDATE SET
                         favorite_count = excluded.favorite_count,
                         retweet_count  = excluded.retweet_count,
                         reply_count    = excluded.reply_count,
                         quote_count    = excluded.quote_count,
                         views_count    = excluded.views_count,
-                        fetched_at     = CURRENT_TIMESTAMP
+                        fetched_at     = to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
                     """,
                     (
                         account_username, user_id, t["tweet_id"], t["full_text"],
@@ -440,9 +393,9 @@ def fetch_and_save_timeline(
                         json.dumps(t, ensure_ascii=False),
                     ),
                 )
-                saved_count += 1
-            except Exception as e:
-                print(f"[x_timeline] فشل حفظ تغريدة {t.get('tweet_id')}: {e}")
+            saved_count += 1
+        except Exception as exc:
+            print(f"[x_timeline] تعذر حفظ التغريدة ({type(exc).__name__})")
 
     return {
         "success": True,
@@ -465,20 +418,19 @@ def get_saved_tweets(
     """
     يجيب التغريدات المحفوظة لحساب معين، مرتبة حسب created_at (الأحدث أولاً).
     """
-    init_timeline_db()
     query = """
         SELECT tweet_id, full_text, author_screen_name, author_name, created_at,
                favorite_count, retweet_count, reply_count, quote_count, views_count,
                tweet_url, lang, is_retweet, is_reply, is_quote, media_urls, fetched_at
         FROM x_timeline_tweets
-        WHERE account_username = ?
+        WHERE account_username = %s
     """
     params: List[Any] = [account_username]
     if user_id is not None:
-        query += " AND (user_id = ? OR user_id IS NULL)"
+        query += " AND (user_id = %s OR user_id IS NULL)"
         params.append(user_id)
     # ترتيب: created_at ISO لو موجود، وإلا fetched_at
-    query += " ORDER BY COALESCE(created_at, fetched_at) DESC LIMIT ? OFFSET ?"
+    query += " ORDER BY COALESCE(created_at, fetched_at) DESC LIMIT %s OFFSET %s"
     params.extend([limit, offset])
 
     with _connect_db() as con:
@@ -497,11 +449,10 @@ def get_saved_tweets(
 
 def count_saved_tweets(account_username: str, user_id: Optional[int] = None) -> int:
     """يعد التغريدات المحفوظة لحساب."""
-    init_timeline_db()
-    query = "SELECT COUNT(*) AS c FROM x_timeline_tweets WHERE account_username = ?"
+    query = "SELECT COUNT(*) AS c FROM x_timeline_tweets WHERE account_username = %s"
     params: List[Any] = [account_username]
     if user_id is not None:
-        query += " AND (user_id = ? OR user_id IS NULL)"
+        query += " AND (user_id = %s OR user_id IS NULL)"
         params.append(user_id)
     with _connect_db() as con:
         row = con.execute(query, params).fetchone()

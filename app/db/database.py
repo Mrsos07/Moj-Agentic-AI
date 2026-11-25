@@ -1,13 +1,4 @@
-"""
-اتصال قاعدة البيانات — SQLite (الافتراضي، كما كان) أو PostgreSQL عبر ``DATABASE_URL``.
-
-* ``DATABASE_URL`` فارغ ⇒ ``sqlite:///data/app.db`` حرفياً كما قبل.
-* ``DATABASE_URL=postgresql+psycopg2://…`` ⇒ PostgreSQL بمجمّع اتصالات وحدود زمنية، وجلسة بتوقيت UTC
-  (التواريخ تُخزَّن naive UTC؛ قيمة واعية بالمنطقة تُحوَّل حسب منطقة الجلسة — فـUTC شرط صحة).
-* لا رجوع صامت إلى SQLite أبداً: إن ضُبط ``DATABASE_URL`` وتعذّر الاتصال يفشل الإقلاع (كتابات على
-  قاعدتين = بيانات منقسمة).
-* المخطط يُبنى ويُرقّى بـAlembic فقط (``app/db/migrations.py``)، لا بـ ``create_all`` ولا ``ALTER``.
-"""
+"""Application runtime on PostgreSQL. Explicit SQLite engines serve offline legacy imports only."""
 from __future__ import annotations
 
 import logging
@@ -21,12 +12,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 logger = logging.getLogger("app.db")
 
-# SQLite database path
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "app.db"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-SQLITE_URL = f"sqlite:///{DB_PATH}"
-
-
 def _int(env: Mapping[str, str], name: str, default: int) -> int:
     try:
         return int(str(env.get(name, "")).strip() or default)
@@ -38,12 +23,12 @@ def resolve_database_url(env: Optional[Mapping[str, str]] = None) -> str:
     env = os.environ if env is None else env
     raw = (env.get("DATABASE_URL") or "").strip()
     if not raw:
-        return SQLITE_URL
+        return "postgresql+psycopg2:///moj"  # libpq environment or local socket
     url = make_url(raw)
     if url.drivername in ("postgres", "postgresql"):
         url = url.set(drivername="postgresql+psycopg2")
-    if url.get_backend_name() not in ("postgresql", "sqlite"):
-        raise ValueError(f"DATABASE_URL غير مدعوم: {url.get_backend_name()} (المدعوم postgresql أو sqlite)")
+    if url.drivername != "postgresql+psycopg2":
+        raise ValueError(f"DATABASE_URL غير مدعوم: {url.get_backend_name()} (يلزم PostgreSQL)")
     return url.render_as_string(hide_password=False)
 
 
@@ -86,6 +71,9 @@ def is_postgres(bind: Any = None) -> bool:
     return bind.dialect.name == "postgresql"
 
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 SQLALCHEMY_DATABASE_URL = resolve_database_url()
 
 engine = build_engine(SQLALCHEMY_DATABASE_URL)
@@ -104,16 +92,30 @@ def get_db():
         db.close()
 
 
+def legacy_paths():
+    root = Path(__file__).resolve().parents[2]
+    return (root / "data/app.db", root / "app/x/instance/app.db",
+            root / "data/x_timeline.db", root / "data/agent_security.sqlite3")
+
+
+def ensure_legacy_archived():
+    legacy = [p for p in legacy_paths() if p.is_file()]
+    if legacy:
+        raise RuntimeError("Legacy SQLite files present. Complete and verify the maintenance import, "
+                           "then archive the original files before starting PostgreSQL services: "
+                           + ", ".join(str(p) for p in legacy))
+
+
 def init_db():
     """ابنِ المخطط أو رقِّه بـAlembic (الاسم باقٍ للتوافق: main.py وcreate_user.py وinit_database.py).
 
-    SQLite (``DB_AUTO_MIGRATE`` افتراضياً 1): تبنّي القاعدة القديمة إن لزم ثم ``upgrade head``.
     PostgreSQL (افتراضياً 0): تحقق فقط — مخطط ليس على head يوقف الإقلاع برسالة الأمر المطلوب.
     """
     from app.db import migrations
     from app.db import models  # noqa: F401 - تسجيل الجداول في Base.metadata
     import app.trend_detector.models  # noqa: F401
 
+    ensure_legacy_archived()
     info = migrations.ensure_schema(engine)
     logger.info("database %s at %s%s", safe_url(engine), info.get("revision"),
                 " (migrated)" if info.get("changed") else "")

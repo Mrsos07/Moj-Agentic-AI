@@ -10,13 +10,13 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from app.db.database import init_db, DB_PATH
+from app.db.database import init_db, safe_url
 
 def main():
     print("=" * 60)
     print("🗄️  Database Initialization - تهيئة قاعدة البيانات")
     print("=" * 60)
-    print(f"Database path: {DB_PATH}")
+    print(f"PostgreSQL: {safe_url()}")
     print()
     
     try:

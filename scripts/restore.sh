@@ -19,8 +19,22 @@ if command -v cygpath >/dev/null 2>&1; then export MSYS_NO_PATHCONV=1; MOUNT=$(c
 BACKEND=$(docker compose ps -aq backend)
 [ -n "$BACKEND" ] || { echo "❌ حاوية backend غير موجودة — شغّل docker compose up -d مرة أولاً"; exit 1; }
 
+[ -s "$SRC/postgres.dump" ] || { echo "❌ يلزم postgres.dump. استخدم ترحيل SQLite للنسخ القديمة."; exit 1; }
 read -r -p "⚠️ ستُستبدل كل بيانات موج الحالية بهذه النسخة. اكتب نعم للمتابعة: " ok
+ok=${ok%$'\r'}
 [ "$ok" = "نعم" ] || [ "$ok" = "yes" ] || { echo "أُلغيت الاستعادة"; exit 1; }
+
+docker compose up -d postgres >/dev/null
+ready=0
+for _ in $(seq 1 30); do
+  if docker compose exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1; then ready=1; break; fi
+  sleep 2
+done
+[ "$ready" = 1 ] || { echo "❌ PostgreSQL غير جاهز"; exit 1; }
+catalog=$(docker compose exec -T postgres pg_restore --list < "$SRC/postgres.dump")
+for table in 'xsuite scheduled_posts' 'timeline x_timeline_tweets' 'agent_security audit'; do
+  grep -Fq " TABLE $table " <<< "$catalog" || { echo "❌ نسخة PostgreSQL قديمة أو ناقصة؛ راجع إجراء الترحيل"; exit 1; }
+done
 
 echo "▶ إيقاف الخادم الخلفي…"
 docker compose stop backend >/dev/null
@@ -32,28 +46,9 @@ docker run --rm --volumes-from "$BACKEND" -v "$MOUNT":/backup:ro alpine:3.20 sh 
     find "$d" -mindepth 1 -delete
   done
   tar xzf /backup/backend.tgz -C /
-  # النسخة المتّسقة تحلّ محل الملف الذي نُسخ أثناء التشغيل
-  if [ -f /app/data/agent_security.sqlite3.backup ]; then
-    mv /app/data/agent_security.sqlite3.backup /app/data/agent_security.sqlite3
-    rm -f /app/data/agent_security.sqlite3-journal /app/data/agent_security.sqlite3-wal /app/data/agent_security.sqlite3-shm
-  fi
-  if [ -f /app/data/app.db.backup ]; then
-    mv /app/data/app.db.backup /app/data/app.db
-    rm -f /app/data/app.db-wal /app/data/app.db-shm /app/data/app.db-journal
-  fi
   chown -R 1000:1000 /app/data /app/app/x/cookies /app/static/uploads /app/app/identity/static/generated'
 
-if [ -f "$SRC/postgres.dump" ]; then
-  PG=$(docker compose ps -aq postgres 2>/dev/null || true)
-  [ -n "$PG" ] || { echo "❌ النسخة فيها postgres.dump وخدمة postgres غير مفعّلة (COMPOSE_FILE … docker-compose.postgres.yml)"; exit 1; }
-  echo "▶ استعادة PostgreSQL (pg_restore --clean، معاملة واحدة)…"
-  docker compose start postgres >/dev/null
-  for _ in $(seq 1 30); do
-    docker compose exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1 && break
-    sleep 2
-  done
-  docker compose exec -T postgres sh -c     'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --single-transaction'     < "$SRC/postgres.dump"
-fi
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --single-transaction'     < "$SRC/postgres.dump"
 
 if [ -f "$SRC/neo4j.tgz" ]; then
   NEO4J=$(docker compose ps -aq neo4j)
@@ -67,9 +62,9 @@ fi
 echo "▶ تشغيل الخادم الخلفي…"
 docker compose run --rm --no-deps -T backend python -c "
 from app.aeos.security import ledger
-if ledger._PATH.exists():
-    with ledger.transaction() as db:
-        db.execute('DELETE FROM grants')
-        ledger.audit(db, 'restore', None, 'approvals', 'invalidated')"
+with ledger.transaction() as db:
+    ledger.verify_chain(db)
+    db.execute('DELETE FROM grants')
+    ledger.audit(db, 'restore', None, 'approvals', 'invalidated')"
 docker compose start backend >/dev/null
 echo "✅ اكتملت الاستعادة. تابع: docker compose ps   و   docker compose logs -f backend"

@@ -2,6 +2,8 @@
 import base64
 import json
 from pathlib import Path
+import os
+import secrets
 import subprocess
 import uuid
 
@@ -46,6 +48,7 @@ print(s.makefile("r").readline())
 
 
 def run():
+    os.environ.setdefault("POSTGRES_PASSWORD", secrets.token_hex(24))
     frame = {"method": "tools/call", "params": {"name": "report", "arguments": {}},
              "entry": "fixture.py", "files": {"fixture.py": base64.b64encode(CHILD.encode()).decode()},
              "timeout": 20}
